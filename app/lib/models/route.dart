@@ -11,6 +11,11 @@ class Maneuver {
   final int endShapeIndex;
   final double lengthKm;
 
+  /// Dopravní značení výjezdu (Valhalla `sign`): číslo exitu, silnice, směr.
+  final String? exitNumber;
+  final List<String> exitBranch;
+  final List<String> exitToward;
+
   Maneuver({
     required this.type,
     required this.instruction,
@@ -21,7 +26,13 @@ class Maneuver {
     required this.beginShapeIndex,
     required this.endShapeIndex,
     required this.lengthKm,
+    this.exitNumber,
+    this.exitBranch = const [],
+    this.exitToward = const [],
   });
+
+  static List<String> _signTexts(Map? sign, String key) =>
+      ((sign?[key] as List?) ?? const []).map((e) => '${(e as Map)['text']}').toList();
 
   factory Maneuver.fromJson(Map<String, dynamic> j) => Maneuver(
         type: (j['type'] as num).toInt(),
@@ -35,6 +46,9 @@ class Maneuver {
         beginShapeIndex: (j['begin_shape_index'] as num).toInt(),
         endShapeIndex: (j['end_shape_index'] as num).toInt(),
         lengthKm: (j['length'] as num?)?.toDouble() ?? 0,
+        exitNumber: _signTexts(j['sign'] as Map?, 'exit_number_elements').firstOrNull,
+        exitBranch: _signTexts(j['sign'] as Map?, 'exit_branch_elements'),
+        exitToward: _signTexts(j['sign'] as Map?, 'exit_toward_elements'),
       );
 }
 

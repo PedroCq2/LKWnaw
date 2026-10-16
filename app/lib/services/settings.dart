@@ -1,6 +1,7 @@
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/truck_profile.dart';
+import 'sun.dart';
 
 const defaultValhallaUrl = 'https://valhalla1.openstreetmap.de';
 
@@ -23,11 +24,15 @@ class AppSettings {
     this.delivery = false,
   });
 
-  bool get night {
+  /// Noční vzhled: ručně, nebo automaticky podle západu/východu Slunce v místě.
+  bool nightAt(double? lat, double? lon) {
     if (mapStyle == 1) return false;
     if (mapStyle == 2) return true;
-    final h = DateTime.now().hour;
-    return h >= 20 || h < 6;
+    if (lat == null || lon == null) {
+      final h = DateTime.now().hour;
+      return h >= 19 || h < 7;
+    }
+    return isNight(lat, lon, DateTime.now());
   }
 
   static Future<AppSettings> load() async {

@@ -11,8 +11,9 @@ import '../models/truck_profile.dart';
 
 const _overpassMirrors = [
   'https://overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
   'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
 ];
 
 /// Stáhne z OSM kamionová omezení (maxheight/maxweight/…) a radary podél trasy.
@@ -103,7 +104,7 @@ Future<List<dynamic>?> overpassQuery(String q) async {
     try {
       final res = await http
           .post(Uri.parse(url), headers: uaHeaders(), body: {'data': q})
-          .timeout(const Duration(seconds: 45));
+          .timeout(const Duration(seconds: 25));
       if (res.statusCode == 200) {
         return (jsonDecode(utf8.decode(res.bodyBytes))['elements'] as List?) ?? const [];
       }

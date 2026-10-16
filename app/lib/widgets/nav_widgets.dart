@@ -52,14 +52,23 @@ class ManeuverBanner extends StatelessWidget {
   final Maneuver? maneuver;
   final double distance;
   final Maneuver? then;
-  const ManeuverBanner({super.key, this.maneuver, required this.distance, this.then});
+
+  /// Aktuální silnice a staničení (zobrazí se v liště tabule).
+  final String? road;
+  final double? roadKm;
+  const ManeuverBanner(
+      {super.key, this.maneuver, required this.distance, this.then, this.road, this.roadKm});
 
   @override
   Widget build(BuildContext context) {
     final m = maneuver;
+    // U výjezdu z dálnice ukaž směr ze značení (jako zelená tabule), jinak ulici.
+    final toward = m?.exitToward ?? const [];
     final title = m == null
         ? 'Cíl'
-        : (m.streetNames.isNotEmpty ? m.streetNames.take(2).join(' / ') : m.instruction);
+        : toward.isNotEmpty
+            ? toward.take(2).join(', ')
+            : (m.streetNames.isNotEmpty ? m.streetNames.take(2).join(' / ') : m.instruction);
     return Container(
       margin: const EdgeInsets.fromLTRB(10, 8, 10, 0),
       decoration: BoxDecoration(
@@ -82,9 +91,13 @@ class ManeuverBanner extends StatelessWidget {
             const SizedBox(width: 14),
             Expanded(
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(formatDistance(distance),
-                    style: const TextStyle(
-                        color: Lkw.amber, fontSize: 36, fontWeight: FontWeight.w900, height: 1.05)),
+                Row(children: [
+                  Text(formatDistance(distance),
+                      style: const TextStyle(
+                          color: Lkw.amber, fontSize: 36, fontWeight: FontWeight.w900, height: 1.05)),
+                  const Spacer(),
+                  if (m?.exitNumber != null) _exitTag(m!.exitNumber!),
+                ]),
                 Text(title,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
@@ -94,6 +107,24 @@ class ManeuverBanner extends StatelessWidget {
             ),
           ]),
         ),
+        if (road != null || (m?.exitBranch.isNotEmpty ?? false))
+          Container(
+            color: Lkw.graphite,
+            padding: const EdgeInsets.fromLTRB(14, 6, 16, 6),
+            child: Row(children: [
+              if (road != null) ...[
+                RoadShield(name: road!),
+                if (roadKm != null) ...[
+                  const SizedBox(width: 8),
+                  Text('${roadKm!.toStringAsFixed(1).replaceAll('.', ',')} km',
+                      style: const TextStyle(color: Lkw.text, fontSize: 17, fontWeight: FontWeight.w800)),
+                ],
+              ],
+              const Spacer(),
+              for (final b in (m?.exitBranch ?? const <String>[]).take(2))
+                Padding(padding: const EdgeInsets.only(left: 6), child: RoadShield(name: b, small: true)),
+            ]),
+          ),
         if (then != null)
           Container(
             color: Lkw.graphite,
@@ -117,15 +148,29 @@ class ManeuverBanner extends StatelessWidget {
   }
 }
 
-/// Štítek aktuální silnice: „[D1] 114,0 km“ – staničení jako žluté tabulky u dálnice.
-class RoadBadge extends StatelessWidget {
+Widget _exitTag(String n) => Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: const Color(0xFF0B6B3A),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: Colors.white, width: 2),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        const Icon(Icons.exit_to_app, color: Colors.white, size: 16),
+        const SizedBox(width: 4),
+        Text(n, style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w900)),
+      ]),
+    );
+
+/// Označení silnice v barvách českého značení (D červeně, E zeleně, ostatní modře).
+class RoadShield extends StatelessWidget {
   final String name;
-  final double? km;
-  const RoadBadge({super.key, required this.name, this.km});
+  final bool small;
+  const RoadShield({super.key, required this.name, this.small = false});
 
   static (Color, Color) _colors(String n) {
-    if (RegExp(r'^D\s?\d').hasMatch(n)) return (const Color(0xFFC62828), Colors.white); // dálnice
-    if (RegExp(r'^E\s?\d').hasMatch(n)) return (const Color(0xFF1B7F3B), Colors.white); // evropská
+    if (RegExp(r'^D\s?\d').hasMatch(n)) return (const Color(0xFFC62828), Colors.white);
+    if (RegExp(r'^E\s?\d').hasMatch(n)) return (const Color(0xFF1B7F3B), Colors.white);
     if (RegExp(r'^(I|II|III|R|S|A|B)?\s?/?\d+$').hasMatch(n)) return (const Color(0xFF1565C0), Colors.white);
     return (Lkw.panelHi, Lkw.text);
   }
@@ -134,33 +179,17 @@ class RoadBadge extends StatelessWidget {
   Widget build(BuildContext context) {
     final (bg, fg) = _colors(name);
     return Container(
-      margin: const EdgeInsets.fromLTRB(10, 8, 10, 0),
-      padding: const EdgeInsets.fromLTRB(6, 6, 14, 6),
+      constraints: const BoxConstraints(maxWidth: 190),
+      padding: EdgeInsets.symmetric(horizontal: small ? 6 : 9, vertical: 2),
       decoration: BoxDecoration(
-        color: Lkw.panel.withValues(alpha: 0.95),
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: const [BoxShadow(blurRadius: 6, color: Colors.black38)],
+        color: bg,
+        borderRadius: BorderRadius.circular(5),
+        border: Border.all(color: Colors.white, width: small ? 1.5 : 2),
       ),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Container(
-          constraints: const BoxConstraints(maxWidth: 200),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-          decoration: BoxDecoration(
-            color: bg,
-            borderRadius: BorderRadius.circular(6),
-            border: Border.all(color: Colors.white, width: 2),
-          ),
-          child: Text(name,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(color: fg, fontSize: 17, fontWeight: FontWeight.w900)),
-        ),
-        if (km != null) ...[
-          const SizedBox(width: 10),
-          Text('${km!.toStringAsFixed(1).replaceAll('.', ',')} km',
-              style: const TextStyle(color: Lkw.text, fontSize: 18, fontWeight: FontWeight.w800)),
-        ],
-      ]),
+      child: Text(name,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(color: fg, fontSize: small ? 13 : 16, fontWeight: FontWeight.w900)),
     );
   }
 }

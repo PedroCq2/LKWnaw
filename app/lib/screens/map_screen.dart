@@ -46,6 +46,11 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   double _heading = 0;
   double _speedKmh = 0;
   bool _follow = true;
+  // Volná jízda bez trasy: po rozjetí mapa ve směru jízdy (jako při navigaci).
+  bool _freeDrive = false;
+  bool get _driveView => _navigating || _freeDrive;
+  bool get _night => _settings.nightAt(_pos?.latitude, _pos?.longitude);
+  Timer? _nightTimer;
 
   // Plynulá animace polohy/kamery mezi fixy (1 Hz).
   late final AnimationController _anim = AnimationController(
@@ -89,7 +94,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   AppSettings get _settings => widget.settings;
 
   Future<void> _loadStyle() async {
-    final night = _settings.night;
+    final night = _night;
     if (_styleNight == night && _styleJson != null) return;
     _styleNight = night;
     final json = await lkwStyle(night: night);
@@ -100,6 +105,10 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   void initState() {
     super.initState();
     _loadStyle();
+    // Den/noc podle Slunce – kontrola jednou za minutu.
+    _nightTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (mounted && _styleNight != _night) setState(() {});
+    });
     _initTts();
     _initLocation();
   }
@@ -109,6 +118,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     _posSub?.cancel();
     _sim?.stop();
     _searchDebounce?.cancel();
+    _nightTimer?.cancel();
     _anim.dispose();
     WakelockPlus.disable();
     super.dispose();
@@ -184,6 +194,10 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     if (speed > 3 && heading != null) _heading = heading;
     _pos = pos;
     _speedKmh = speed;
+    if (!_freeDrive && speed > 10 && _follow) {
+      _freeDrive = true;
+      _applyInsets();
+    }
 
     if (_engine != null) {
       final nav = _engine!.update(pos);
@@ -245,7 +259,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       }
     }
     var zoom = _toZoom;
-    if (_navigating) {
+    if (_driveView) {
       // Hystereze, aby zoom neskákal kolem hranic rychlosti.
       final keep = _toZoom < 15 ? 16.5 : _toZoom;
       zoom = _speedKmh > 85 ? 16.0 : (_speedKmh > 45 ? 16.8 : (_speedKmh < 35 ? 17.6 : keep));
@@ -297,7 +311,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     final map = _map;
     final pos = _dispPos;
     if (map == null || pos == null || _camBusy) return;
-    final cam = _navigating
+    final cam = _driveView
         ? ml.CameraPosition(
             target: _ml(pos),
             zoom: _dispZoom,
@@ -310,7 +324,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   }
 
   /// Horní odsazení, aby byl kamion ve spodní části obrazovky.
-  double get _topInset => _navigating && _screen.height > 0 ? _screen.height * 0.42 : 0;
+  double get _topInset => _driveView && _screen.height > 0 ? _screen.height * 0.42 : 0;
 
   Future<void> _applyInsets() async {
     try {
@@ -994,7 +1008,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   Widget build(BuildContext context) {
     final route = _route;
     final nav = _nav;
-    if (_styleNight != _settings.night) _loadStyle();
+    if (_styleNight != _night) _loadStyle();
     final limitRaw = nav != null ? route?.speedLimitAt(nav.segmentIndex) : null;
     final limit = limitRaw == null ? null : math.min(limitRaw, _settings.profile.maxSpeed);
     final bottomPad = MediaQuery.of(context).padding.bottom;
@@ -1053,8 +1067,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                       child: Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          if (_navigating && route != null && nav != null) _roadBadge(route, nav),
-                          const Spacer(),
+                                  const Spacer(),
                           if (_navigating) _warningsColumn(route, nav),
                         ],
                       ),
@@ -1131,15 +1144,13 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
           route.cumulative[route.maneuvers[i + 1].beginShapeIndex] - route.cumulative[m.beginShapeIndex];
       if (gap < 500) then = route.maneuvers[i + 1];
     }
-    return ManeuverBanner(maneuver: m, distance: nav?.distanceToNextManeuver ?? 0, then: then);
-  }
-
-  /// Číslo/název silnice nahoře + staničení dálnice (km), pokud je známé.
-  Widget _roadBadge(TruckRoute route, NavState nav) {
-    final name = route.roadNameAt(nav.segmentIndex);
-    if (name == null || name.isEmpty) return const SizedBox.shrink();
-    return Flexible(
-      child: RoadBadge(name: name, km: route.kilometerAt(nav.traveled, name)),
+    final road = nav == null ? null : route.roadNameAt(nav.segmentIndex);
+    return ManeuverBanner(
+      maneuver: m,
+      distance: nav?.distanceToNextManeuver ?? 0,
+      then: then,
+      road: road == null || road.isEmpty ? null : road,
+      roadKm: road == null || nav == null ? null : route.kilometerAt(nav.traveled, road),
     );
   }
 

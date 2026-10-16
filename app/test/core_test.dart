@@ -5,6 +5,8 @@ import 'package:truck_nav/models/route.dart';
 import 'package:truck_nav/models/truck_profile.dart';
 import 'package:truck_nav/navigation/nav_engine.dart';
 import 'package:truck_nav/services/restrictions.dart';
+import 'package:truck_nav/services/geocoding.dart';
+import 'package:truck_nav/services/sun.dart';
 import 'package:truck_nav/services/valhalla.dart';
 
 void main() {
@@ -92,5 +94,24 @@ void main() {
     // klesající staničení (jízda opačným směrem)
     r.kmPoints = [(0.0, 113.4, 'D1'), (1430.0, 112.0, 'D1')];
     expect(r.kilometerAt(1000, 'D1'), closeTo(112.42, 0.01));
+  });
+
+  test('search ranks the brand before other depots', () {
+    final r = rankPlaces([
+      Place('COOP družstvo HB Distribuční centrum', const LatLng(49, 15), kind: 'Průmyslový areál'),
+      Place('Kaufland', const LatLng(49.58, 17.22), kind: 'Supermarket', address: 'Olomouc'),
+      Place('Kaufland - Centrální sklad', const LatLng(49.56, 17.31), kind: 'Průmyslový areál'),
+      Place('Distribuční centrum RAVAK', const LatLng(49.6, 17.9), kind: 'Průmyslový areál'),
+    ], 'kaufland DC');
+    expect(r.first.name, 'Kaufland - Centrální sklad');
+    expect(r.map((p) => p.name), isNot(contains('Distribuční centrum RAVAK')));
+  });
+
+  test('sun elevation day/night in Prague', () {
+    expect(isNight(50.08, 14.42, DateTime.utc(2026, 6, 21, 10)), isFalse);
+    expect(isNight(50.08, 14.42, DateTime.utc(2026, 10, 16, 22)), isTrue);
+    // 16. 10. zapadá v Praze ~16:15 UTC
+    expect(isNight(50.08, 14.42, DateTime.utc(2026, 10, 16, 15, 30)), isFalse);
+    expect(isNight(50.08, 14.42, DateTime.utc(2026, 10, 16, 16, 45)), isTrue);
   });
 }
