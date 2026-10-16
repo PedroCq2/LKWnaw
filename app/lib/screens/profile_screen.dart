@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/truck_profile.dart';
 import '../services/settings.dart';
+import '../services/voice.dart';
 
 class ProfileScreen extends StatefulWidget {
   final AppSettings settings;
@@ -16,6 +17,32 @@ class _ProfileScreenState extends State<ProfileScreen> {
   late TruckProfile p = TruckProfile.fromJson(widget.settings.profile.toJson());
   late final _url = TextEditingController(text: widget.settings.valhallaUrl);
   late bool _voice = widget.settings.voice;
+  late String? _voiceName = widget.settings.voiceName;
+  late double _rate = widget.settings.speechRate;
+  List<Map<String, String>> _voices = [];
+
+  @override
+  void initState() {
+    super.initState();
+    Voice.instance.czechVoices().then((v) {
+      if (mounted) setState(() => _voices = v);
+    });
+  }
+
+  /// Čitelný název hlasu: „cs-cz-x-jfs-local“ → „Hlas 1 (bez internetu)“.
+  String _voiceLabel(Map<String, String> v, int i) {
+    final net = v['network_required'] == 'true' || (v['name'] ?? '').contains('network');
+    return 'Hlas ${i + 1}${net ? ' (online)' : ' (bez internetu)'}';
+  }
+
+  Future<void> _testVoice() async {
+    widget.settings
+      ..voiceName = _voiceName
+      ..speechRate = _rate;
+    await Voice.instance.applySettings();
+    await Voice.instance.say('Za 800 metrů sjeďte na výjezdu 230 na D46 směr Olomouc. E 442.', force: true);
+  }
+
   late bool _simulate = widget.settings.simulate;
   late int _mapStyle = widget.settings.mapStyle;
   late bool _delivery = widget.settings.delivery;
@@ -51,10 +78,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
       ..profile = p
       ..valhallaUrl = _url.text.trim().isEmpty ? defaultValhallaUrl : _url.text.trim()
       ..voice = _voice
+      ..voiceName = _voiceName
+      ..speechRate = _rate
       ..simulate = _simulate
       ..mapStyle = _mapStyle
       ..delivery = _delivery;
     await widget.settings.save();
+    await Voice.instance.applySettings();
     if (mounted) Navigator.pop(context, true);
   }
 
@@ -158,6 +188,42 @@ class _ProfileScreenState extends State<ProfileScreen> {
               value: _voice,
               onChanged: (v) => setState(() => _voice = v),
             ),
+            if (_voice) ...[
+              ListTile(
+                title: const Text('Hlas'),
+                subtitle: _voices.isEmpty
+                    ? const Text(
+                        'V telefonu není český hlas – nainstalujte ho v Nastavení → Převod textu na řeč.',
+                      )
+                    : null,
+                trailing: _voices.isEmpty
+                    ? null
+                    : DropdownButton<String?>(
+                        value: _voices.any((v) => v['name'] == _voiceName) ? _voiceName : null,
+                        items: [
+                          const DropdownMenuItem(value: null, child: Text('Automaticky')),
+                          for (final (i, v) in _voices.indexed)
+                            DropdownMenuItem(value: v['name'], child: Text(_voiceLabel(v, i))),
+                        ],
+                        onChanged: (v) => setState(() => _voiceName = v),
+                      ),
+              ),
+              ListTile(
+                title: Text('Rychlost řeči: ${(_rate * 200).round()} %'),
+                subtitle: Slider(
+                  value: _rate,
+                  min: 0.3,
+                  max: 0.8,
+                  divisions: 10,
+                  onChanged: (v) => setState(() => _rate = v),
+                ),
+                trailing: IconButton(
+                  icon: const Icon(Icons.play_circle, size: 36),
+                  tooltip: 'Vyzkoušet hlas',
+                  onPressed: _testVoice,
+                ),
+              ),
+            ],
             SwitchListTile(
               title: const Text('Simulace jízdy (demo)'),
               subtitle: const Text('Po stisku Start jede kamion po trase sám – pro vyzkoušení'),

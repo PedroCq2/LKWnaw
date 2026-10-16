@@ -5,7 +5,6 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_tts/flutter_tts.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:maplibre_gl/maplibre_gl.dart' as ml;
@@ -18,15 +17,16 @@ import '../navigation/simulator.dart';
 import '../services/geocoding.dart';
 import '../services/restrictions.dart';
 import '../services/lanes.dart';
-import '../services/live_data.dart';
 import '../services/map_style.dart';
 import '../services/offline_maps.dart';
+import '../services/plans.dart';
 import '../services/saved_places.dart';
 import '../services/settings.dart';
-import '../services/speech.dart';
+import '../services/voice.dart';
 import '../services/valhalla.dart';
 import '../theme.dart';
 import '../widgets/nav_widgets.dart';
+import 'planner_screen.dart';
 import 'profile_screen.dart';
 
 ml.LatLng _ml(LatLng p) => ml.LatLng(p.latitude, p.longitude);
@@ -43,7 +43,6 @@ class MapScreen extends StatefulWidget {
 class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMixin {
   ml.MapLibreMapController? _map;
   bool _styleReady = false;
-  final _tts = FlutterTts();
   final _search = TextEditingController();
   StreamSubscription<Position>? _posSub;
   Size _screen = Size.zero;
@@ -102,6 +101,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   bool _pickGate = false; // čeká se na dlouhé podržení u vjezdu pro kamiony
   bool _noteSpoken = false;
   final List<(LatLng, String)> _stops = []; // zastávky po cestě (průjezdní body)
+  LatLng? _planStart; // začátek naplánované trasy (null = moje poloha)
+  String? _planStartName;
   double? _dlProgress; // stahování mapy trasy (0–1), null = nestahuje se
   List<Place> _parking = [];
   PoiKind _poiKind = PoiKind.parking;
@@ -145,20 +146,9 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
 
   // ------------------------------------------------------------ hlas
 
-  Future<void> _initTts() async {
-    try {
-      await _tts.setLanguage('cs-CZ');
-      await _tts.setSpeechRate(kIsWeb ? 1.0 : 0.5);
-      await _tts.awaitSpeakCompletion(false);
-    } catch (_) {}
-  }
+  Future<void> _initTts() => Voice.instance.init(_settings);
 
-  Future<void> _say(String text) async {
-    if (!_settings.voice || text.isEmpty) return;
-    try {
-      await _tts.speak(forSpeech(text));
-    } catch (_) {}
-  }
+  Future<void> _say(String text) => Voice.instance.say(text);
 
   // ------------------------------------------------------------ poloha
 
@@ -695,11 +685,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     for (final w in _route?.warnings ?? const <RouteWarning>[]) {
       final d = w.atMeters - nav.traveled;
       if (d < 0) continue;
-      if (d > 5000) break;
+      if (d > 1200) break;
       final speak = switch (w.type) {
-        WarningType.wind || WarningType.ice => d <= 5000,
-        WarningType.closure => w.violates && d <= 1000,
-        WarningType.roadworks => d <= 1000,
         WarningType.speedCamera => d <= 500,
         WarningType.noOvertakingHgv => d <= 300,
         _ => w.violates && d <= 1000,
@@ -708,14 +695,6 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         final dist = _spokenDistance(d).replaceAll(',', '');
         if (w.type == WarningType.speedCamera) {
           _say('$dist radar.');
-        } else if (w.type == WarningType.closure) {
-          _say('Pozor! $dist uzavírka.');
-        } else if (w.type == WarningType.roadworks) {
-          _say('$dist práce na silnici.');
-        } else if (w.type == WarningType.wind) {
-          _say('Pozor, silný vítr, nárazy až ${w.value!.round()} kilometrů za hodinu.');
-        } else if (w.type == WarningType.ice) {
-          _say('Pozor, nebezpečí náledí.');
         } else if (w.type == WarningType.noOvertakingHgv) {
           _say(
             'Zákaz předjíždění nákladních vozidel${w.note != null ? ', ${w.note!.replaceAll('–', ' až ').replaceAll(' h', ' hodin')}' : ''}.',
@@ -743,7 +722,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   // ------------------------------------------------------------ trasa
 
   Future<void> _computeRoute({bool reroute = false}) async {
-    final from = _pos;
+    // Naplánovaná trasa může začínat jinde než stojím (dokud se nevyjede).
+    final from = (!_navigating ? _planStart : null) ?? _pos;
     final to = _dest;
     if (to == null) return;
     if (from == null) {
@@ -753,7 +733,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     setState(() => _routing = true);
     try {
       final client = ValhallaClient(_settings.valhallaUrl);
-      final heading = reroute || _speedKmh > 5 ? _heading : null;
+      final heading = (reroute || _speedKmh > 5) && from == _pos ? _heading : null;
       // Při navigaci jen jedna trasa (rychlý přepočet), jinak varianty na výběr.
       final opts = reroute || _navigating
           ? [
@@ -829,9 +809,6 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     } catch (_) {}
     try {
       final w = await loadRouteWarnings(r, _settings.profile, delivery: _settings.delivery);
-      // Živá data (Německo: uzavírky/práce, počasí) – přidat k výstrahám z OSM.
-      w.addAll(await loadLiveWarnings(r));
-      w.sort((a, b) => a.atMeters.compareTo(b.atMeters));
       if (!mounted || _route != r) return;
       setState(() => r.warnings = w);
       await _syncLayers();
@@ -839,17 +816,6 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       if (r.interchangeLinks.isNotEmpty) {
         await enrichManeuvers(r);
         if (mounted) setState(() {});
-      }
-      // Uzavírka přímo na trase (Autobahn API) → objet ji a přepočítat.
-      final closures = w.where((x) => x.type == WarningType.closure && x.violates).toList();
-      if (closures.isNotEmpty &&
-          _excluded.length < 10 &&
-          !closures.every((c) => _excluded.contains(c.point))) {
-        _excluded.addAll(closures.map((c) => c.point));
-        _toast('Na trase je uzavírka – hledám objížďku.');
-        _say('Na trase je uzavírka. Hledám objížďku.');
-        await _computeRoute(reroute: _navigating);
-        return;
       }
       // Zásobování: trasa nesmí přes most s nižší nosností → vyhnout se mu a přepočítat.
       final bridges = w.where((x) => x.onBridge && x.violates).toList();
@@ -966,6 +932,12 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   }
 
   Future<void> _startNavigation() async {
+    // Plán začínal jinde: jedeme odsud → přepočítat z aktuální polohy (zastávky zůstanou).
+    if (_planStart != null) {
+      final far = _pos != null && const Distance()(_pos!, _planStart!) > 300;
+      setState(() => _planStart = null);
+      if (far) await _computeRoute();
+    }
     final r = _route;
     if (r == null) return;
     _saveTrip();
@@ -1002,6 +974,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     setState(() {
       _navigating = false;
       _stops.clear();
+      _planStart = null;
       _route = null;
       _options = [];
       _engine = null;
@@ -1016,10 +989,11 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     _applyCamera();
   }
 
-  void _setDestination(LatLng p, String name, {SavedPlace? saved}) {
+  void _setDestination(LatLng p, String name, {SavedPlace? saved, bool compute = true}) {
     FocusScope.of(context).unfocus();
     _excluded.clear();
     _stops.clear();
+    _planStart = null;
     final sp = saved ?? _saved.near(p);
     setState(() {
       _destSaved = sp;
@@ -1033,7 +1007,34 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       _noteSpoken = false;
     });
     _syncLayers();
-    _computeRoute(reroute: _navigating);
+    if (compute) _computeRoute(reroute: _navigating);
+  }
+
+  /// Otevře plánování trasy (začátek, zastávky, cíl) a trasu podle plánu spočítá.
+  Future<void> _openPlanner() async {
+    final current = _dest == null
+        ? null
+        : TripPlan(
+            name: _destName ?? 'Cíl',
+            start: _planStart == null ? null : PlanPoint(_planStartName ?? 'Začátek', _planStart!),
+            stops: [for (final st in _stops) PlanPoint(st.$2, st.$1)],
+            dest: PlanPoint(_destName ?? 'Cíl', _dest!),
+          );
+    final plan = await Navigator.push<TripPlan>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => PlannerScreen(saved: _saved, myPosition: _pos, initial: current),
+      ),
+    );
+    if (plan == null || !mounted) return;
+    _setDestination(plan.dest.point, plan.dest.name, compute: false);
+    setState(() {
+      _stops.addAll([for (final s in plan.stops) (s.point, s.name)]);
+      _planStart = plan.start?.point;
+      _planStartName = plan.start?.name;
+    });
+    await _syncLayers();
+    await _computeRoute();
   }
 
   /// Místo z hledání POI: s trasou nabídni „Přidat jako zastávku“ (cíl zůstane) nebo „Nový cíl“.
@@ -1515,6 +1516,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                 child: Column(
                   children: [
                     if (!_navigating)
+                      RoundButton(icon: Icons.route, tooltip: 'Plán trasy', onPressed: _openPlanner),
+                    if (!_navigating)
                       RoundButton(
                         icon: Icons.local_shipping,
                         tooltip: 'Profil vozidla',
@@ -1530,7 +1533,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                       tooltip: 'Hlas',
                       onPressed: () {
                         setState(() => _settings.voice = !_settings.voice);
-                        if (!_settings.voice) _tts.stop();
+                        if (!_settings.voice) Voice.instance.stop();
                         _settings.save();
                       },
                     ),
@@ -1847,6 +1850,13 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                                       fontWeight: FontWeight.w700,
                                     ),
                                   ),
+                                  if (_planStart != null)
+                                    Text(
+                                      'Začátek: ${_planStartName ?? ''}',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(color: Lkw.muted, fontSize: 13),
+                                    ),
                                   if (_destSaved?.note != null)
                                     Text(
                                       _destSaved!.note!,

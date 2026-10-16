@@ -34,6 +34,12 @@ Flutter aplikace pro navigaci nákladních vozidel nad OpenStreetMap a routing e
 - **Mapa offline** – stažení mapy podél trasy (MapLibre offline regiony, zoom 8–14).
 - **Klidné přepočítávání** – krátký výkyv GPS nespouští novou trasu; bez internetu vede dál
   po uložené trase a ukazuje stav.
+- **Plán trasy** – začátek (moje poloha / jiné místo), více zastávek (přeřazení tažením), cíl;
+  uložené plány. Zastávku lze přidat i za jízdy z hledání parkovišť/pump.
+- **Obnovení navigace** po restartu aplikace.
+- **Hlas** – nejlepší český hlas v telefonu (volba + rychlost v Nastavení), navigační zvuk
+  ztlumí hudbu, hlášky se nepřekrývají; čísla silnic česky („dé čtyřicet šest“, „E čtyři sta
+  dvacet dva“).
 - **Simulace jízdy** (Nastavení) – vyzkoušení navigace bez jízdy.
 
 ## Instalace APK

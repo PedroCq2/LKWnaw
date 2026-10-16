@@ -53,8 +53,16 @@ String czechNumber(int n) {
 }
 
 final _roadRef = RegExp(r'\b([DER])\s?(\d{1,3})\b');
-const _letters = {'D': 'dé', 'E': 'é', 'R': 'er'};
+// Písmeno se čte jako písmeno („E“ = é, ne „dlouhé é“), číslo jako celé číslo.
+const _letters = {'D': 'dé', 'E': 'E', 'R': 'er'};
+final _iRoad = RegExp(r'\b(I{1,3})/(\d{1,3})\b');
 
-/// Připraví text pro hlas: „D46“ → „dé čtyřicet šest“, „E 50“ → „é padesát“.
-String forSpeech(String text) =>
-    text.replaceAllMapped(_roadRef, (m) => '${_letters[m.group(1)]} ${czechNumber(int.parse(m.group(2)!))}');
+/// Připraví text pro hlas: „D46“ → „dé čtyřicet šest“, „E422“ → „E čtyři sta dvacet dva“,
+/// „I/35“ → „jedna třicet pět“.
+String forSpeech(String text) => text
+    .replaceAllMapped(
+      _iRoad,
+      (m) => '${czechNumber(m.group(1)!.length)} ${czechNumber(int.parse(m.group(2)!))}',
+    )
+    .replaceAllMapped(_roadRef, (m) => '${_letters[m.group(1)]} ${czechNumber(int.parse(m.group(2)!))}')
+    .replaceAll(' km/h', ' kilometrů za hodinu');

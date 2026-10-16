@@ -13,6 +13,8 @@ class AppSettings {
   int mapStyle; // 0 = auto, 1 = den, 2 = noc
   bool view3d;
   bool delivery; // zásobování
+  String? voiceName; // vybraný český hlas (null = nejlepší dostupný)
+  double speechRate; // 0,3–0,8
 
   AppSettings({
     required this.profile,
@@ -22,6 +24,8 @@ class AppSettings {
     this.mapStyle = 0,
     this.view3d = true,
     this.delivery = false,
+    this.voiceName,
+    this.speechRate = 0.5,
   });
 
   /// Noční vzhled: ručně, nebo automaticky podle západu/východu Slunce v místě.
@@ -52,6 +56,8 @@ class AppSettings {
       mapStyle: p.getInt('mapStyle') ?? 0,
       view3d: p.getBool('view3d') ?? true,
       delivery: p.getBool('delivery') ?? false,
+      voiceName: p.getString('voiceName'),
+      speechRate: p.getDouble('speechRate') ?? 0.5,
     );
   }
 
@@ -64,5 +70,11 @@ class AppSettings {
     await p.setInt('mapStyle', mapStyle);
     await p.setBool('view3d', view3d);
     await p.setBool('delivery', delivery);
+    if (voiceName == null) {
+      await p.remove('voiceName');
+    } else {
+      await p.setString('voiceName', voiceName!);
+    }
+    await p.setDouble('speechRate', speechRate);
   }
 }

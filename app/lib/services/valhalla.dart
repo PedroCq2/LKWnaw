@@ -172,72 +172,76 @@ class ValhallaClient {
 
   /// Doplní k trase rychlostní limity a názvy silnic (Valhalla trace_attributes).
   Future<void> loadEdgeAttributes(TruckRoute route) async {
-    final enc = route.encodedShape;
-    final body = {
-      // Trasa se zastávkami (více etap) nemá jednu polyline → poslat body.
-      if (enc != null)
-        'encoded_polyline': enc
-      else
-        'shape': [
-          for (final p in route.shape) {'lat': p.latitude, 'lon': p.longitude},
-        ],
-      'costing': 'truck',
-      'shape_match': 'edge_walk',
-      'filters': {
-        'attributes': [
-          'edge.speed_limit',
-          'edge.names',
-          'edge.begin_shape_index',
-          'edge.end_shape_index',
-          'edge.way_id',
-          'edge.road_class',
-          'edge.use',
-          'edge.begin_heading',
-          'edge.end_heading',
-          'node.intersecting_edge.road_class',
-          'node.intersecting_edge.begin_heading',
-          'node.intersecting_edge.driveability',
-          'node.intersecting_edge.use',
-        ],
-        'action': 'include',
-      },
-    };
+    // Každá etapa (mezi zastávkami) zvlášť – přes zastávku Valhalla trasu „neprojde“.
+    final legs = route.legShapes.isNotEmpty
+        ? route.legShapes
+        : [if (route.encodedShape != null) (route.encodedShape!, 0)];
     final uri = Uri.parse('${baseUrl.replaceAll(RegExp(r'/+$'), '')}/trace_attributes');
-    final res = await http
-        .post(uri, headers: uaHeaders({'Content-Type': 'application/json'}), body: jsonEncode(body))
-        .timeout(const Duration(seconds: 60));
-    if (res.statusCode != 200) return;
-    final data = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+    final legEdges = <(List, int)>[];
+    for (final (enc, offset) in legs) {
+      final body = {
+        'encoded_polyline': enc,
+        'costing': 'truck',
+        'shape_match': 'edge_walk',
+        'filters': {
+          'attributes': [
+            'edge.speed_limit',
+            'edge.names',
+            'edge.begin_shape_index',
+            'edge.end_shape_index',
+            'edge.way_id',
+            'edge.road_class',
+            'edge.use',
+            'edge.begin_heading',
+            'edge.end_heading',
+            'node.intersecting_edge.road_class',
+            'node.intersecting_edge.begin_heading',
+            'node.intersecting_edge.driveability',
+            'node.intersecting_edge.use',
+          ],
+          'action': 'include',
+        },
+      };
+      final res = await http
+          .post(uri, headers: uaHeaders({'Content-Type': 'application/json'}), body: jsonEncode(body))
+          .timeout(const Duration(seconds: 60));
+      if (res.statusCode != 200) continue;
+      final data = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+      legEdges.add(((data['edges'] as List?) ?? const [], offset));
+    }
+    if (legEdges.isEmpty) return;
     final n = math.max(0, route.shape.length - 1);
     final limits = List<int?>.filled(n, null);
     final names = List<String?>.filled(n, null);
     final edges = <EdgeAttr>[];
-    for (final e in (data['edges'] as List? ?? const [])) {
-      final b = (e['begin_shape_index'] as num?)?.toInt() ?? 0;
-      edges.add(
-        EdgeAttr(
-          begin: b,
-          end: (e['end_shape_index'] as num?)?.toInt() ?? b,
-          wayId: (e['way_id'] as num?)?.toInt(),
-          roadClass: e['road_class'] as String?,
-          use: e['use'] as String?,
-          names: ((e['names'] as List?) ?? const []).map((x) => '$x').toList(),
-          beginHeading: (e['begin_heading'] as num?)?.toInt(),
-          endHeading: (e['end_heading'] as num?)?.toInt(),
-          intersecting: [
-            for (final ie in ((e['end_node'] as Map?)?['intersecting_edges'] as List? ?? const []))
-              Map<String, dynamic>.from(ie as Map),
-          ],
-        ),
-      );
-      final en = math.min(n, (e['end_shape_index'] as num?)?.toInt() ?? 0);
-      // Číslo, nebo „unlimited“ (německé dálnice) → limit dá jen max. rychlost kamionu.
-      final sl = e['speed_limit'];
-      final lim = sl is num ? sl.toInt() : (sl == 'unlimited' ? 199 : null);
-      final nm = (e['names'] as List?)?.isNotEmpty == true ? (e['names'] as List).first as String : null;
-      for (var i = b; i < en; i++) {
-        limits[i] = (lim != null && lim > 0 && lim < 200) ? lim : null;
-        names[i] = nm;
+    for (final (list, off) in legEdges) {
+      for (final e in list) {
+        final b = ((e['begin_shape_index'] as num?)?.toInt() ?? 0) + off;
+        edges.add(
+          EdgeAttr(
+            begin: b,
+            end: ((e['end_shape_index'] as num?)?.toInt() ?? 0) + off,
+            wayId: (e['way_id'] as num?)?.toInt(),
+            roadClass: e['road_class'] as String?,
+            use: e['use'] as String?,
+            names: ((e['names'] as List?) ?? const []).map((x) => '$x').toList(),
+            beginHeading: (e['begin_heading'] as num?)?.toInt(),
+            endHeading: (e['end_heading'] as num?)?.toInt(),
+            intersecting: [
+              for (final ie in ((e['end_node'] as Map?)?['intersecting_edges'] as List? ?? const []))
+                Map<String, dynamic>.from(ie as Map),
+            ],
+          ),
+        );
+        final en = math.min(n, ((e['end_shape_index'] as num?)?.toInt() ?? 0) + off);
+        // Číslo, nebo „unlimited“ (německé dálnice) → limit dá jen max. rychlost kamionu.
+        final sl = e['speed_limit'];
+        final lim = sl is num ? sl.toInt() : (sl == 'unlimited' ? 199 : null);
+        final nm = (e['names'] as List?)?.isNotEmpty == true ? (e['names'] as List).first as String : null;
+        for (var i = b; i < en; i++) {
+          limits[i] = (lim != null && lim > 0 && lim < 200) ? lim : null;
+          names[i] = nm;
+        }
       }
     }
     route.speedLimits = limits;
@@ -246,12 +250,14 @@ class ValhallaClient {
   }
 
   static TruckRoute parseTrip(Map<String, dynamic> trip) {
+    final legShapes = <(String, int)>[];
     final shape = <LatLng>[];
     final maneuvers = <Maneuver>[];
     for (final leg in (trip['legs'] as List)) {
       final legMap = leg as Map<String, dynamic>;
       // Poslední bod předchozí etapy = první bod další, nezdvojovat.
       final offset = shape.isEmpty ? 0 : shape.length - 1;
+      legShapes.add((legMap['shape'] as String, offset));
       final pts = decodePolyline6(legMap['shape'] as String);
       shape.addAll(shape.isEmpty ? pts : pts.skip(1));
       for (final m in (legMap['maneuvers'] as List)) {
@@ -269,9 +275,8 @@ class ValhallaClient {
       timeSec: (summary['time'] as num).toDouble(),
       hasToll: summary['has_toll'] as bool? ?? false,
       hasHighway: summary['has_highway'] as bool? ?? false,
-      encodedShape: (trip['legs'] as List).length == 1
-          ? (trip['legs'] as List).first['shape'] as String
-          : null,
+      encodedShape: legShapes.length == 1 ? legShapes.first.$1 : null,
+      legShapes: legShapes,
     );
   }
 }

@@ -99,6 +99,9 @@ class TruckRoute {
   /// Původní polyline6 (jen u jednoetapové trasy) pro dotaz na atributy silnic.
   final String? encodedShape;
 
+  /// Polyline každé etapy (mezi zastávkami) a její posun v [shape].
+  final List<(String, int)> legShapes;
+
   /// Rychlostní limit (km/h) a název silnice pro každý segment `shape[i]→shape[i+1]`.
   List<int?> speedLimits = const [];
   List<String?> roadNames = const [];
@@ -108,8 +111,6 @@ class TruckRoute {
   /// jen tam je dálniční křižovatka a hlásí se „Pokračujte rovně“.
   List<(LatLng, String)> interchangeLinks = const [];
 
-  /// Truckparky z Autobahn API (Německo) na dálnicích trasy.
-  List<(LatLng, String, int?)> autobahnParking = const [];
   bool osmRampsChecked = false;
 
   /// Kamionová omezení a radary podél trasy (doplňuje se na pozadí).
@@ -149,6 +150,7 @@ class TruckRoute {
     required this.hasToll,
     required this.hasHighway,
     this.encodedShape,
+    this.legShapes = const [],
   });
 
   /// Hlavní silnice, po kterých trasa vede (D1, D35, E 50…).
@@ -179,19 +181,7 @@ class TruckRoute {
   }
 }
 
-enum WarningType {
-  height,
-  weight,
-  width,
-  length,
-  axleLoad,
-  speedCamera,
-  noOvertakingHgv,
-  closure,
-  roadworks,
-  wind,
-  ice,
-}
+enum WarningType { height, weight, width, length, axleLoad, speedCamera, noOvertakingHgv }
 
 class RouteWarning {
   final WarningType type;
@@ -232,14 +222,6 @@ class RouteWarning {
         return 'radar';
       case WarningType.noOvertakingHgv:
         return note ?? '';
-      case WarningType.closure:
-        return 'uzavírka';
-      case WarningType.roadworks:
-        return 'práce';
-      case WarningType.wind:
-        return '${value!.round()} km/h';
-      case WarningType.ice:
-        return 'náledí';
     }
   }
 
@@ -259,14 +241,6 @@ class RouteWarning {
         return 'radar';
       case WarningType.noOvertakingHgv:
         return 'zákaz předjíždění nákladních vozidel';
-      case WarningType.closure:
-        return 'uzavírka';
-      case WarningType.roadworks:
-        return 'práce na silnici';
-      case WarningType.wind:
-        return 'silný boční vítr';
-      case WarningType.ice:
-        return 'nebezpečí náledí';
     }
   }
 }

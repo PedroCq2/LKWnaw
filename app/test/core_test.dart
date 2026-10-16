@@ -9,6 +9,7 @@ import 'package:truck_nav/services/geocoding.dart';
 import 'package:truck_nav/services/sun.dart';
 import 'package:truck_nav/services/speech.dart';
 import 'package:truck_nav/services/saved_places.dart';
+import 'package:truck_nav/services/plans.dart';
 import 'package:truck_nav/services/valhalla.dart';
 
 void main() {
@@ -179,7 +180,9 @@ void main() {
 
   test('Czech speech for road numbers', () {
     expect(forSpeech('Pokračujte rovně po D46.'), 'Pokračujte rovně po dé čtyřicet šest.');
-    expect(forSpeech('Vjeďte na D1 směr E 50'), 'Vjeďte na dé jedna směr é padesát');
+    expect(forSpeech('Vjeďte na D1 směr E 50'), 'Vjeďte na dé jedna směr E padesát');
+    expect(forSpeech('E442'), 'E čtyři sta čtyřicet dva');
+    expect(forSpeech('na I/35'), 'na jedna třicet pět');
     expect(czechNumber(602), 'šest set dva');
     expect(czechNumber(230), 'dvě stě třicet');
     expect(czechNumber(114), 'sto čtrnáct');
@@ -189,5 +192,19 @@ void main() {
   test('profile summary', () {
     expect(TruckProfile().summary, '4 m × 2,55 m × 16,5 m · 40 t');
     expect(TruckProfile(height: 3.8, weight: 7.5, hazmat: true).summary, '3,8 m × 2,55 m × 16,5 m · 7,5 t · ADR');
+  });
+
+  test('trip plans round-trip', () async {
+    await TripPlans.save([
+      TripPlan(
+        name: 'Rozvoz Olomouc',
+        stops: [PlanPoint('Kaufland DC', const LatLng(49.56, 17.31))],
+        dest: PlanPoint('Ostrava', const LatLng(49.83, 18.28)),
+      ),
+    ]);
+    final p = (await TripPlans.load()).single;
+    expect(p.start, isNull);
+    expect(p.stops.single.name, 'Kaufland DC');
+    expect(p.dest.point, const LatLng(49.83, 18.28));
   });
 }
