@@ -25,7 +25,7 @@ class MapScreen extends StatefulWidget {
   State<MapScreen> createState() => _MapScreenState();
 }
 
-class _MapScreenState extends State<MapScreen> {
+class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMixin {
   final _map = MapController();
   final _tts = FlutterTts();
   final _search = TextEditingController();
@@ -36,6 +36,17 @@ class _MapScreenState extends State<MapScreen> {
   double _heading = 0;
   double _speedKmh = 0;
   bool _follow = true;
+
+  // Plynulá animace polohy/kamery mezi GPS fixy (1 Hz).
+  late final AnimationController _anim =
+      AnimationController(vsync: this, duration: const Duration(seconds: 1))
+        ..addListener(_onAnimTick);
+  LatLng? _dispPos;
+  double _dispHeading = 0;
+  double _dispZoom = 16;
+  LatLng? _fromPos, _toPos;
+  double _fromHead = 0, _toHead = 0, _fromZoom = 16, _toZoom = 16;
+  DateTime? _lastFix;
 
   LatLng? _dest;
   String? _destName;
@@ -69,6 +80,7 @@ class _MapScreenState extends State<MapScreen> {
   void dispose() {
     _posSub?.cancel();
     _ticker?.cancel();
+    _anim.dispose();
     _timer.save();
     WakelockPlus.disable();
     super.dispose();
@@ -101,6 +113,11 @@ class _MapScreenState extends State<MapScreen> {
       _toast('Bez oprávnění k poloze navigace nefunguje.');
       return;
     }
+    // Poslední známá poloha hned – nečekat na první přesný GPS fix.
+    try {
+      final last = await Geolocator.getLastKnownPosition();
+      if (last != null && _pos == null) _onPosition(last);
+    } catch (_) {}
     final settings = AndroidSettings(
       accuracy: LocationAccuracy.bestForNavigation,
       distanceFilter: 0,
@@ -120,7 +137,6 @@ class _MapScreenState extends State<MapScreen> {
     final speed = p.speed.isFinite && p.speed > 0 ? p.speed * 3.6 : 0.0;
     // Kurz z GPS je spolehlivý jen za jízdy.
     if (speed > 3 && p.heading.isFinite && p.heading >= 0) _heading = p.heading;
-    final first = _pos == null;
     _pos = pos;
     _speedKmh = speed;
     _timer.update(speed, DateTime.now());
@@ -145,25 +161,104 @@ class _MapScreenState extends State<MapScreen> {
       }
     }
 
-    if (first || _follow) _moveCamera();
+    _animateTo();
+  }
+
+  /// Cílová poloha/natočení/zoom pro aktuální stav a spuštění animace k nim.
+  void _animateTo() {
+    final pos = _pos;
+    if (pos == null) return;
+    var target = pos;
+    var heading = _heading;
+    final nav = _nav;
+    final route = _route;
+    if (_navigating && nav != null && route != null &&
+        nav.distanceFromRoute < NavEngine.offRouteMeters) {
+      // Na trase: přichycená poloha a směr podle trasy (bez GPS šumu).
+      target = nav.snapped;
+      final seg = nav.segmentIndex;
+      if (seg + 1 < route.shape.length) {
+        heading = const Distance().bearing(route.shape[seg], route.shape[seg + 1]);
+        if (heading < 0) heading += 360;
+      }
+    }
+    var zoom = _toZoom;
+    if (_navigating) {
+      // Hystereze, aby zoom neskákal kolem hranic rychlosti.
+      final keep = _toZoom < 15 ? 16.5 : _toZoom;
+      final z = _speedKmh > 85 ? 15.5 : (_speedKmh > 45 ? 16.5 : (_speedKmh < 35 ? 17.5 : keep));
+      zoom = z;
+    } else {
+      try {
+        zoom = _map.camera.zoom;
+      } catch (_) {}
+    }
+
+    final now = DateTime.now();
+    final last = _lastFix;
+    _lastFix = now;
+    if (_dispPos == null) {
+      _dispPos = target;
+      _dispHeading = heading;
+      _dispZoom = _navigating ? zoom : 16;
+      _toPos = target;
+      _toHead = heading;
+      _toZoom = _dispZoom;
+      _applyCamera();
+      if (mounted) setState(() {});
+      return;
+    }
+    _fromPos = _dispPos;
+    _fromHead = _dispHeading;
+    _fromZoom = _dispZoom;
+    _toPos = target;
+    _toHead = heading;
+    _toZoom = zoom;
+    final gapMs = last == null ? 1000 : now.difference(last).inMilliseconds;
+    _anim.duration = Duration(milliseconds: gapMs.clamp(300, 1500));
+    _anim.forward(from: 0);
+  }
+
+  void _onAnimTick() {
+    final t = _anim.value;
+    final a = _fromPos, b = _toPos;
+    if (a == null || b == null) return;
+    _dispPos = LatLng(a.latitude + (b.latitude - a.latitude) * t,
+        a.longitude + (b.longitude - a.longitude) * t);
+    var dh = (_toHead - _fromHead) % 360;
+    if (dh > 180) dh -= 360;
+    _dispHeading = (_fromHead + dh * t) % 360;
+    _dispZoom = _fromZoom + (_toZoom - _fromZoom) * t;
+    if (_follow) _applyCamera();
     if (mounted) setState(() {});
   }
 
-  void _moveCamera() {
-    final pos = (_navigating ? _nav?.snapped : null) ?? _pos;
+  void _applyCamera() {
+    final pos = _dispPos;
     if (pos == null) return;
     try {
       if (_navigating) {
-        final zoom = _speedKmh > 80 ? 15.5 : (_speedKmh > 40 ? 16.5 : 17.5);
-        // Poloha ve spodní třetině obrazovky, mapa natočená ve směru jízdy.
-        _map.rotate(-_heading);
-        _map.move(pos, zoom, offset: const Offset(0, 150));
+        // Poloha ve spodní části obrazovky: střed mapy posunut dopředu ve směru jízdy.
+        final mpp = 40075016.686 * math.cos(pos.latitude * math.pi / 180) /
+            (256 * math.pow(2, _dispZoom));
+        final center = const Distance().offset(pos, 150 * mpp, _dispHeading);
+        _map.moveAndRotate(center, _dispZoom, -_dispHeading);
       } else {
-        _map.move(pos, math.max(_map.camera.zoom, 14));
+        _map.move(pos, _map.camera.zoom < 12 ? 16 : _map.camera.zoom);
       }
     } catch (_) {
       // Mapa ještě není vykreslená.
     }
+  }
+
+  void _moveCamera() {
+    _follow = true;
+    if (!_navigating) {
+      try {
+        _map.rotate(0);
+      } catch (_) {}
+    }
+    _applyCamera();
   }
 
   void _checkBreakWarnings() {
@@ -477,17 +572,16 @@ class _MapScreenState extends State<MapScreen> {
                 ),
               if (_pos != null)
                 Marker(
-                  point: (_navigating ? _nav?.snapped : null) ?? _pos!,
+                  point: _dispPos ?? _pos!,
                   width: 48,
                   height: 48,
                   child: Transform.rotate(
-                    angle: _heading * math.pi / 180,
+                    angle: _dispHeading * math.pi / 180,
                     child: const Icon(Icons.navigation, color: Color(0xFFE65100), size: 44,
                         shadows: [Shadow(blurRadius: 4, color: Colors.black54)]),
                   ),
                 ),
             ]),
-            const SimpleAttributionWidget(source: Text('© OpenStreetMap')),
           ],
         ),
         SafeArea(

@@ -120,6 +120,16 @@ class _ProfileScreenState extends State<ProfileScreen> {
             const SizedBox(height: 24),
             FilledButton.icon(
                 onPressed: _save, icon: const Icon(Icons.save), label: const Text('Uložit')),
+            const SizedBox(height: 24),
+            const Divider(),
+            const ListTile(
+              leading: Icon(Icons.info_outline),
+              title: Text('O aplikaci'),
+              subtitle: Text('Mapová data © přispěvatelé OpenStreetMap (ODbL)\n'
+                  'Mapové dlaždice: openstreetmap.org\n'
+                  'Výpočet tras: Valhalla, vyhledávání: Nominatim, parkoviště: Overpass API'),
+              isThreeLine: true,
+            ),
           ],
         ),
       ),
