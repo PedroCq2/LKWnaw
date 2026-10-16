@@ -1,0 +1,63 @@
+name: Balík tras ČR (Valhalla)
+
+# Staví data pro výpočet tras v telefonu (Valhalla 3.9 = stejná verze jako valhalla-mobile v aplikaci)
+# z aktuálního výřezu OpenStreetMap pro ČR a zveřejní je jako vydání „routing-cz“.
+on:
+  schedule:
+    - cron: "17 2 1,15 * *" # 1. a 15. den v měsíci
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Stáhnout OSM ČR
+        run: |
+          mkdir -p data
+          curl -sSL -o data/cz.osm.pbf https://download.geofabrik.de/europe/czech-republic-latest.osm.pbf
+          # Datum dat = čas posledního stavu výřezu (YYYY-MM-DD)
+          DATE=$(curl -sS https://download.geofabrik.de/europe/czech-republic-updates/state.txt \
+            | sed -n 's/^timestamp=\([0-9-]*\)T.*/\1/p')
+          echo "OSM_DATE=${DATE:-$(date -u +%F)}" >> "$GITHUB_ENV"
+          ls -la data
+
+      - name: Postavit dlaždice tras
+        run: |
+          docker run --rm -v "$PWD/data:/data" ghcr.io/valhalla/valhalla:3.9.0 bash -c '
+            set -e
+            valhalla_build_config --mjolnir-tile-dir /data/tiles --mjolnir-tile-extract /data/tiles.tar \
+              --mjolnir-admin /data/admin.sqlite > /data/valhalla.json
+            python3 - <<PY
+          import json
+          c = json.load(open("/data/valhalla.json"))
+          c["mjolnir"].pop("timezone", None)
+          c["mjolnir"]["include_pedestrian"] = False  # kamion nepotřebuje chodníky a cyklostezky
+          c["mjolnir"]["include_bicycle"] = False
+          json.dump(c, open("/data/valhalla.json", "w"), indent=1)
+          PY
+            valhalla_build_admins -c /data/valhalla.json /data/cz.osm.pbf
+            valhalla_build_tiles -c /data/valhalla.json /data/cz.osm.pbf
+            valhalla_build_extract -c /data/valhalla.json -v
+          '
+          sudo chown -R "$USER" data
+          rm -rf data/tiles data/cz.osm.pbf
+          gzip -6 -c data/tiles.tar > cz-routing.tar.gz
+          SIZE=$(stat -c %s cz-routing.tar.gz)
+          printf '{"date":"%s","size":%s,"valhalla":"3.9.0","region":"CZ"}\n' "$OSM_DATE" "$SIZE" > routing-cz.json
+          cat routing-cz.json
+          ls -la cz-routing.tar.gz data/tiles.tar
+
+      - name: Zveřejnit vydání routing-cz
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: routing-cz
+          name: "Balík tras ČR (data ${{ env.OSM_DATE }})"
+          body: "Data OpenStreetMap pro výpočet tras v aplikaci LKWnav. Aktualizováno automaticky."
+          make_latest: false
+          files: |
+            cz-routing.tar.gz
+            routing-cz.json

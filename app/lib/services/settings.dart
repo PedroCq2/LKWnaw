@@ -15,6 +15,7 @@ class AppSettings {
   bool delivery; // zásobování
   String? voiceName; // vybraný český hlas (null = nejlepší dostupný)
   double speechRate; // 0,3–0,8
+  bool routeOnDevice; // počítat trasy v telefonu (stažený balík ČR)
 
   AppSettings({
     required this.profile,
@@ -26,6 +27,7 @@ class AppSettings {
     this.delivery = false,
     this.voiceName,
     this.speechRate = 0.5,
+    this.routeOnDevice = true,
   });
 
   /// Noční vzhled: ručně, nebo automaticky podle západu/východu Slunce v místě.
@@ -58,6 +60,7 @@ class AppSettings {
       delivery: p.getBool('delivery') ?? false,
       voiceName: p.getString('voiceName'),
       speechRate: p.getDouble('speechRate') ?? 0.5,
+      routeOnDevice: p.getBool('routeOnDevice') ?? true,
     );
   }
 
@@ -76,5 +79,6 @@ class AppSettings {
       await p.setString('voiceName', voiceName!);
     }
     await p.setDouble('speechRate', speechRate);
+    await p.setBool('routeOnDevice', routeOnDevice);
   }
 }

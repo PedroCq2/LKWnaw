@@ -62,6 +62,14 @@ flutter build apk --release   # → build/app/outputs/flutter-apk/app-release.ap
 APK je podepsané debug klíčem (vhodné pro instalaci mimo Google Play). Pro Play Store
 nastavte vlastní keystore v `app/android/app/build.gradle.kts`.
 
+## Trasy v telefonu (bez internetu)
+
+Aplikace umí počítat trasy přímo v telefonu (knihovna valhalla-mobile, Valhalla 3.9).
+Data pro celou ČR staví workflow `.github/workflows/routing-cz.yml` z aktuálního výřezu
+OpenStreetMap (1. a 15. den v měsíci, nebo ručně) a zveřejní je jako vydání **routing-cz**
+(`cz-routing.tar.gz` ~175 MB ke stažení, v telefonu ~410 MB; `routing-cz.json` = datum dat).
+V aplikaci: Profil vozidla → *Trasy v telefonu* → Stáhnout ČR / Aktualizovat.
+
 ## Vlastní routing server
 
 Ve výchozím stavu aplikace používá veřejný server `https://valhalla1.openstreetmap.de`

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/truck_profile.dart';
 import '../services/settings.dart';
 import '../services/voice.dart';
+import 'offline_section.dart';
 
 class ProfileScreen extends StatefulWidget {
   final AppSettings settings;
@@ -242,6 +243,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 onSelectionChanged: (v) => setState(() => _mapStyle = v.first),
               ),
             ),
+            const Divider(),
+            OfflineRoutingSection(settings: widget.settings),
             const Divider(),
             TextField(
               controller: _url,

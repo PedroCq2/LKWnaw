@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
 
 import 'screens/map_screen.dart';
+import 'services/offline_routing.dart';
 import 'services/settings.dart';
 import 'theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final settings = await AppSettings.load();
+  OfflineRouting.instance.preferDevice = settings.routeOnDevice;
+  OfflineRouting.instance.init(); // otevře stažený balík tras ČR (na pozadí)
   runApp(LkwNavApp(settings: settings));
 }
 

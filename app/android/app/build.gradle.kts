@@ -47,3 +47,9 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // Výpočet tras v telefonu bez internetu (Valhalla 3.9 pro Android).
+    implementation("io.github.rallista:valhalla-mobile:0.6.4")
+    implementation("io.github.rallista:valhalla-models-config:0.6.0")
+}

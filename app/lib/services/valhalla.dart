@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 
 import 'http_headers.dart';
+import 'offline_routing.dart';
 
 import '../models/route.dart';
 import '../models/truck_profile.dart';
@@ -150,24 +151,50 @@ class ValhallaClient {
       'units': 'kilometers',
       'directions_options': {'units': 'kilometers', 'language': 'cs-CZ'},
     };
-    final uri = Uri.parse('${baseUrl.replaceAll(RegExp(r'/+$'), '')}/route');
+    final data = await _call('route', body);
+    return [
+      parseTrip(data['trip'] as Map<String, dynamic>),
+      for (final a in (data['alternates'] as List? ?? const []))
+        parseTrip((a as Map)['trip'] as Map<String, dynamic>),
+    ];
+  }
+
+  /// Dotaz na Valhallu: v telefonu (stažený balík ČR), jinak na server.
+  /// Bez internetu se použije telefon, i když je nastaven server.
+  Future<Map<String, dynamic>> _call(String action, Map<String, dynamic> body) async {
+    final device = OfflineRouting.instance;
+    Object? deviceError;
+    if (device.ready && device.preferDevice) {
+      try {
+        return await device.call(action, body);
+      } catch (e) {
+        deviceError = e; // např. místo mimo ČR → zkusit server
+      }
+    }
+    final uri = Uri.parse('${baseUrl.replaceAll(RegExp(r'/+$'), '')}/$action');
     final http.Response res;
     try {
       res = await http
           .post(uri, headers: uaHeaders({'Content-Type': 'application/json'}), body: jsonEncode(body))
           .timeout(const Duration(seconds: 30));
     } catch (e) {
-      throw RoutingException('Server tras není dostupný: $e', network: true);
+      if (device.ready && deviceError == null) {
+        try {
+          return await device.call(action, body);
+        } catch (e2) {
+          throw RoutingException('Trasu nelze vypočítat: $e2');
+        }
+      }
+      throw RoutingException(
+        deviceError != null ? 'Trasu nelze vypočítat: $deviceError' : 'Server tras není dostupný: $e',
+        network: deviceError == null,
+      );
     }
     final data = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
     if (res.statusCode != 200) {
       throw RoutingException('Trasu nelze vypočítat: ${data['error'] ?? res.statusCode}');
     }
-    return [
-      parseTrip(data['trip'] as Map<String, dynamic>),
-      for (final a in (data['alternates'] as List? ?? const []))
-        parseTrip((a as Map)['trip'] as Map<String, dynamic>),
-    ];
+    return data;
   }
 
   /// Doplní k trase rychlostní limity a názvy silnic (Valhalla trace_attributes).
@@ -176,7 +203,6 @@ class ValhallaClient {
     final legs = route.legShapes.isNotEmpty
         ? route.legShapes
         : [if (route.encodedShape != null) (route.encodedShape!, 0)];
-    final uri = Uri.parse('${baseUrl.replaceAll(RegExp(r'/+$'), '')}/trace_attributes');
     final legEdges = <(List, int)>[];
     for (final (enc, offset) in legs) {
       final body = {
@@ -202,11 +228,12 @@ class ValhallaClient {
           'action': 'include',
         },
       };
-      final res = await http
-          .post(uri, headers: uaHeaders({'Content-Type': 'application/json'}), body: jsonEncode(body))
-          .timeout(const Duration(seconds: 60));
-      if (res.statusCode != 200) continue;
-      final data = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+      final Map<String, dynamic> data;
+      try {
+        data = await _call('trace_attributes', body);
+      } catch (_) {
+        continue;
+      }
       legEdges.add(((data['edges'] as List?) ?? const [], offset));
     }
     if (legEdges.isEmpty) return;
