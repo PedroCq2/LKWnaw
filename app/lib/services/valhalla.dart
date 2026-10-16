@@ -198,7 +198,7 @@ class ValhallaClient {
   }
 
   /// Doplní k trase rychlostní limity a názvy silnic (Valhalla trace_attributes).
-  Future<void> loadEdgeAttributes(TruckRoute route) async {
+  Future<void> loadEdgeAttributes(TruckRoute route, {int maxSpeedKmh = 80}) async {
     // Každá etapa (mezi zastávkami) zvlášť – přes zastávku Valhalla trasu „neprojde“.
     final legs = route.legShapes.isNotEmpty
         ? route.legShapes
@@ -212,6 +212,8 @@ class ValhallaClient {
         'filters': {
           'attributes': [
             'edge.speed_limit',
+            'edge.speed',
+            'edge.length',
             'edge.names',
             'edge.begin_shape_index',
             'edge.end_shape_index',
@@ -241,9 +243,26 @@ class ValhallaClient {
     final limits = List<int?>.filled(n, null);
     final names = List<String?>.filled(n, null);
     final edges = <EdgeAttr>[];
+    final cum = route.cumulative;
+    final segTime = List<double>.filled(n, 0);
+    var edgeSec = 0.0; // Valhallou odhadnutý čas samotné jízdy po hranách
+    var covered = 0.0;
     for (final (list, off) in legEdges) {
       for (final e in list) {
         final b = ((e['begin_shape_index'] as num?)?.toInt() ?? 0) + off;
+        // Čas na hraně rychlostí kamionu: min(rychlost silnice, omezovač).
+        final v = (e['speed'] as num?)?.toDouble();
+        final lenM = ((e['length'] as num?)?.toDouble() ?? 0) * 1000;
+        final eEnd = math.min(n, ((e['end_shape_index'] as num?)?.toInt() ?? 0) + off);
+        if (v != null && v > 0 && lenM > 0 && eEnd > b) {
+          edgeSec += lenM / (v / 3.6);
+          covered += lenM;
+          final sec = lenM / (math.min(v, maxSpeedKmh.toDouble()) / 3.6);
+          final span = cum[eEnd] - cum[b];
+          for (var i = b; i < eEnd; i++) {
+            segTime[i] = span > 0 ? sec * (cum[i + 1] - cum[i]) / span : sec / (eEnd - b);
+          }
+        }
         edges.add(
           EdgeAttr(
             begin: b,
@@ -274,6 +293,15 @@ class ValhallaClient {
     route.speedLimits = limits;
     route.roadNames = names;
     route.edges = edges;
+    // Jen když atributy pokryly skoro celou trasu, jinak zůstane odhad Valhally.
+    if (covered > route.lengthKm * 1000 * 0.9) {
+      final t = List<double>.filled(n + 1, 0);
+      for (var i = 0; i < n; i++) {
+        t[i + 1] = t[i] + segTime[i];
+      }
+      route.truckTime = t;
+      route.truckOverheadSec = math.max(0, route.timeSec - edgeSec);
+    }
   }
 
   static TruckRoute parseTrip(Map<String, dynamic> trip) {

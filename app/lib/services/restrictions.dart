@@ -26,6 +26,7 @@ Future<List<RouteWarning>> loadRouteWarnings(
   bool delivery = false,
 }) async {
   final index = RouteIndex(route);
+  final routeWays = {for (final e in route.edges) ?e.wayId};
   final pts = _simplify(route.shape, route.cumulative, maxMeters, 10);
   final out = <RouteWarning>[];
   final seenWays = <int>{};
@@ -64,12 +65,16 @@ Future<List<RouteWarning>> loadRouteWarnings(
           }
           continue;
         }
+        // Jen cesty, po kterých trasa opravdu vede: souběžná silnice 10 m vedle dálnice
+        // (např. III/13036 vedle D1 u Koberovic) se nesmí počítat.
+        // Neznámá cesta (chybí atributy úseku) → body musí ležet přímo na trase.
+        final onRoute = routeWays.contains(id);
         // Cesta musí s trasou sdílet aspoň 2 body (ne jen křížení).
         final hits = <double>[];
         LatLng? first;
         for (final g in geom) {
           final p = LatLng((g['lat'] as num).toDouble(), (g['lon'] as num).toDouble());
-          final at = index.locate(p, 15);
+          final at = index.locate(p, onRoute ? 15 : 3);
           if (at != null) {
             hits.add(at);
             first ??= p;
@@ -90,7 +95,8 @@ Future<List<RouteWarning>> loadRouteWarnings(
           out.add(
             RouteWarning(type: WarningType.speedCamera, value: null, atMeters: at, point: p, violates: false),
           );
-        } else {
+        } else if (index.locate(p, 5) != null) {
+          // Značka výšky jako bod musí ležet přímo na trase, ne na souběžné cestě.
           out.addAll(_fromTags(tags, at, p, truck, delivery));
         }
       }

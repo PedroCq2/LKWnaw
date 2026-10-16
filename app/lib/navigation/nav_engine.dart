@@ -37,6 +37,10 @@ class NavEngine {
   final Set<int> alertSpoken = {};
   final Set<int> preSpoken = {};
 
+  /// Odpočet před manévrem (klíč = místo manévru × 10 + stupeň) a „pokračujte X km“.
+  final Set<int> stageSpoken = {};
+  final Set<int> continueSpoken = {};
+
   NavEngine(this.route);
 
   static const offRouteMeters = 60.0;

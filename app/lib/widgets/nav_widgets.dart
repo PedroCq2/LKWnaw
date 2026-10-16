@@ -73,7 +73,6 @@ class ManeuverBanner extends StatelessWidget {
       decoration: BoxDecoration(
         color: Lkw.panel,
         borderRadius: BorderRadius.circular(18),
-        border: const Border(left: BorderSide(color: Lkw.amber, width: 6)),
         boxShadow: const [BoxShadow(blurRadius: 12, color: Colors.black45)],
       ),
       clipBehavior: Clip.antiAlias,
@@ -618,6 +617,96 @@ class LaneRow extends StatelessWidget {
           ),
         ],
       ],
+    );
+  }
+}
+
+IconData amenityIcon(ServiceAmenity a) => switch (a) {
+  ServiceAmenity.parking => Icons.local_parking,
+  ServiceAmenity.fuel => Icons.local_gas_station,
+  ServiceAmenity.food => Icons.restaurant,
+  ServiceAmenity.wc => Icons.wc,
+  ServiceAmenity.shower => Icons.shower,
+  ServiceAmenity.adblue => Icons.water_drop,
+  ServiceAmenity.hotel => Icons.hotel,
+};
+
+String amenityLabel(ServiceAmenity a) => switch (a) {
+  ServiceAmenity.parking => 'Parkování',
+  ServiceAmenity.fuel => 'Nafta',
+  ServiceAmenity.food => 'Jídlo',
+  ServiceAmenity.wc => 'WC',
+  ServiceAmenity.shower => 'Sprchy',
+  ServiceAmenity.adblue => 'AdBlue',
+  ServiceAmenity.hotel => 'Ubytování',
+};
+
+/// Okénko vpravo: nejbližší služba na dálnici (velká ikona, další drobně, vzdálenost).
+class ServiceTile extends StatelessWidget {
+  final HighwayService service;
+  final double aheadM;
+  final VoidCallback onTap;
+  const ServiceTile({super.key, required this.service, required this.aheadM, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final am = service.amenities;
+    // Hlavní ikona: pumpa, jinak parkoviště (řidič kamionu hledá hlavně tyhle dvě).
+    final main = am.contains(ServiceAmenity.fuel) ? ServiceAmenity.fuel : ServiceAmenity.parking;
+    final rest = [
+      for (final a in ServiceAmenity.values)
+        if (a != main && am.contains(a)) a,
+    ].take(3).toList();
+    return Material(
+      color: Lkw.panel,
+      elevation: 6,
+      shadowColor: Colors.black,
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: onTap,
+        child: Tooltip(
+          message: service.name,
+          child: SizedBox(
+            width: 64,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: main == ServiceAmenity.parking ? const Color(0xFF2F6FDE) : Lkw.amber,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Icon(
+                      amenityIcon(main),
+                      size: 28,
+                      color: main == ServiceAmenity.parking ? Colors.white : Lkw.graphite,
+                    ),
+                  ),
+                  if (rest.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [for (final a in rest) Icon(amenityIcon(a), size: 15, color: Lkw.muted)],
+                      ),
+                    ),
+                  const SizedBox(height: 4),
+                  Text(
+                    formatDistance(aheadM),
+                    maxLines: 1,
+                    style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: Lkw.text),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

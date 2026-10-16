@@ -17,7 +17,9 @@ import '../navigation/simulator.dart';
 import '../services/geocoding.dart';
 import '../services/restrictions.dart';
 import '../services/lanes.dart';
+import '../services/highway_services.dart';
 import '../services/map_style.dart';
+import '../services/pip.dart';
 import '../services/offline_maps.dart';
 import '../services/plans.dart';
 import '../services/saved_places.dart';
@@ -121,9 +123,14 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     if (mounted) setState(() => _styleJson = json);
   }
 
+  void _onPip() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void initState() {
     super.initState();
+    Pip.instance.active.addListener(_onPip);
     _loadStyle();
     SavedPlaces.load().then((v) {
       if (mounted) setState(() => _saved = v);
@@ -138,6 +145,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
 
   @override
   void dispose() {
+    Pip.instance.active.removeListener(_onPip);
     _posSub?.cancel();
     _sim?.stop();
     _searchDebounce?.cancel();
@@ -221,6 +229,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       final nav = _engine!.update(pos, accuracy: accuracy);
       _nav = nav;
       if (_navigating) {
+        _trimRouteLine();
         _voiceGuidance(nav);
         _warningVoice(nav);
         // Projetá zastávka: odebrat (při přepočtu se už nepoužije).
@@ -543,6 +552,49 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     ],
   };
 
+  /// Za jízdy jen zbývající část trasy – projetý úsek za šipkou zmizí
+  /// (necháme ~25 m za vozidlem, ať čára nezačíná před animovanou šipkou).
+  List<List<double>> _remainingLine(TruckRoute r) {
+    final nav = _nav;
+    if (!_navigating || nav == null || _engine?.route != r) return r.shape.map(_xy).toList();
+    final i = nav.segmentIndex.clamp(0, r.shape.length - 2);
+    final a = r.shape[i], b = nav.snapped;
+    const d = Distance();
+    final seg = d(a, b);
+    final start = seg <= 25
+        ? a
+        : LatLng(
+            b.latitude + (a.latitude - b.latitude) * 25 / seg,
+            b.longitude + (a.longitude - b.longitude) * 25 / seg,
+          );
+    return [_xy(start), _xy(b), for (var k = i + 1; k < r.shape.length; k++) _xy(r.shape[k])];
+  }
+
+  int _trimSeg = -1;
+  DateTime _trimAt = DateTime(0);
+
+  /// Zkrátí čáru trasy po projetí bodu tvaru nebo aspoň jednou za 2 s.
+  Future<void> _trimRouteLine() async {
+    final m = _map, r = _route, nav = _nav;
+    if (m == null || r == null || nav == null || !_styleReady) return;
+    final now = DateTime.now();
+    if (nav.segmentIndex == _trimSeg && now.difference(_trimAt).inMilliseconds < 2000) return;
+    _trimSeg = nav.segmentIndex;
+    _trimAt = now;
+    try {
+      await m.setGeoJsonSource('route', {
+        'type': 'FeatureCollection',
+        'features': [
+          {
+            'type': 'Feature',
+            'properties': <String, dynamic>{},
+            'geometry': {'type': 'LineString', 'coordinates': _remainingLine(r)},
+          },
+        ],
+      });
+    } catch (_) {}
+  }
+
   Future<void> _syncLayers() async {
     final m = _map;
     if (m == null || !_styleReady) return;
@@ -568,7 +620,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
             {
               'type': 'Feature',
               'properties': <String, dynamic>{},
-              'geometry': {'type': 'LineString', 'coordinates': r.shape.map(_xy).toList()},
+              'geometry': {'type': 'LineString', 'coordinates': _remainingLine(r)},
             },
         ],
       });
@@ -663,25 +715,113 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
 
   // ------------------------------------------------------------ hlasové pokyny
 
+  /// Hlasové pokyny jako u profi navigací: odpočet „Za kilometr… Za 500 metrů… Za 200 metrů…“
+  /// a v místě manévru „Sjeďte a pokračujte po D1“. Po manévru „Pokračujte rovně 12 kilometrů“.
   void _voiceGuidance(NavState nav) {
     final i = nav.nextManeuverIndex;
     if (i < 0) return;
-    final m = _route!.maneuvers[i];
+    final r = _route!, e = _engine!;
+    final m = r.maneuvers[i];
     final d = nav.distanceToNextManeuver;
+    final key = m.beginShapeIndex;
     final mps = _speedKmh / 3.6;
-    final pre = math.max(60.0, mps * 8);
-    final alert = _speedKmh > 80 ? 1500.0 : (_speedKmh > 50 ? 800.0 : 300.0);
-    if (d <= pre) {
-      // Klíč = místo manévru (indexy se mění, když se doplní pokyny na rozdvojení).
-      if (_engine!.preSpoken.add(m.beginShapeIndex)) {
-        _engine!.alertSpoken.add(m.beginShapeIndex);
-        _say(m.preInstruction ?? m.instruction);
-      }
-    } else if (d <= alert && d > pre + 150) {
-      if (_engine!.alertSpoken.add(m.beginShapeIndex)) {
-        _say('${_spokenDistance(d)} ${m.alertInstruction ?? m.instruction}');
+    final now = math.max(50.0, mps * 4); // „teď“: ~4 s před manévrem, nejméně 50 m
+    final roundaboutExit = m.type == 27;
+
+    // Po manévru: dlouhý úsek bez pokynu → „Pokračujte rovně (po D1) 12 kilometrů.“
+    if (i > 0 && d > 3000 && !e.preSpoken.contains(key) && e.continueSpoken.add(key)) {
+      final prev = r.maneuvers[i - 1];
+      final passed = nav.traveled - r.cumulative[prev.beginShapeIndex.clamp(0, r.shape.length - 1)];
+      if (passed < 400) {
+        final road = _roadAhead(prev);
+        _say('Pokračujte rovně${road != null ? ' po $road' : ''} ${_kmWords(d)}.');
       }
     }
+
+    if (d <= now) {
+      if (e.preSpoken.add(key)) {
+        e.alertSpoken.add(key);
+        _say(_nowInstruction(r, i));
+      }
+      return;
+    }
+    if (roundaboutExit || m.synthetic && d < 300) return;
+    // Odpočet podle rychlosti: dálnice 1000/500/200 m, město 500/200 m, pomalu 200 m.
+    final stages = _speedKmh > 70
+        ? const [1000.0, 500.0, 200.0]
+        : _speedKmh > 35
+        ? const [500.0, 200.0]
+        : const [200.0];
+    for (var s = 0; s < stages.length; s++) {
+      final st = stages[s];
+      if (d > st) continue;
+      final k = key * 10 + s;
+      if (e.stageSpoken.contains(k)) return;
+      // Zmeškané větší stupně už nehlásit (např. po přepočtu trasy).
+      for (var t = 0; t <= s; t++) {
+        e.stageSpoken.add(key * 10 + t);
+      }
+      if (d < st * 0.6 || d - now < 80) return;
+      e.alertSpoken.add(key);
+      final what = _shortInstruction(m);
+      _say('${_spokenDistance(st)} $what');
+      return;
+    }
+  }
+
+  /// Krátký pokyn do odpočtu: „sjeďte“, „odbočte vpravo“, „na kruhovém objezdu vyjeďte třetím výjezdem“.
+  String _shortInstruction(Maneuver m) {
+    if (m.type == 26) return _roundaboutText(m);
+    final t = m.alertInstruction ?? m.instruction;
+    return t.isEmpty ? t : t[0].toLowerCase() + t.substring(1);
+  }
+
+  /// Pokyn v místě manévru, s návazností: „Sjeďte a pokračujte po D1 směr Praha.“
+  String _nowInstruction(TruckRoute r, int i) {
+    final m = r.maneuvers[i];
+    if (m.type == 26) return '${_capital(_roundaboutText(m))}.';
+    if (m.type == 27) {
+      final road = _roadAhead(m);
+      return 'Opusťte kruhový objezd${road != null ? ' a pokračujte po $road' : ''}.';
+    }
+    final base = (m.preInstruction ?? m.instruction).split('. Poté').first.trim();
+    // Sjezd / nájezd na jinou silnici: doplnit, po čem pokračovat.
+    const ramps = {18, 19, 20, 21, 23, 24, 25};
+    if (ramps.contains(m.type)) {
+      final road = _roadAhead(m);
+      final toward = m.exitToward.take(2).join(', ');
+      if (road != null && !base.contains(road)) {
+        final verb = m.type == 20 || m.type == 21 ? 'Sjeďte' : base.replaceAll(RegExp(r'\.$'), '');
+        return '$verb a pokračujte po $road${toward.isNotEmpty ? ' směr $toward' : ''}.';
+      }
+    }
+    return base.endsWith('.') ? base : '$base.';
+  }
+
+  String _roundaboutText(Maneuver m) {
+    final n =
+        m.roundaboutExit ?? int.tryParse(RegExp(r'(\d+)\. výjezd').firstMatch(m.instruction)?.group(1) ?? '');
+    const ord = ['prvním', 'druhým', 'třetím', 'čtvrtým', 'pátým', 'šestým', 'sedmým', 'osmým'];
+    final road = m.streetNames.isNotEmpty ? ' na ${m.streetNames.first}' : '';
+    if (n == null || n < 1 || n > ord.length) return 'na kruhovém objezdu vyjeďte$road';
+    return 'na kruhovém objezdu vyjeďte ${ord[n - 1]} výjezdem$road';
+  }
+
+  static String _capital(String s) => s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
+
+  /// Silnice za manévrem: číslo (D1, I/35, 635) má přednost před názvem ulice.
+  String? _roadAhead(Maneuver m) {
+    final refs = m.streetNames.where((n) => RegExp(r'^(D\d+|I+/\d+|\d{1,3})$').hasMatch(n)).toList();
+    final ref = refs.isNotEmpty ? refs.first : (m.streetNames.isNotEmpty ? m.streetNames.first : null);
+    if (ref == null) return null;
+    // Holé číslo silnice → „silnici 635“ (D a I/ se čtou samy).
+    return RegExp(r'^\d{1,3}$').hasMatch(ref) ? 'silnici $ref' : ref;
+  }
+
+  static String _kmWords(double m) {
+    if (m < 1000) return '${(m / 100).round() * 100} metrů';
+    final k = (m / 1000).round();
+    return '$k ${k == 1 ? 'kilometr' : (k < 5 ? 'kilometry' : 'kilometrů')}';
   }
 
   void _warningVoice(NavState nav) {
@@ -695,7 +835,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         _ => w.violates && d <= 1000,
       };
       if (speak && _warnSpoken.add(w)) {
-        final dist = _spokenDistance(d).replaceAll(',', '');
+        final dist = _spokenDistance(d);
         if (w.type == WarningType.speedCamera) {
           _say('$dist radar.');
         } else if (w.type == WarningType.noOvertakingHgv) {
@@ -712,14 +852,17 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   }
 
   String _spokenDistance(double m) {
-    if (m < 1000) return 'Za ${math.max(50, (m / 50).round() * 50)} metrů,';
+    if (m < 1000) {
+      final r = m >= 300 ? (m / 100).round() * 100 : math.max(50, (m / 50).round() * 50);
+      return 'Za $r metrů';
+    }
     final km = (m / 100).round() / 10;
     if (km == km.roundToDouble()) {
       final k = km.round();
-      final w = k == 1 ? 'kilometr' : (k < 5 ? 'kilometry' : 'kilometrů');
-      return 'Za $k $w,';
+      if (k == 1) return 'Za kilometr';
+      return 'Za $k ${k < 5 ? 'kilometry' : 'kilometrů'}';
     }
-    return 'Za ${km.toString().replaceAll('.', ',')} kilometru,';
+    return 'Za ${km.toString().replaceAll('.', ',')} kilometru';
   }
 
   // ------------------------------------------------------------ trasa
@@ -805,8 +948,9 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   /// Rychlostní limity a kamionové výstrahy – na pozadí, trasa je použitelná hned.
   Future<void> _loadRouteExtras(ValhallaClient client, TruckRoute r) async {
     try {
-      await client.loadEdgeAttributes(r);
+      await client.loadEdgeAttributes(r, maxSpeedKmh: _settings.profile.maxSpeed);
       if (mounted) setState(() {});
+      _loadServices(r);
       await enrichManeuvers(r);
       if (mounted) setState(() {});
     } catch (_) {}
@@ -831,6 +975,176 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       final bad = w.where((x) => x.violates).length;
       if (bad > 0) _toast('Pozor: na trase je $bad omezení, která vaše vozidlo překračuje.');
     } catch (_) {}
+  }
+
+  /// Odpočívky a pumpy u dálnice na trase (pro okénko vpravo).
+  Future<void> _loadServices(TruckRoute r) async {
+    try {
+      final list = await findHighwayServices(r);
+      if (!mounted) return;
+      setState(() => r.services = list);
+    } catch (_) {}
+  }
+
+  /// Nejbližší služba před námi (projetá zmizí a ukáže se další).
+  (HighwayService, double)? get _nextService {
+    final r = _route, nav = _nav;
+    if (r == null || nav == null || !_navigating) return null;
+    for (final s in r.services) {
+      final ahead = s.atM - nav.traveled;
+      if (ahead < -30) continue;
+      if (ahead > 250000) return null;
+      return (s, math.max(0.0, ahead));
+    }
+    return null;
+  }
+
+  void _showService(HighwayService s) {
+    final r = _route;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Lkw.panel,
+      isScrollControlled: true,
+      builder: (ctx) {
+        final ahead = math.max(0.0, s.atM - (_nav?.traveled ?? 0));
+        final speed = r != null && r.truckTimeSec > 0 ? r.lengthKm * 1000 / r.truckTimeSec : 22.0;
+        final km = s.road != null ? r?.kilometerAt(s.atM, s.road!) : null;
+        final upcoming = [
+          for (final x in r?.services ?? const <HighwayService>[])
+            if (x.atM > s.atM) x,
+        ].take(4).toList();
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    margin: const EdgeInsets.only(bottom: 14),
+                    decoration: BoxDecoration(color: Lkw.muted, borderRadius: BorderRadius.circular(2)),
+                  ),
+                ),
+                Row(
+                  children: [
+                    Container(
+                      width: 52,
+                      height: 52,
+                      decoration: BoxDecoration(
+                        color: s.amenities.contains(ServiceAmenity.fuel)
+                            ? Lkw.amber
+                            : const Color(0xFF2F6FDE),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Icon(
+                        amenityIcon(
+                          s.amenities.contains(ServiceAmenity.fuel)
+                              ? ServiceAmenity.fuel
+                              : ServiceAmenity.parking,
+                        ),
+                        size: 34,
+                        color: s.amenities.contains(ServiceAmenity.fuel) ? Lkw.graphite : Colors.white,
+                      ),
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(s.name, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+                          Text(s.type, style: const TextStyle(color: Lkw.muted)),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                Text(
+                  [
+                    'za ${formatDistance(ahead)}',
+                    '~${formatDuration(Duration(seconds: (ahead / speed).round()))}',
+                    if (s.road != null) km != null ? '${s.road} km ${km.toStringAsFixed(0)}' : s.road!,
+                    'vpravo',
+                  ].join(' · '),
+                  style: const TextStyle(fontSize: 17, color: Lkw.amber, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    for (final a in ServiceAmenity.values)
+                      if (s.amenities.contains(a))
+                        Chip(
+                          avatar: Icon(amenityIcon(a), size: 18),
+                          label: Text(
+                            a == ServiceAmenity.parking && s.hgvSpaces != null
+                                ? 'Parkování · ${s.hgvSpaces} míst pro kamiony'
+                                : amenityLabel(a),
+                          ),
+                          backgroundColor: Lkw.panelHi,
+                        ),
+                    for (final n in s.notes) Chip(label: Text(n), backgroundColor: Lkw.panelHi),
+                  ],
+                ),
+                if (s.brands.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  Text(s.brands.join(' · '), style: const TextStyle(color: Lkw.text)),
+                ],
+                const SizedBox(height: 16),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
+                    icon: const Icon(Icons.add_location_alt),
+                    label: const Text('Přidat jako průjezdní bod'),
+                    onPressed: () async {
+                      Navigator.pop(ctx);
+                      setState(() => _stops.add((s.point, s.name)));
+                      _say('Přidána zastávka ${s.name}.');
+                      _saveTrip();
+                      await _syncLayers();
+                      await _computeRoute(reroute: _navigating);
+                    },
+                  ),
+                ),
+                if (upcoming.isNotEmpty) ...[
+                  const SizedBox(height: 14),
+                  const Text(
+                    'DALŠÍ NA TRASE',
+                    style: TextStyle(color: Lkw.muted, fontWeight: FontWeight.w800),
+                  ),
+                  for (final x in upcoming)
+                    ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      leading: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          for (final a in [ServiceAmenity.fuel, ServiceAmenity.parking, ServiceAmenity.food])
+                            if (x.amenities.contains(a)) Icon(amenityIcon(a), size: 18, color: Lkw.muted),
+                        ],
+                      ),
+                      title: Text(x.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                      trailing: Text(
+                        formatDistance(math.max(0.0, x.atM - (_nav?.traveled ?? 0))),
+                        style: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        _showService(x);
+                      },
+                    ),
+                ],
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 
   Future<void> _fitRoute(TruckRoute r, {bool all = false}) async {
@@ -946,6 +1260,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     _saveTrip();
     setState(() {
       _navigating = true;
+      Pip.instance.setNavigating(true);
       _follow = true;
       _results = [];
       _options = [_options[_sel]];
@@ -969,6 +1284,27 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     _animateTo();
   }
 
+  /// Křížek během jízdy: nejdřív se zeptat, ať se trasa neukončí omylem.
+  Future<void> _confirmStop() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Lkw.panel,
+        title: const Text('Ukončit aktuální trasu?'),
+        content: Text(_destName != null ? 'Navigace do: $_destName se zastaví.' : 'Navigace se zastaví.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Pokračovat v jízdě')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Lkw.danger),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Ukončit'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) await _stopNavigation();
+  }
+
   Future<void> _stopNavigation() async {
     WakelockPlus.disable();
     _clearTrip();
@@ -976,6 +1312,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     _sim = null;
     setState(() {
       _navigating = false;
+      Pip.instance.setNavigating(false);
       _stops.clear();
       _planStart = null;
       _route = null;
@@ -1488,7 +1825,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     final limitRaw = nav != null ? route?.speedLimitAt(nav.segmentIndex) : null;
     final limit = limitRaw == null ? null : math.min(limitRaw, _settings.profile.maxSpeed);
     final bottomPad = MediaQuery.of(context).padding.bottom;
-    final panelH = route == null ? 0.0 : (_navigating ? 104.0 : 270.0);
+    final pip = Pip.instance.active.value;
+    final panelH = pip || route == null ? 0.0 : (_navigating ? 104.0 : 270.0);
 
     return Scaffold(
       resizeToAvoidBottomInset: false,
@@ -1530,115 +1868,181 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     onMapLongClick: (_, p) => _onLongPress(LatLng(p.latitude, p.longitude)),
                   ),
                 ),
-              SafeArea(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (_navigating && route != null) _banner(route, nav) else _searchBar(),
-                    if (!_navigating && (_results.isNotEmpty || _savedResults.isNotEmpty)) _resultsList(),
-                    if (_pickGate)
-                      Container(
-                        margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(color: Lkw.amber, borderRadius: BorderRadius.circular(14)),
-                        child: const Text(
-                          'Dlouze podržte mapu na místě vjezdu / brány pro kamiony.',
-                          style: TextStyle(color: Colors.black, fontWeight: FontWeight.w800, fontSize: 16),
+              if (pip)
+                _pipOverlay(route, nav, limit)
+              else ...[
+                SafeArea(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (_navigating && route != null) _banner(route, nav) else _searchBar(),
+                      if (!_navigating && (_results.isNotEmpty || _savedResults.isNotEmpty)) _resultsList(),
+                      if (_pickGate)
+                        Container(
+                          margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Lkw.amber,
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: const Text(
+                            'Dlouze podržte mapu na místě vjezdu / brány pro kamiony.',
+                            style: TextStyle(color: Colors.black, fontWeight: FontWeight.w800, fontSize: 16),
+                          ),
+                        ),
+                      Expanded(
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [const Spacer(), if (_navigating) _warningsColumn(route, nav)],
                         ),
                       ),
-                    Expanded(
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [const Spacer(), if (_navigating) _warningsColumn(route, nav)],
-                      ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-              // Pravý sloupec tlačítek
-              Positioned(
-                right: 12,
-                bottom: panelH + 16 + bottomPad,
-                child: Column(
-                  children: [
-                    if (!_navigating)
-                      RoundButton(icon: Icons.route, tooltip: 'Plán trasy', onPressed: _openPlanner),
-                    if (!_navigating)
-                      RoundButton(
-                        icon: Icons.local_shipping,
-                        tooltip: 'Profil vozidla',
-                        onPressed: _openProfile,
-                      ),
-                    RoundButton(
-                      icon: Icons.local_parking,
-                      tooltip: 'Truckparky, servisy, nafta',
-                      onPressed: _choosePoi,
-                    ),
-                    RoundButton(
-                      icon: _settings.voice ? Icons.volume_up : Icons.volume_off,
-                      tooltip: 'Hlas',
-                      onPressed: () {
-                        setState(() => _settings.voice = !_settings.voice);
-                        if (!_settings.voice) Voice.instance.stop();
-                        _settings.save();
-                      },
-                    ),
-                    RoundButton(
-                      icon: switch (_settings.mapLayer) {
-                        MapLayer.map => Icons.layers_outlined,
-                        MapLayer.aerial => Icons.satellite_alt,
-                        MapLayer.hybrid => Icons.layers,
-                      },
-                      tooltip: 'Mapa / letecká / hybridní',
-                      onPressed: _chooseLayer,
-                    ),
-                    RoundButton(
-                      icon: _settings.view3d ? Icons.view_in_ar : Icons.map_outlined,
-                      tooltip: '2D / 3D',
-                      onPressed: () {
-                        setState(() => _settings.view3d = !_settings.view3d);
-                        _settings.save();
-                        _applyCamera();
-                      },
-                    ),
-                    if (!_follow)
-                      RoundButton(
-                        icon: Icons.my_location,
-                        tooltip: 'Moje poloha',
-                        onPressed: _recenter,
-                        color: Lkw.amber,
-                      ),
-                  ],
-                ),
-              ),
-              if (_navigating && (limit != null || _speedKmh > 0))
+                // Pravý sloupec tlačítek
                 Positioned(
-                  left: 12,
+                  right: 12,
                   bottom: panelH + 16 + bottomPad,
-                  child: SpeedWidget(limit: limit, speedKmh: _speedKmh),
+                  child: Column(
+                    children: [
+                      if (_nextService case (final svc, final ahead))
+                        ServiceTile(service: svc, aheadM: ahead, onTap: () => _showService(svc)),
+                      if (!_navigating)
+                        RoundButton(icon: Icons.route, tooltip: 'Plán trasy', onPressed: _openPlanner),
+                      if (!_navigating)
+                        RoundButton(
+                          icon: Icons.local_shipping,
+                          tooltip: 'Profil vozidla',
+                          onPressed: _openProfile,
+                        ),
+                      RoundButton(
+                        icon: Icons.local_parking,
+                        tooltip: 'Truckparky, servisy, nafta',
+                        onPressed: _choosePoi,
+                      ),
+                      RoundButton(
+                        icon: _settings.voice ? Icons.volume_up : Icons.volume_off,
+                        tooltip: 'Hlas',
+                        onPressed: () {
+                          setState(() => _settings.voice = !_settings.voice);
+                          if (!_settings.voice) Voice.instance.stop();
+                          _settings.save();
+                        },
+                      ),
+                      RoundButton(
+                        icon: switch (_settings.mapLayer) {
+                          MapLayer.map => Icons.layers_outlined,
+                          MapLayer.aerial => Icons.satellite_alt,
+                          MapLayer.hybrid => Icons.layers,
+                        },
+                        tooltip: 'Mapa / letecká / hybridní',
+                        onPressed: _chooseLayer,
+                      ),
+                      RoundButton(
+                        icon: _settings.view3d ? Icons.view_in_ar : Icons.map_outlined,
+                        tooltip: '2D / 3D',
+                        onPressed: () {
+                          setState(() => _settings.view3d = !_settings.view3d);
+                          _settings.save();
+                          _applyCamera();
+                        },
+                      ),
+                      if (!_follow)
+                        RoundButton(
+                          icon: Icons.my_location,
+                          tooltip: 'Moje poloha',
+                          onPressed: _recenter,
+                          color: Lkw.amber,
+                        ),
+                    ],
+                  ),
                 ),
-              if (_offline)
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: panelH + 16 + bottomPad,
-                  child: Center(
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                      decoration: BoxDecoration(color: Lkw.danger, borderRadius: BorderRadius.circular(20)),
-                      child: Text(
-                        route != null ? 'Bez připojení – vedu podle uložené trasy' : 'Bez připojení',
-                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+                if (_navigating && (limit != null || _speedKmh > 0))
+                  Positioned(
+                    left: 12,
+                    bottom: panelH + 16 + bottomPad,
+                    child: SpeedWidget(limit: limit, speedKmh: _speedKmh),
+                  ),
+                if (_offline)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: panelH + 16 + bottomPad,
+                    child: Center(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                        decoration: BoxDecoration(color: Lkw.danger, borderRadius: BorderRadius.circular(20)),
+                        child: Text(
+                          route != null ? 'Bez připojení – vedu podle uložené trasy' : 'Bez připojení',
+                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+                        ),
                       ),
                     ),
                   ),
-                ),
-              if (route != null) Positioned(left: 0, right: 0, bottom: 0, child: _bottomPanel(route)),
-              if (_routing) const Center(child: CircularProgressIndicator()),
+                if (route != null) Positioned(left: 0, right: 0, bottom: 0, child: _bottomPanel(route)),
+                if (_routing) const Center(child: CircularProgressIndicator()),
+              ],
             ],
           );
         },
       ),
+    );
+  }
+
+  /// Malé okénko (obraz v obraze): jen mapa, šipka s dálkou a rychlost.
+  Widget _pipOverlay(TruckRoute? route, NavState? nav, int? limit) {
+    final i = nav?.nextManeuverIndex ?? -1;
+    final m = route != null && i >= 0 ? route.maneuvers[i] : null;
+    return Stack(
+      children: [
+        if (m != null && nav != null)
+          Positioned(
+            left: 6,
+            top: 6,
+            right: 6,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              decoration: BoxDecoration(color: Lkw.panel, borderRadius: BorderRadius.circular(12)),
+              child: Row(
+                children: [
+                  Container(
+                    width: 34,
+                    height: 34,
+                    decoration: BoxDecoration(color: Lkw.amber, borderRadius: BorderRadius.circular(8)),
+                    child: Icon(maneuverIcon(m.type), color: Colors.black, size: 26),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      formatDistance(nav.distanceToNextManeuver),
+                      maxLines: 1,
+                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: Lkw.amber),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        if (_navigating && limit != null)
+          Positioned(
+            left: 6,
+            bottom: 6,
+            child: Container(
+              width: 38,
+              height: 38,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                shape: BoxShape.circle,
+                border: Border.all(color: const Color(0xFFD50000), width: 4),
+              ),
+              child: Text(
+                '$limit',
+                style: const TextStyle(color: Colors.black, fontWeight: FontWeight.w900, fontSize: 14),
+              ),
+            ),
+          ),
+      ],
     );
   }
 
@@ -1815,8 +2219,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   Widget _bottomPanel(TruckRoute route) {
     final nav = _nav;
     final remainingM = nav?.remaining ?? route.lengthKm * 1000;
-    final ratio = route.lengthKm > 0 ? remainingM / (route.lengthKm * 1000) : 0;
-    final remainingSec = route.timeSec * ratio;
+    final remainingSec = route.remainingSec(remainingM, nav?.segmentIndex ?? 0);
     final eta = DateTime.now().add(Duration(seconds: remainingSec.round()));
     final etaStr = '${eta.hour}:${eta.minute.toString().padLeft(2, '0')}';
     final bad = route.warnings.where((w) => w.violates).length;
@@ -1877,7 +2280,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     ),
                     _panelButton(Icons.alt_route, 'Přehled trasy', () => _fitRoute(route), Lkw.panelHi),
                     const SizedBox(width: 10),
-                    _panelButton(Icons.close, 'Ukončit navigaci', _stopNavigation, Lkw.danger),
+                    _panelButton(Icons.close, 'Ukončit navigaci', _confirmStop, Lkw.danger),
                   ],
                 )
               : Column(

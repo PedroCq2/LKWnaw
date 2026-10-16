@@ -28,6 +28,35 @@ class EdgeAttr {
   });
 }
 
+/// Co je na dálniční odpočívce / čerpací stanici k dispozici.
+enum ServiceAmenity { parking, fuel, food, wc, shower, adblue, hotel }
+
+/// Služba u dálnice na straně jízdy (odpočívka, čerpací stanice, parkoviště pro kamiony).
+class HighwayService {
+  final String name;
+  final String type; // „Odpočívka s čerpací stanicí“, …
+  final LatLng point;
+  final double atM; // poloha po trase (m od začátku)
+  final double offM; // vzdušně od trasy
+  final Set<ServiceAmenity> amenities;
+  final List<String> brands; // OMV, Shell, McDonald's, …
+  final int? hgvSpaces;
+  final List<String> notes; // nonstop, zdarma, hlídané, …
+  final String? road; // D1
+  HighwayService({
+    required this.name,
+    required this.type,
+    required this.point,
+    required this.atM,
+    required this.offM,
+    required this.amenities,
+    this.brands = const [],
+    this.hgvSpaces,
+    this.notes = const [],
+    this.road,
+  });
+}
+
 class Maneuver {
   final int type;
   final String instruction;
@@ -50,6 +79,9 @@ class Maneuver {
   /// Vložený pokyn „Pokračujte rovně“ na rozdvojení, které Valhalla nehlásí.
   final bool synthetic;
 
+  /// Kruhový objezd: kolikátým výjezdem vyjet.
+  final int? roundaboutExit;
+
   /// Pruhy/směry z OSM už doplněné.
   bool enriched = false;
 
@@ -67,6 +99,7 @@ class Maneuver {
     this.exitBranch = const [],
     this.exitToward = const [],
     this.synthetic = false,
+    this.roundaboutExit,
   });
 
   static List<String> _signTexts(Map? sign, String key) =>
@@ -85,6 +118,7 @@ class Maneuver {
     exitNumber: _signTexts(j['sign'] as Map?, 'exit_number_elements').firstOrNull,
     exitBranch: _signTexts(j['sign'] as Map?, 'exit_branch_elements'),
     exitToward: _signTexts(j['sign'] as Map?, 'exit_toward_elements'),
+    roundaboutExit: (j['roundabout_exit_count'] as num?)?.toInt(),
   );
 }
 
@@ -104,8 +138,27 @@ class TruckRoute {
 
   /// Rychlostní limit (km/h) a název silnice pro každý segment `shape[i]→shape[i+1]`.
   List<int?> speedLimits = const [];
+
+  /// Kumulativní jízdní doba (s) po bodech `shape` při rychlosti kamionu (omezovač 80–90 km/h).
+  /// Valhalla počítá na dálnici s rychlostí aut, takže její čas je pro kamion moc optimistický.
+  List<double>? truckTime;
+  double truckOverheadSec = 0; // křižovatky, semafory… (rozpočítané podle vzdálenosti)
+
+  /// Zbývající doba jízdy od segmentu [segment] (zbývá [remainingM] m).
+  double remainingSec(double remainingM, int segment) {
+    final total = lengthKm * 1000;
+    final ratio = total > 0 ? (remainingM / total).clamp(0.0, 1.0) : 0.0;
+    final t = truckTime;
+    if (t == null || t.isEmpty) return timeSec * ratio;
+    final i = segment.clamp(0, t.length - 1);
+    return (t.last - t[i]).clamp(0.0, double.infinity) + truckOverheadSec * ratio;
+  }
+
+  /// Celková doba pro kamion (po načtení atributů silnic), jinak odhad Valhally.
+  double get truckTimeSec => remainingSec(lengthKm * 1000, 0);
   List<String?> roadNames = const [];
   List<EdgeAttr> edges = const [];
+  List<HighwayService> services = const []; // služby u dálnice podél trasy
 
   /// Začátky sjezdů, které vedou na jinou dálnici (OSM `destination:ref` = D…) –
   /// jen tam je dálniční křižovatka a hlásí se „Pokračujte rovně“.
