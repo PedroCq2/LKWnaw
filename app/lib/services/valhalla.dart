@@ -35,7 +35,9 @@ class ValhallaClient {
     double? heading,
     bool delivery = false,
     List<LatLng> exclude = const [],
+    List<LatLng> via = const [],
   }) async => (await _request(
+    via: via,
     from: from,
     to: to,
     profile: profile,
@@ -52,6 +54,7 @@ class ValhallaClient {
     double? heading,
     bool delivery = false,
     List<LatLng> exclude = const [],
+    List<LatLng> via = const [],
   }) async {
     Future<List<TruckRoute>> safe(Future<List<TruckRoute>> f) => f.catchError((_) => <TruckRoute>[]);
     final main = _request(
@@ -61,7 +64,9 @@ class ValhallaClient {
       heading: heading,
       delivery: delivery,
       exclude: exclude,
-      alternates: 2,
+      via: via,
+      // Valhalla počítá alternativy jen pro trasu bez zastávek.
+      alternates: via.isEmpty ? 2 : 0,
     );
     final noToll = safe(
       _request(
@@ -71,6 +76,7 @@ class ValhallaClient {
         heading: heading,
         delivery: delivery,
         exclude: exclude,
+        via: via,
         extra: {'use_tolls': 0.0, 'exclude_tolls': true},
       ),
     );
@@ -82,6 +88,7 @@ class ValhallaClient {
         heading: heading,
         delivery: delivery,
         exclude: exclude,
+        via: via,
         extra: {'shortest': true},
       ),
     );
@@ -117,6 +124,7 @@ class ValhallaClient {
     List<LatLng> exclude = const [],
     int alternates = 0,
     Map<String, dynamic> extra = const {},
+    List<LatLng> via = const [],
   }) async {
     final origin = <String, dynamic>{'lat': from.latitude, 'lon': from.longitude};
     if (heading != null && heading >= 0) {
@@ -126,6 +134,7 @@ class ValhallaClient {
     final body = {
       'locations': [
         origin,
+        for (final v in via) {'lat': v.latitude, 'lon': v.longitude, 'type': 'break'},
         {'lat': to.latitude, 'lon': to.longitude},
       ],
       'costing': 'truck',
@@ -164,9 +173,14 @@ class ValhallaClient {
   /// Doplní k trase rychlostní limity a názvy silnic (Valhalla trace_attributes).
   Future<void> loadEdgeAttributes(TruckRoute route) async {
     final enc = route.encodedShape;
-    if (enc == null) return;
     final body = {
-      'encoded_polyline': enc,
+      // Trasa se zastávkami (více etap) nemá jednu polyline → poslat body.
+      if (enc != null)
+        'encoded_polyline': enc
+      else
+        'shape': [
+          for (final p in route.shape) {'lat': p.latitude, 'lon': p.longitude},
+        ],
       'costing': 'truck',
       'shape_match': 'edge_walk',
       'filters': {
@@ -217,7 +231,9 @@ class ValhallaClient {
         ),
       );
       final en = math.min(n, (e['end_shape_index'] as num?)?.toInt() ?? 0);
-      final lim = (e['speed_limit'] as num?)?.toInt();
+      // Číslo, nebo „unlimited“ (německé dálnice) → limit dá jen max. rychlost kamionu.
+      final sl = e['speed_limit'];
+      final lim = sl is num ? sl.toInt() : (sl == 'unlimited' ? 199 : null);
       final nm = (e['names'] as List?)?.isNotEmpty == true ? (e['names'] as List).first as String : null;
       for (var i = b; i < en; i++) {
         limits[i] = (lim != null && lim > 0 && lim < 200) ? lim : null;

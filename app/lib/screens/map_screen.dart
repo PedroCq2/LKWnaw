@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
@@ -8,6 +9,7 @@ import 'package:flutter_tts/flutter_tts.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:maplibre_gl/maplibre_gl.dart' as ml;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../models/route.dart';
@@ -16,6 +18,7 @@ import '../navigation/simulator.dart';
 import '../services/geocoding.dart';
 import '../services/restrictions.dart';
 import '../services/lanes.dart';
+import '../services/live_data.dart';
 import '../services/map_style.dart';
 import '../services/offline_maps.dart';
 import '../services/saved_places.dart';
@@ -98,6 +101,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   LatLng? _destAddr; // adresa cíle (bez vjezdu)
   bool _pickGate = false; // čeká se na dlouhé podržení u vjezdu pro kamiony
   bool _noteSpoken = false;
+  final List<(LatLng, String)> _stops = []; // zastávky po cestě (průjezdní body)
   double? _dlProgress; // stahování mapy trasy (0–1), null = nestahuje se
   List<Place> _parking = [];
   PoiKind _poiKind = PoiKind.parking;
@@ -209,6 +213,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
 
   void _onFix(LatLng pos, double speedMps, double? heading, {bool simulated = false, double accuracy = 10}) {
     if (_pos == null && kIsWeb) _webDemo();
+    if (_pos == null) Future.delayed(const Duration(seconds: 1), _offerResume);
     final speed = speedMps * 3.6;
     // Kurz z GPS je spolehlivý jen za jízdy.
     if (speed > 3 && heading != null) _heading = heading;
@@ -225,6 +230,15 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       if (_navigating) {
         _voiceGuidance(nav);
         _warningVoice(nav);
+        // Projetá zastávka: odebrat (při přepočtu se už nepoužije).
+        for (final st in [..._stops]) {
+          if (const Distance()(pos, st.$1) < 80) {
+            _stops.remove(st);
+            _saveTrip();
+            _say('Zastávka ${st.$2}.');
+            _syncLayers();
+          }
+        }
         final note = _destSaved?.note;
         if (note != null && !_noteSpoken && nav.remaining < 1500) {
           _noteSpoken = true;
@@ -232,6 +246,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         }
         if (nav.arrived && !_arrivedSpoken) {
           _arrivedSpoken = true;
+          _clearTrip();
           _say('Jste v cíli.');
         }
         // Přepočet jen za jízdy; bez internetu zkoušet jednou za 30 s a vést dál po staré trase.
@@ -423,7 +438,16 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         'dest-circle',
         const ml.CircleLayerProperties(
           circleRadius: 10,
-          circleColor: '#E53935',
+          circleColor: [
+            'case',
+            [
+              '==',
+              ['get', 'stop'],
+              true,
+            ],
+            '#FFB000',
+            '#E53935',
+          ],
           circleStrokeColor: '#FFFFFF',
           circleStrokeWidth: 3,
         ),
@@ -582,7 +606,13 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
           for (final p in _parking) (p.point, {'l': letter}),
         ]),
       );
-      await m.setGeoJsonSource('dest', _points([if (_dest != null) (_dest!, {})]));
+      await m.setGeoJsonSource(
+        'dest',
+        _points([
+          if (_dest != null) (_dest!, {'stop': false}),
+          for (final st in _stops) (st.$1, {'stop': true}),
+        ]),
+      );
       await _updateMeLayer();
     } catch (e) {
       debugPrint('sync layers: $e');
@@ -665,15 +695,27 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     for (final w in _route?.warnings ?? const <RouteWarning>[]) {
       final d = w.atMeters - nav.traveled;
       if (d < 0) continue;
-      if (d > 1200) break;
-      final speak = w.violates
-          ? d <= 1000
-          : (w.type == WarningType.speedCamera && d <= 500) ||
-                (w.type == WarningType.noOvertakingHgv && d <= 300);
+      if (d > 5000) break;
+      final speak = switch (w.type) {
+        WarningType.wind || WarningType.ice => d <= 5000,
+        WarningType.closure => w.violates && d <= 1000,
+        WarningType.roadworks => d <= 1000,
+        WarningType.speedCamera => d <= 500,
+        WarningType.noOvertakingHgv => d <= 300,
+        _ => w.violates && d <= 1000,
+      };
       if (speak && _warnSpoken.add(w)) {
         final dist = _spokenDistance(d).replaceAll(',', '');
         if (w.type == WarningType.speedCamera) {
           _say('$dist radar.');
+        } else if (w.type == WarningType.closure) {
+          _say('Pozor! $dist uzavírka.');
+        } else if (w.type == WarningType.roadworks) {
+          _say('$dist práce na silnici.');
+        } else if (w.type == WarningType.wind) {
+          _say('Pozor, silný vítr, nárazy až ${w.value!.round()} kilometrů za hodinu.');
+        } else if (w.type == WarningType.ice) {
+          _say('Pozor, nebezpečí náledí.');
         } else if (w.type == WarningType.noOvertakingHgv) {
           _say(
             'Zákaz předjíždění nákladních vozidel${w.note != null ? ', ${w.note!.replaceAll('–', ' až ').replaceAll(' h', ' hodin')}' : ''}.',
@@ -724,6 +766,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                   heading: heading,
                   delivery: _settings.delivery,
                   exclude: _excluded,
+                  via: [for (final st in _stops) st.$1],
                 ),
               ),
             ]
@@ -734,6 +777,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
               heading: heading,
               delivery: _settings.delivery,
               exclude: _excluded,
+              via: [for (final st in _stops) st.$1],
             );
       if (!mounted || opts.isEmpty) return;
       _offline = false;
@@ -785,6 +829,9 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     } catch (_) {}
     try {
       final w = await loadRouteWarnings(r, _settings.profile, delivery: _settings.delivery);
+      // Živá data (Německo: uzavírky/práce, počasí) – přidat k výstrahám z OSM.
+      w.addAll(await loadLiveWarnings(r));
+      w.sort((a, b) => a.atMeters.compareTo(b.atMeters));
       if (!mounted || _route != r) return;
       setState(() => r.warnings = w);
       await _syncLayers();
@@ -792,6 +839,17 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       if (r.interchangeLinks.isNotEmpty) {
         await enrichManeuvers(r);
         if (mounted) setState(() {});
+      }
+      // Uzavírka přímo na trase (Autobahn API) → objet ji a přepočítat.
+      final closures = w.where((x) => x.type == WarningType.closure && x.violates).toList();
+      if (closures.isNotEmpty &&
+          _excluded.length < 10 &&
+          !closures.every((c) => _excluded.contains(c.point))) {
+        _excluded.addAll(closures.map((c) => c.point));
+        _toast('Na trase je uzavírka – hledám objížďku.');
+        _say('Na trase je uzavírka. Hledám objížďku.');
+        await _computeRoute(reroute: _navigating);
+        return;
       }
       // Zásobování: trasa nesmí přes most s nižší nosností → vyhnout se mu a přepočítat.
       final bridges = w.where((x) => x.onBridge && x.violates).toList();
@@ -835,9 +893,82 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     } catch (_) {}
   }
 
+  // ------------------------------------------------------------ obnovení cesty po restartu
+
+  Future<void> _saveTrip() async {
+    final d = _dest;
+    if (d == null) return;
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setString(
+        'activeTrip',
+        jsonEncode({
+          'lat': d.latitude,
+          'lon': d.longitude,
+          'name': _destName,
+          'saved': _destSaved?.id,
+          'stops': [
+            for (final st in _stops) {'lat': st.$1.latitude, 'lon': st.$1.longitude, 'name': st.$2},
+          ],
+          'at': DateTime.now().millisecondsSinceEpoch,
+        }),
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _clearTrip() async {
+    try {
+      (await SharedPreferences.getInstance()).remove('activeTrip');
+    } catch (_) {}
+  }
+
+  /// Po spuštění: rozjetá cesta (max. 12 h stará) → nabídnout pokračování.
+  Future<void> _offerResume() async {
+    if (_dest != null || !mounted) return;
+    Map<String, dynamic>? t;
+    try {
+      final raw = (await SharedPreferences.getInstance()).getString('activeTrip');
+      if (raw != null) t = jsonDecode(raw) as Map<String, dynamic>;
+    } catch (_) {}
+    if (t == null || !mounted) return;
+    final age = DateTime.now().difference(DateTime.fromMillisecondsSinceEpoch((t['at'] as num).toInt()));
+    if (age > const Duration(hours: 12)) {
+      await _clearTrip();
+      return;
+    }
+    final name = (t['name'] as String?) ?? 'cíl';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Pokračovat v navigaci?'),
+        content: Text('Rozjetá cesta do: $name'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Ne')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Pokračovat')),
+        ],
+      ),
+    );
+    if (ok != true) {
+      await _clearTrip();
+      return;
+    }
+    final saved = _saved.items.where((e) => e.id == t!['saved']).firstOrNull;
+    _setDestination(LatLng((t['lat'] as num).toDouble(), (t['lon'] as num).toDouble()), name, saved: saved);
+    for (final st in (t['stops'] as List? ?? const [])) {
+      _stops.add((LatLng((st['lat'] as num).toDouble(), (st['lon'] as num).toDouble()), '${st['name']}'));
+    }
+    // Počkat na trasu a rovnou jet.
+    for (var i = 0; i < 60 && (_route == null || _routing); i++) {
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
+    if (_stops.isNotEmpty) await _computeRoute();
+    if (_route != null && mounted) await _startNavigation();
+  }
+
   Future<void> _startNavigation() async {
     final r = _route;
     if (r == null) return;
+    _saveTrip();
     setState(() {
       _navigating = true;
       _follow = true;
@@ -865,10 +996,12 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
 
   Future<void> _stopNavigation() async {
     WakelockPlus.disable();
+    _clearTrip();
     _sim?.stop();
     _sim = null;
     setState(() {
       _navigating = false;
+      _stops.clear();
       _route = null;
       _options = [];
       _engine = null;
@@ -886,6 +1019,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   void _setDestination(LatLng p, String name, {SavedPlace? saved}) {
     FocusScope.of(context).unfocus();
     _excluded.clear();
+    _stops.clear();
     final sp = saved ?? _saved.near(p);
     setState(() {
       _destSaved = sp;
@@ -900,6 +1034,48 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     });
     _syncLayers();
     _computeRoute(reroute: _navigating);
+  }
+
+  /// Místo z hledání POI: s trasou nabídni „Přidat jako zastávku“ (cíl zůstane) nebo „Nový cíl“.
+  Future<void> _pickTarget(LatLng p, String name) async {
+    if (_dest == null) {
+      _setDestination(p, name);
+      return;
+    }
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis)),
+            ListTile(
+              leading: const Icon(Icons.add_location_alt, color: Lkw.amber),
+              title: const Text('Přidat jako zastávku'),
+              subtitle: Text('Pak pokračovat do: ${_destName ?? 'cíl'}'),
+              onTap: () => Navigator.pop(ctx, 'stop'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.flag),
+              title: const Text('Nový cíl'),
+              onTap: () => Navigator.pop(ctx, 'dest'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (choice == 'dest') {
+      _setDestination(p, name);
+      if (_navigating) _say('Naviguji na $name.');
+    } else if (choice == 'stop') {
+      setState(() => _stops.add((p, name)));
+      if (_navigating) {
+        _say('Přidána zastávka $name.');
+        _saveTrip();
+      }
+      await _syncLayers();
+      await _computeRoute(reroute: _navigating);
+    }
   }
 
   /// Dlouhé podržení: vjezd pro kamiony / objet místo na trase / nový cíl.
@@ -1225,8 +1401,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     isThreeLine: e.place.features.isNotEmpty,
                     onTap: () {
                       Navigator.pop(ctx);
-                      _setDestination(e.place.point, e.place.name);
-                      if (_navigating) _say('Naviguji na ${e.place.name}.');
+                      _pickTarget(e.place.point, e.place.name);
                     },
                   ),
                 if (shown.isEmpty) const ListTile(title: Text('Žádné místo neodpovídá filtru.')),
@@ -1763,6 +1938,17 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                             _computeRoute();
                           },
                         ),
+                        for (final st in _stops)
+                          InputChip(
+                            avatar: const Icon(Icons.add_location_alt, size: 18, color: Lkw.amber),
+                            label: Text('Zastávka: ${st.$2}', overflow: TextOverflow.ellipsis),
+                            visualDensity: VisualDensity.compact,
+                            onDeleted: () {
+                              setState(() => _stops.remove(st));
+                              _syncLayers();
+                              _computeRoute();
+                            },
+                          ),
                         if (bad > 0)
                           Chip(
                             avatar: const Icon(Icons.warning, size: 16, color: Lkw.danger),

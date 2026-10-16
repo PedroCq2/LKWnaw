@@ -107,6 +107,9 @@ class TruckRoute {
   /// Začátky sjezdů, které vedou na jinou dálnici (OSM `destination:ref` = D…) –
   /// jen tam je dálniční křižovatka a hlásí se „Pokračujte rovně“.
   List<(LatLng, String)> interchangeLinks = const [];
+
+  /// Truckparky z Autobahn API (Německo) na dálnicích trasy.
+  List<(LatLng, String, int?)> autobahnParking = const [];
   bool osmRampsChecked = false;
 
   /// Kamionová omezení a radary podél trasy (doplňuje se na pozadí).
@@ -176,7 +179,19 @@ class TruckRoute {
   }
 }
 
-enum WarningType { height, weight, width, length, axleLoad, speedCamera, noOvertakingHgv }
+enum WarningType {
+  height,
+  weight,
+  width,
+  length,
+  axleLoad,
+  speedCamera,
+  noOvertakingHgv,
+  closure,
+  roadworks,
+  wind,
+  ice,
+}
 
 class RouteWarning {
   final WarningType type;
@@ -217,6 +232,14 @@ class RouteWarning {
         return 'radar';
       case WarningType.noOvertakingHgv:
         return note ?? '';
+      case WarningType.closure:
+        return 'uzavírka';
+      case WarningType.roadworks:
+        return 'práce';
+      case WarningType.wind:
+        return '${value!.round()} km/h';
+      case WarningType.ice:
+        return 'náledí';
     }
   }
 
@@ -236,6 +259,14 @@ class RouteWarning {
         return 'radar';
       case WarningType.noOvertakingHgv:
         return 'zákaz předjíždění nákladních vozidel';
+      case WarningType.closure:
+        return 'uzavírka';
+      case WarningType.roadworks:
+        return 'práce na silnici';
+      case WarningType.wind:
+        return 'silný boční vítr';
+      case WarningType.ice:
+        return 'nebezpečí náledí';
     }
   }
 }

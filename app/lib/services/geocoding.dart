@@ -237,6 +237,24 @@ Future<List<RoutePoi>> findTruckPoisAlongRoute(
   ];
   final places = await _findPois(kind, '(around:1500,$poly)', centers, 6, samples.first.$1);
   const dist = Distance();
+  // Německo: oficiální truckparky z Autobahn API (s počtem míst pro kamiony).
+  if (kind == PoiKind.parking) {
+    for (final (pt, name, lkw) in route.autobahnParking) {
+      final i = places.indexWhere((x) => dist(x.point, pt) < 150);
+      final f = [if (lkw != null) '$lkw míst pro kamiony'];
+      if (i >= 0) {
+        places[i] = Place(
+          places[i].name,
+          places[i].point,
+          kind: places[i].kind,
+          address: places[i].address,
+          features: [...f, ...places[i].features],
+        );
+      } else {
+        places.add(Place(name, pt, kind: 'Parkoviště na dálnici (DE)', features: f));
+      }
+    }
+  }
   final speed = route.timeSec > 0 ? route.lengthKm * 1000 / route.timeSec : 20.0; // m/s
   final out = <RoutePoi>[];
   for (final p in places) {

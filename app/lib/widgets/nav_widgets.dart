@@ -270,6 +270,26 @@ class WarningSign extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final live = switch (w.type) {
+      WarningType.closure => (Icons.do_not_disturb_on, const Color(0xFFD50000), Colors.white),
+      WarningType.roadworks => (Icons.construction, const Color(0xFFFFB000), Colors.black),
+      WarningType.wind => (Icons.air, const Color(0xFF1565C0), Colors.white),
+      WarningType.ice => (Icons.ac_unit, const Color(0xFF4FC3F7), Colors.black),
+      _ => null,
+    };
+    if (live != null) {
+      final (icon, bg, fg) = live;
+      return Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          color: bg,
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white, width: 3),
+        ),
+        child: Icon(icon, size: size * 0.55, color: fg),
+      );
+    }
     if (w.type == WarningType.noOvertakingHgv) {
       // Značka B22a – zákaz předjíždění pro nákladní automobily.
       return Container(
@@ -359,6 +379,11 @@ class WarningCard extends StatelessWidget {
       child: Column(
         children: [
           WarningSign(w: w, size: 60),
+          if (w.type == WarningType.wind)
+            Text(
+              w.label,
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: Lkw.text),
+            ),
           if (w.type == WarningType.noOvertakingHgv && w.note != null)
             Text(
               w.note!,
