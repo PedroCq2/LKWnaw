@@ -11,6 +11,11 @@ Flutter aplikace pro navigaci nákladních vozidel nad OpenStreetMap a routing e
   ADR (nebezpečný náklad), max. rychlost vozidla, vyhnutí se mýtu / trajektům.
 - **Výstrahy na trase** – omezení výšky, hmotnosti, šířky, délky a nápravy z OSM
   (červeně, pokud je vaše vozidlo překračuje, + hlasové varování) a radary.
+- **Varianty tras** – nejrychlejší, alternativa, bez mýta, nejkratší (výběr kartou).
+- **Vyhledávání firem a skladů** (Photon/OSM) – např. „kaufland dc olomouc“.
+- **Staničení dálnice** nahoře („D1 114,0 km“, dopočítané z čísel exitů) a výstraha
+  **zákaz předjíždění nákladních vozidel** (i časový).
+- **Vlastní vzhled LKWnav** – grafit + jantar, šedá mapa, jantarová trasa.
 - **Rychlostní limit** úseku (omezený max. rychlostí kamionu) a aktuální rychlost.
 - **Turn-by-turn navigace** – plynulý pohyb, přichycení k trase, tabule s manévrem
   a „Pak …“, název ulice, **české hlasové pokyny**, přepočet při sjetí z trasy.

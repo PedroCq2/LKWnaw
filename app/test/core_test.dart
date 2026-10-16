@@ -83,4 +83,14 @@ void main() {
     expect(d['length'], p.length);
     expect(d['axle_load'], p.axleLoad);
   });
+
+  test('kilometerAt interpolates between motorway exits', () {
+    final r = line()
+      ..kmPoints = [(0.0, 112.0, 'D1'), (1430.0, 113.4, 'D1')];
+    expect(r.kilometerAt(715, 'D1'), closeTo(112.7, 0.01));
+    expect(r.kilometerAt(715, 'D2'), isNull);
+    // klesající staničení (jízda opačným směrem)
+    r.kmPoints = [(0.0, 113.4, 'D1'), (1430.0, 112.0, 'D1')];
+    expect(r.kilometerAt(1000, 'D1'), closeTo(112.42, 0.01));
+  });
 }

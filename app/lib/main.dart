@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'screens/map_screen.dart';
 import 'services/settings.dart';
+import 'theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -15,15 +16,10 @@ class LkwNavApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = ColorScheme.fromSeed(seedColor: const Color(0xFFE65100));
     return MaterialApp(
       title: 'LKWnav',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(colorScheme: scheme, useMaterial3: true),
-      darkTheme: ThemeData(
-          colorScheme: ColorScheme.fromSeed(
-              seedColor: const Color(0xFFE65100), brightness: Brightness.dark),
-          useMaterial3: true),
+      theme: Lkw.theme(),
       home: MapScreen(settings: settings),
     );
   }

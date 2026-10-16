@@ -25,6 +25,7 @@ Future<List<RouteWarning>> loadRouteWarnings(TruckRoute route, TruckProfile truc
   final out = <RouteWarning>[];
   final seenWays = <int>{};
   final seenNodes = <int>{};
+  final junctions = <(double, double, String?)>[];
   const chunk = 200;
   for (var i = 0; i < pts.length - 1; i += chunk - 1) {
     final part = pts.sublist(i, math.min(pts.length, i + chunk));
@@ -32,7 +33,8 @@ Future<List<RouteWarning>> loadRouteWarnings(TruckRoute route, TruckProfile truc
         .map((p) => '${p.latitude.toStringAsFixed(5)},${p.longitude.toStringAsFixed(5)}')
         .join(',');
     final q = '[out:json][timeout:60];('
-        'way(around:12,$poly)[~"^max(height|weight|width|axleload|length)\$"~"."];'
+        'way(around:12,$poly)[~"^(max(height|weight|width|axleload|length)|overtaking:hgv(:conditional)?)\$"~"."];'
+        'node(around:25,$poly)["highway"="motorway_junction"]["ref"];'
         'node(around:20,$poly)["highway"="speed_camera"];'
         'node(around:12,$poly)["maxheight"];'
         ');out tags geom;';
@@ -63,7 +65,10 @@ Future<List<RouteWarning>> loadRouteWarnings(TruckRoute route, TruckProfile truc
         final p = LatLng((e['lat'] as num).toDouble(), (e['lon'] as num).toDouble());
         final at = index.locate(p, 25);
         if (at == null) continue;
-        if (tags['highway'] == 'speed_camera') {
+        if (tags['highway'] == 'motorway_junction') {
+          final km = double.tryParse(RegExp(r'^\d+').stringMatch('${tags['ref']}') ?? '');
+          if (km != null) junctions.add((at, km, route.roadNameAt(index.segmentAt(p) ?? -1)));
+        } else if (tags['highway'] == 'speed_camera') {
           out.add(RouteWarning(
               type: WarningType.speedCamera, value: null, atMeters: at, point: p, violates: false));
         } else {
@@ -73,6 +78,8 @@ Future<List<RouteWarning>> loadRouteWarnings(TruckRoute route, TruckProfile truc
     }
   }
   out.sort((a, b) => a.atMeters.compareTo(b.atMeters));
+  junctions.sort((a, b) => a.$1.compareTo(b.$1));
+  route.kmPoints = junctions;
   return mergeWarnings(out);
 }
 
@@ -81,7 +88,7 @@ List<RouteWarning> mergeWarnings(List<RouteWarning> sorted, {double gapM = 400})
   final lastAt = <String, double>{};
   final out = <RouteWarning>[];
   for (final w in sorted) {
-    final key = '${w.type}:${w.value}';
+    final key = '${w.type}:${w.value}:${w.note}';
     final prev = lastAt[key];
     lastAt[key] = w.atMeters;
     if (w.type != WarningType.speedCamera && prev != null && w.atMeters - prev < gapM) continue;
@@ -126,6 +133,19 @@ List<RouteWarning> _fromTags(
   add('maxlength', WarningType.length, parseMeters, t.length);
   add('maxweight', WarningType.weight, parseTonnes, t.weight);
   add('maxaxleload', WarningType.axleLoad, parseTonnes, t.axleLoad);
+  // Zákaz předjíždění nákladních vozidel (i časově omezený, např. „no @ (06:00-22:00)“).
+  final ov = tags['overtaking:hgv'], ovc = tags['overtaking:hgv:conditional'];
+  String? note;
+  var ban = ov == 'no';
+  if (ovc is String && ovc.trim().startsWith('no')) {
+    ban = true;
+    final m = RegExp(r'(\d{1,2}):\d{2}\s*-\s*(\d{1,2}):\d{2}').firstMatch(ovc);
+    if (m != null) note = '${int.parse(m.group(1)!)}–${int.parse(m.group(2)!)} h';
+  }
+  if (ban) {
+    out.add(RouteWarning(
+        type: WarningType.noOvertakingHgv, value: null, note: note, atMeters: at, point: p, violates: false));
+  }
   return out;
 }
 
@@ -224,6 +244,16 @@ class RouteIndex {
 
   static int _key(double lat, double lon) =>
       ((lat / _cell).floor() + 100000) * 1000000 + ((lon / _cell).floor() + 100000);
+
+  /// Index segmentu trasy nejbližšího bodu [p] (do 30 m).
+  int? segmentAt(LatLng p) {
+    final at = locate(p, 30);
+    if (at == null) return null;
+    final c = route.cumulative;
+    var i = c.indexWhere((x) => x > at);
+    if (i < 0) i = c.length - 1;
+    return math.max(0, i - 1);
+  }
 
   /// Vzdálenost bodu po trase (m) nebo null, pokud je bod dál než [tol] m.
   double? locate(LatLng p, double tol) {

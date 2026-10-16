@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/route.dart';
 import '../navigation/nav_engine.dart';
+import '../theme.dart';
 
 IconData maneuverIcon(int type) {
   switch (type) {
@@ -46,7 +47,7 @@ IconData maneuverIcon(int type) {
   }
 }
 
-/// Zelená tabule s příštím manévrem (+ „pak …“ při blízkém dalším manévru).
+/// Tabule s příštím manévrem (+ „Pak …“ při blízkém dalším manévru).
 class ManeuverBanner extends StatelessWidget {
   final Maneuver? maneuver;
   final double distance;
@@ -62,49 +63,103 @@ class ManeuverBanner extends StatelessWidget {
     return Container(
       margin: const EdgeInsets.fromLTRB(10, 8, 10, 0),
       decoration: BoxDecoration(
-        color: const Color(0xFF0B5D3B),
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: const [BoxShadow(blurRadius: 10, color: Colors.black38)],
+        color: Lkw.panel,
+        borderRadius: BorderRadius.circular(18),
+        border: const Border(left: BorderSide(color: Lkw.amber, width: 6)),
+        boxShadow: const [BoxShadow(blurRadius: 12, color: Colors.black45)],
       ),
       clipBehavior: Clip.antiAlias,
       child: Column(mainAxisSize: MainAxisSize.min, children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(14, 12, 16, 12),
+          padding: const EdgeInsets.fromLTRB(12, 12, 16, 12),
           child: Row(children: [
-            Icon(maneuverIcon(m?.type ?? 4), color: Colors.white, size: 64),
-            const SizedBox(width: 12),
+            Container(
+              width: 72,
+              height: 72,
+              decoration: BoxDecoration(color: Lkw.amber, borderRadius: BorderRadius.circular(14)),
+              child: Icon(maneuverIcon(m?.type ?? 4), color: Colors.black, size: 58),
+            ),
+            const SizedBox(width: 14),
             Expanded(
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 Text(formatDistance(distance),
                     style: const TextStyle(
-                        color: Colors.white, fontSize: 34, fontWeight: FontWeight.w800, height: 1.1)),
+                        color: Lkw.amber, fontSize: 36, fontWeight: FontWeight.w900, height: 1.05)),
                 Text(title,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
-                        color: Colors.white, fontSize: 22, fontWeight: FontWeight.w600, height: 1.15)),
+                        color: Lkw.text, fontSize: 21, fontWeight: FontWeight.w700, height: 1.15)),
               ]),
             ),
           ]),
         ),
         if (then != null)
           Container(
-            color: const Color(0xFF06331F),
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            color: Lkw.graphite,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
             child: Row(children: [
-              const Text('Pak', style: TextStyle(color: Colors.white70, fontSize: 16)),
-              const SizedBox(width: 8),
-              Icon(maneuverIcon(then!.type), color: Colors.white, size: 26),
+              const Text('PAK', style: TextStyle(color: Lkw.amber, fontSize: 14, fontWeight: FontWeight.w800)),
+              const SizedBox(width: 10),
+              Icon(maneuverIcon(then!.type), color: Lkw.text, size: 24),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
                     then!.streetNames.isNotEmpty ? then!.streetNames.first : then!.instruction,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: Colors.white, fontSize: 16)),
+                    style: const TextStyle(color: Lkw.text, fontSize: 16)),
               ),
             ]),
           ),
+      ]),
+    );
+  }
+}
+
+/// Štítek aktuální silnice: „[D1] 114,0 km“ – staničení jako žluté tabulky u dálnice.
+class RoadBadge extends StatelessWidget {
+  final String name;
+  final double? km;
+  const RoadBadge({super.key, required this.name, this.km});
+
+  static (Color, Color) _colors(String n) {
+    if (RegExp(r'^D\s?\d').hasMatch(n)) return (const Color(0xFFC62828), Colors.white); // dálnice
+    if (RegExp(r'^E\s?\d').hasMatch(n)) return (const Color(0xFF1B7F3B), Colors.white); // evropská
+    if (RegExp(r'^(I|II|III|R|S|A|B)?\s?/?\d+$').hasMatch(n)) return (const Color(0xFF1565C0), Colors.white);
+    return (Lkw.panelHi, Lkw.text);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final (bg, fg) = _colors(name);
+    return Container(
+      margin: const EdgeInsets.fromLTRB(10, 8, 10, 0),
+      padding: const EdgeInsets.fromLTRB(6, 6, 14, 6),
+      decoration: BoxDecoration(
+        color: Lkw.panel.withValues(alpha: 0.95),
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: const [BoxShadow(blurRadius: 6, color: Colors.black38)],
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Container(
+          constraints: const BoxConstraints(maxWidth: 200),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: Colors.white, width: 2),
+          ),
+          child: Text(name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: fg, fontSize: 17, fontWeight: FontWeight.w900)),
+        ),
+        if (km != null) ...[
+          const SizedBox(width: 10),
+          Text('${km!.toStringAsFixed(1).replaceAll('.', ',')} km',
+              style: const TextStyle(color: Lkw.text, fontSize: 18, fontWeight: FontWeight.w800)),
+        ],
       ]),
     );
   }
@@ -118,6 +173,22 @@ class WarningSign extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (w.type == WarningType.noOvertakingHgv) {
+      // Značka B22a – zákaz předjíždění pro nákladní automobily.
+      return Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          shape: BoxShape.circle,
+          border: Border.all(color: const Color(0xFFD50000), width: size * 0.11),
+        ),
+        child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          Icon(Icons.local_shipping, size: size * 0.3, color: const Color(0xFFD50000)),
+          Icon(Icons.directions_car, size: size * 0.26, color: Colors.black),
+        ]),
+      );
+    }
     if (w.type == WarningType.speedCamera) {
       return Container(
         width: size,
@@ -173,20 +244,23 @@ class WarningCard extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.fromLTRB(6, 8, 6, 6),
       decoration: BoxDecoration(
-        color: bad ? const Color(0xFFC62828) : Colors.white,
+        color: bad ? Lkw.danger : Lkw.panel,
         borderRadius: BorderRadius.circular(14),
-        boxShadow: const [BoxShadow(blurRadius: 6, color: Colors.black26)],
+        boxShadow: const [BoxShadow(blurRadius: 6, color: Colors.black38)],
       ),
       child: Column(children: [
         WarningSign(w: w, size: 60),
+        if (w.type == WarningType.noOvertakingHgv && w.note != null)
+          Text(w.note!,
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: Lkw.muted)),
         if (w.onBridge)
           Text('MOST',
               style: TextStyle(
-                  fontSize: 11, fontWeight: FontWeight.w800, color: bad ? Colors.white : Colors.black54)),
+                  fontSize: 11, fontWeight: FontWeight.w800, color: bad ? Colors.white : Lkw.muted)),
         const SizedBox(height: 4),
         Text(formatDistance(distance),
             style: TextStyle(
-                fontSize: 18, fontWeight: FontWeight.w700, color: bad ? Colors.white : Colors.black87)),
+                fontSize: 18, fontWeight: FontWeight.w800, color: Lkw.text)),
       ]),
     );
   }
@@ -205,9 +279,9 @@ class SpeedWidget extends StatelessWidget {
       width: 84,
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
-        color: over ? const Color(0xFFC62828) : Colors.white,
-        borderRadius: BorderRadius.circular(42),
-        boxShadow: const [BoxShadow(blurRadius: 6, color: Colors.black26)],
+        color: over ? Lkw.danger : Lkw.panel,
+        borderRadius: BorderRadius.circular(18),
+        boxShadow: const [BoxShadow(blurRadius: 6, color: Colors.black38)],
       ),
       child: Column(mainAxisSize: MainAxisSize.min, children: [
         if (limit != null)
@@ -226,8 +300,8 @@ class SpeedWidget extends StatelessWidget {
         const SizedBox(height: 4),
         Text('${speedKmh.round()}',
             style: TextStyle(
-                fontSize: 28, fontWeight: FontWeight.w800, color: over ? Colors.white : Colors.black87)),
-        Text('km/h', style: TextStyle(fontSize: 12, color: over ? Colors.white : Colors.black54)),
+                fontSize: 30, fontWeight: FontWeight.w900, color: Lkw.text)),
+        Text('km/h', style: TextStyle(fontSize: 12, color: over ? Colors.white : Lkw.muted)),
       ]),
     );
   }
@@ -245,16 +319,63 @@ class RoundButton extends StatelessWidget {
   Widget build(BuildContext context) => Padding(
         padding: const EdgeInsets.only(top: 10),
         child: Material(
-          color: Theme.of(context).colorScheme.surface,
-          shape: const CircleBorder(),
-          elevation: 4,
-          child: IconButton(
-            iconSize: 28,
-            padding: const EdgeInsets.all(12),
-            tooltip: tooltip,
-            icon: Icon(icon, color: color),
-            onPressed: onPressed,
+          color: Lkw.panel,
+          elevation: 6,
+          shadowColor: Colors.black,
+          borderRadius: BorderRadius.circular(16),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(16),
+            onTap: onPressed,
+            child: Tooltip(
+              message: tooltip,
+              child: SizedBox(width: 56, height: 56, child: Icon(icon, size: 28, color: color ?? Lkw.text)),
+            ),
           ),
         ),
       );
+}
+
+/// Karta varianty trasy v přehledu.
+class RouteCard extends StatelessWidget {
+  final String label;
+  final TruckRoute route;
+  final bool selected;
+  final VoidCallback onTap;
+  const RouteCard(
+      {super.key, required this.label, required this.route, required this.selected, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final via = route.via;
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        width: 168,
+        margin: const EdgeInsets.only(right: 10),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: selected ? Lkw.panelHi : Lkw.graphite,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: selected ? Lkw.amber : Lkw.panelHi, width: selected ? 3 : 2),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(label.toUpperCase(),
+              style: TextStyle(
+                  color: selected ? Lkw.amber : Lkw.muted, fontSize: 12, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 2),
+          Text(formatDuration(Duration(seconds: route.timeSec.round())),
+              style: const TextStyle(color: Lkw.text, fontSize: 22, fontWeight: FontWeight.w900)),
+          Text('${route.lengthKm.toStringAsFixed(route.lengthKm < 100 ? 1 : 0).replaceAll('.', ',')} km'
+              '${route.hasToll ? ' · mýto' : ''}',
+              style: const TextStyle(color: Lkw.muted, fontSize: 14)),
+          if (via.isNotEmpty)
+            Text('přes ${via.join(', ')}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Lkw.text, fontSize: 13, fontWeight: FontWeight.w600)),
+        ]),
+      ),
+    );
+  }
 }

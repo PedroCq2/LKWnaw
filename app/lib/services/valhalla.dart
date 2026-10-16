@@ -9,6 +9,12 @@ import 'http_headers.dart';
 import '../models/route.dart';
 import '../models/truck_profile.dart';
 
+class RouteOption {
+  final String label;
+  final TruckRoute route;
+  RouteOption(this.label, this.route);
+}
+
 class RoutingException implements Exception {
   final String message;
   RoutingException(this.message);
@@ -28,6 +34,59 @@ class ValhallaClient {
     double? heading,
     bool delivery = false,
     List<LatLng> exclude = const [],
+  }) async =>
+      (await _request(
+              from: from, to: to, profile: profile, heading: heading, delivery: delivery, exclude: exclude))
+          .first;
+
+  /// Několik variant: nejrychlejší + alternativa, bez mýta, nejkratší (bez duplicit).
+  Future<List<RouteOption>> routeOptions({
+    required LatLng from,
+    required LatLng to,
+    required TruckProfile profile,
+    double? heading,
+    bool delivery = false,
+    List<LatLng> exclude = const [],
+  }) async {
+    Future<List<TruckRoute>> safe(Future<List<TruckRoute>> f) => f.catchError((_) => <TruckRoute>[]);
+    final main = _request(
+        from: from, to: to, profile: profile, heading: heading, delivery: delivery, exclude: exclude,
+        alternates: 2);
+    final noToll = safe(_request(
+        from: from, to: to, profile: profile, heading: heading, delivery: delivery, exclude: exclude,
+        extra: {'use_tolls': 0.0, 'exclude_tolls': true}));
+    final shortest = safe(_request(
+        from: from, to: to, profile: profile, heading: heading, delivery: delivery, exclude: exclude,
+        extra: {'shortest': true}));
+    final res = await Future.wait([main, noToll, shortest]);
+    final out = <RouteOption>[];
+    void add(String label, TruckRoute r) {
+      final dup = out.any((o) =>
+          (o.route.lengthKm - r.lengthKm).abs() < r.lengthKm * 0.01 + 0.2 &&
+          (o.route.timeSec - r.timeSec).abs() < r.timeSec * 0.02 + 30);
+      if (!dup) out.add(RouteOption(label, r));
+    }
+    for (final (i, r) in res[0].indexed) {
+      add(i == 0 ? 'Nejrychlejší' : 'Alternativa', r);
+    }
+    for (final r in res[1].take(1)) {
+      if (!r.hasToll) add('Bez mýta', r);
+    }
+    for (final r in res[2].take(1)) {
+      add('Nejkratší', r);
+    }
+    return out;
+  }
+
+  Future<List<TruckRoute>> _request({
+    required LatLng from,
+    required LatLng to,
+    required TruckProfile profile,
+    double? heading,
+    bool delivery = false,
+    List<LatLng> exclude = const [],
+    int alternates = 0,
+    Map<String, dynamic> extra = const {},
   }) async {
     final origin = <String, dynamic>{'lat': from.latitude, 'lon': from.longitude};
     if (heading != null && heading >= 0) {
@@ -40,7 +99,10 @@ class ValhallaClient {
         {'lat': to.latitude, 'lon': to.longitude},
       ],
       'costing': 'truck',
-      'costing_options': {'truck': profile.toValhallaCosting(delivery: delivery)},
+      'costing_options': {
+        'truck': {...profile.toValhallaCosting(delivery: delivery), ...extra}
+      },
+      if (alternates > 0) 'alternates': alternates,
       if (exclude.isNotEmpty)
         'exclude_locations': [
           for (final p in exclude) {'lat': p.latitude, 'lon': p.longitude}
@@ -65,7 +127,11 @@ class ValhallaClient {
       throw RoutingException(
           'Trasu nelze vypočítat: ${data['error'] ?? res.statusCode}');
     }
-    return parseTrip(data['trip'] as Map<String, dynamic>);
+    return [
+      parseTrip(data['trip'] as Map<String, dynamic>),
+      for (final a in (data['alternates'] as List? ?? const []))
+        parseTrip((a as Map)['trip'] as Map<String, dynamic>),
+    ];
   }
 
   /// Doplní k trase rychlostní limity a názvy silnic (Valhalla trace_attributes).

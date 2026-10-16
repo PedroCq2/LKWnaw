@@ -56,6 +56,29 @@ class TruckRoute {
   /// Kamionová omezení a radary podél trasy (doplňuje se na pozadí).
   List<RouteWarning> warnings = const [];
 
+  /// Exity dálnic na trase: (vzdálenost po trase m, kilometr dálnice, silnice).
+  /// V ČR je číslo exitu = kilometr dálnice → staničení se dopočítá mezi nimi.
+  List<(double, double, String?)> kmPoints = const [];
+
+  /// Staničení dálnice (km) v místě [traveled] na silnici [road], nebo null.
+  double? kilometerAt(double traveled, String road) {
+    final pts = kmPoints.where((p) => p.$3 == road).toList();
+    if (pts.length < 2) return null;
+    var i = pts.lastIndexWhere((p) => p.$1 <= traveled);
+    if (i < 0) i = 0;
+    if (i >= pts.length - 1) i = pts.length - 2;
+    final a = pts[i], b = pts[i + 1];
+    final span = b.$1 - a.$1;
+    if (span < 200) return null;
+    // Exity musí sedět na délku úseku (jinak chybná data / přejezd na jinou dálnici).
+    final dk = b.$2 - a.$2;
+    if ((dk.abs() * 1000 - span).abs() > span * 0.25 + 1500) return null;
+    final km = a.$2 + dk * (traveled - a.$1) / span;
+    // Mimo interval (před 1. / za posledním exitem) extrapoluj nejvýš 15 km.
+    if (traveled < a.$1 - 15000 || traveled > b.$1 + 15000) return null;
+    return km < 0 ? null : km;
+  }
+
   /// Kumulativní vzdálenost (m) od začátku trasy pro každý bod `shape`.
   late final List<double> cumulative = _buildCumulative();
 
@@ -69,8 +92,23 @@ class TruckRoute {
     this.encodedShape,
   });
 
-  int? speedLimitAt(int seg) => seg < speedLimits.length ? speedLimits[seg] : null;
-  String? roadNameAt(int seg) => seg < roadNames.length ? roadNames[seg] : null;
+  /// Hlavní silnice, po kterých trasa vede (D1, D35, E 50…).
+  List<String> get via {
+    final out = <String>[];
+    final re = RegExp(r'^(D|R|I|II|III|E|A|B|S|M)\s?\d+[a-z]?$');
+    for (final m in maneuvers) {
+      for (final n in m.streetNames) {
+        final t = n.trim();
+        if (re.hasMatch(t) && !out.contains(t)) out.add(t);
+      }
+    }
+    // Evropská čísla (E…) jen když chybí národní.
+    final national = out.where((e) => !e.startsWith('E')).toList();
+    return (national.isNotEmpty ? national : out).take(3).toList();
+  }
+
+  int? speedLimitAt(int seg) => seg >= 0 && seg < speedLimits.length ? speedLimits[seg] : null;
+  String? roadNameAt(int seg) => seg >= 0 && seg < roadNames.length ? roadNames[seg] : null;
 
   List<double> _buildCumulative() {
     const dist = Distance();
@@ -82,7 +120,7 @@ class TruckRoute {
   }
 }
 
-enum WarningType { height, weight, width, length, axleLoad, speedCamera }
+enum WarningType { height, weight, width, length, axleLoad, speedCamera, noOvertakingHgv }
 
 class RouteWarning {
   final WarningType type;
@@ -92,9 +130,13 @@ class RouteWarning {
   final bool violates; // vozidlo limit překračuje
   final bool onBridge; // omezení je na mostě (fyzická nosnost)
 
+  /// Doplňující text (např. časové omezení „6–22 h“).
+  final String? note;
+
   RouteWarning({
     required this.type,
     required this.value,
+    this.note,
     required this.atMeters,
     required this.point,
     required this.violates,
@@ -117,6 +159,8 @@ class RouteWarning {
         return '${n(v!)} t';
       case WarningType.speedCamera:
         return 'radar';
+      case WarningType.noOvertakingHgv:
+        return note ?? '';
     }
   }
 
@@ -134,6 +178,8 @@ class RouteWarning {
         return 'omezení zatížení nápravy';
       case WarningType.speedCamera:
         return 'radar';
+      case WarningType.noOvertakingHgv:
+        return 'zákaz předjíždění nákladních vozidel';
     }
   }
 }
