@@ -90,6 +90,7 @@ class RouteWarning {
   final double atMeters; // vzdálenost od začátku trasy
   final LatLng point;
   final bool violates; // vozidlo limit překračuje
+  final bool onBridge; // omezení je na mostě (fyzická nosnost)
 
   RouteWarning({
     required this.type,
@@ -97,6 +98,7 @@ class RouteWarning {
     required this.atMeters,
     required this.point,
     required this.violates,
+    this.onBridge = false,
   });
 
   String get label {
@@ -127,7 +129,7 @@ class RouteWarning {
       case WarningType.length:
         return 'omezení délky';
       case WarningType.weight:
-        return 'omezení hmotnosti';
+        return onBridge ? 'most s nosností' : 'omezení hmotnosti';
       case WarningType.axleLoad:
         return 'omezení zatížení nápravy';
       case WarningType.speedCamera:

@@ -26,11 +26,13 @@ class TruckProfile {
     this.avoidFerries = false,
   });
 
-  Map<String, dynamic> toValhallaCosting() => {
+  /// [delivery] = zásobování: hmotnostní zóny („mimo dopravní obsluhu“) se ignorují,
+  /// výška/šířka/délka/náprava/ADR platí dál. Mosty hlídá aplikace zvlášť.
+  Map<String, dynamic> toValhallaCosting({bool delivery = false}) => {
         'height': height,
         'width': width,
         'length': length,
-        'weight': weight,
+        'weight': delivery ? 0.0 : weight,
         'axle_load': axleLoad,
         'axle_count': axleCount,
         'hazmat': hazmat,

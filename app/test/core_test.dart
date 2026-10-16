@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:truck_nav/models/route.dart';
+import 'package:truck_nav/models/truck_profile.dart';
 import 'package:truck_nav/navigation/nav_engine.dart';
 import 'package:truck_nav/services/restrictions.dart';
 import 'package:truck_nav/services/valhalla.dart';
@@ -71,5 +72,15 @@ void main() {
         type: WarningType.weight, value: 3.5, atMeters: at, point: const LatLng(50, 14), violates: true);
     final m = mergeWarnings([w(100), w(300), w(650), w(2000)]);
     expect(m.map((e) => e.atMeters), [100, 2000]);
+  });
+
+  test('delivery mode drops weight but keeps dimensions', () {
+    final p = TruckProfile(height: 4.1, weight: 40);
+    expect(p.toValhallaCosting()['weight'], 40);
+    final d = p.toValhallaCosting(delivery: true);
+    expect(d['weight'], 0);
+    expect(d['height'], 4.1);
+    expect(d['length'], p.length);
+    expect(d['axle_load'], p.axleLoad);
   });
 }

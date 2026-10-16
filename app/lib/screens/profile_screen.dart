@@ -18,6 +18,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   late bool _voice = widget.settings.voice;
   late bool _simulate = widget.settings.simulate;
   late int _mapStyle = widget.settings.mapStyle;
+  late bool _delivery = widget.settings.delivery;
 
   Widget _num(String label, String unit, double value, void Function(double) set,
       {double min = 0, double max = 100}) {
@@ -46,7 +47,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
       ..valhallaUrl = _url.text.trim().isEmpty ? defaultValhallaUrl : _url.text.trim()
       ..voice = _voice
       ..simulate = _simulate
-      ..mapStyle = _mapStyle;
+      ..mapStyle = _mapStyle
+      ..delivery = _delivery;
     await widget.settings.save();
     if (mounted) Navigator.pop(context, true);
   }
@@ -97,6 +99,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
               title: const Text('Nebezpečný náklad (ADR)'),
               value: p.hazmat,
               onChanged: (v) => setState(() => p.hazmat = v),
+            ),
+            SwitchListTile(
+              title: const Text('Zásobování (dopravní obsluha)'),
+              subtitle: const Text('Povolí vjezd do zón se zákazem nad X t (např. k obchodu). '
+                  'Výška, šířka, délka, náprava a mosty se hlídají dál.'),
+              value: _delivery,
+              onChanged: (v) => setState(() => _delivery = v),
             ),
             SwitchListTile(
               title: const Text('Vyhnout se mýtným úsekům'),

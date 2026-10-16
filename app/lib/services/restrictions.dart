@@ -16,8 +16,10 @@ const _overpassMirrors = [
 ];
 
 /// Stáhne z OSM kamionová omezení (maxheight/maxweight/…) a radary podél trasy.
+///
+/// Při [delivery] (zásobování) se hmotnostní limit počítá jako porušení jen na mostě.
 Future<List<RouteWarning>> loadRouteWarnings(TruckRoute route, TruckProfile truck,
-    {double maxMeters = 300000}) async {
+    {double maxMeters = 300000, bool delivery = false}) async {
   final index = RouteIndex(route);
   final pts = _simplify(route.shape, route.cumulative, maxMeters, 10);
   final out = <RouteWarning>[];
@@ -55,7 +57,7 @@ Future<List<RouteWarning>> loadRouteWarnings(TruckRoute route, TruckProfile truc
         }
         if (hits.length < 2) continue;
         final at = hits.reduce(math.min);
-        out.addAll(_fromTags(tags, at, first!, truck));
+        out.addAll(_fromTags(tags, at, first!, truck, delivery));
       } else {
         if (!seenNodes.add(id)) continue;
         final p = LatLng((e['lat'] as num).toDouble(), (e['lon'] as num).toDouble());
@@ -65,7 +67,7 @@ Future<List<RouteWarning>> loadRouteWarnings(TruckRoute route, TruckProfile truc
           out.add(RouteWarning(
               type: WarningType.speedCamera, value: null, atMeters: at, point: p, violates: false));
         } else {
-          out.addAll(_fromTags(tags, at, p, truck));
+          out.addAll(_fromTags(tags, at, p, truck, delivery));
         }
       }
     }
@@ -104,15 +106,19 @@ Future<List<dynamic>?> overpassQuery(String q) async {
 }
 
 List<RouteWarning> _fromTags(
-    Map<String, dynamic> tags, double at, LatLng p, TruckProfile t) {
+    Map<String, dynamic> tags, double at, LatLng p, TruckProfile t, bool delivery) {
   final out = <RouteWarning>[];
+  final bridge = tags['bridge'] != null && tags['bridge'] != 'no';
   void add(String key, WarningType type, double Function(String) parse, double truckValue) {
     final raw = tags[key] ?? tags['$key:physical'];
     if (raw is! String) return;
     final v = parse(raw);
     if (v.isNaN || v <= 0) return;
+    var violates = truckValue > v + 1e-6;
+    // Zásobování: zóny se zákazem nad X t jsou pro dopravní obsluhu průjezdné, mosty ne.
+    if (delivery && type == WarningType.weight && !bridge) violates = false;
     out.add(RouteWarning(
-        type: type, value: v, atMeters: at, point: p, violates: truckValue > v + 1e-6));
+        type: type, value: v, atMeters: at, point: p, violates: violates, onBridge: bridge));
   }
 
   add('maxheight', WarningType.height, parseMeters, t.height);

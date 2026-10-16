@@ -11,6 +11,7 @@ class AppSettings {
   bool simulate; // demo: jízda po trase bez GPS
   int mapStyle; // 0 = auto, 1 = den, 2 = noc
   bool view3d;
+  bool delivery; // zásobování
 
   AppSettings({
     required this.profile,
@@ -19,6 +20,7 @@ class AppSettings {
     this.simulate = false,
     this.mapStyle = 0,
     this.view3d = true,
+    this.delivery = false,
   });
 
   bool get night {
@@ -44,6 +46,7 @@ class AppSettings {
       simulate: p.getBool('simulate') ?? false,
       mapStyle: p.getInt('mapStyle') ?? 0,
       view3d: p.getBool('view3d') ?? true,
+      delivery: p.getBool('delivery') ?? false,
     );
   }
 
@@ -55,5 +58,6 @@ class AppSettings {
     await p.setBool('simulate', simulate);
     await p.setInt('mapStyle', mapStyle);
     await p.setBool('view3d', view3d);
+    await p.setBool('delivery', delivery);
   }
 }

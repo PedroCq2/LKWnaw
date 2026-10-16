@@ -179,6 +179,10 @@ class WarningCard extends StatelessWidget {
       ),
       child: Column(children: [
         WarningSign(w: w, size: 60),
+        if (w.onBridge)
+          Text('MOST',
+              style: TextStyle(
+                  fontSize: 11, fontWeight: FontWeight.w800, color: bad ? Colors.white : Colors.black54)),
         const SizedBox(height: 4),
         Text(formatDistance(distance),
             style: TextStyle(

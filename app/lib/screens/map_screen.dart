@@ -72,6 +72,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   bool _arrivedSpoken = false;
   RouteSimulator? _sim;
   final Set<RouteWarning> _warnSpoken = {};
+  final List<LatLng> _excluded = []; // mosty, kterým se trasa vyhýbá (zásobování)
 
   List<Place> _results = [];
   List<Place> _parking = [];
@@ -525,6 +526,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         to: to,
         profile: _settings.profile,
         heading: reroute || _speedKmh > 5 ? _heading : null,
+        delivery: _settings.delivery,
+        exclude: _excluded,
       );
       if (!mounted) return;
       setState(() {
@@ -553,10 +556,18 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       if (mounted) setState(() {});
     } catch (_) {}
     try {
-      final w = await loadRouteWarnings(r, _settings.profile);
+      final w = await loadRouteWarnings(r, _settings.profile, delivery: _settings.delivery);
       if (!mounted || _route != r) return;
       setState(() => r.warnings = w);
       await _syncLayers();
+      // Zásobování: trasa nesmí přes most s nižší nosností → vyhnout se mu a přepočítat.
+      final bridges = w.where((x) => x.onBridge && x.violates).toList();
+      if (_settings.delivery && bridges.isNotEmpty && _excluded.length < 10) {
+        _excluded.addAll(bridges.map((b) => b.point));
+        _toast('Vyhýbám se mostu s nosností ${bridges.first.label} – přepočítávám trasu.');
+        await _computeRoute(reroute: _navigating);
+        return;
+      }
       final bad = w.where((x) => x.violates).length;
       if (bad > 0) _toast('Pozor: na trase je $bad omezení, která vaše vozidlo překračuje.');
     } catch (_) {}
@@ -579,7 +590,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       await _map?.animateCamera(
           ml.CameraUpdate.newLatLngBounds(
               ml.LatLngBounds(southwest: ml.LatLng(s, w), northeast: ml.LatLng(n, e)),
-              left: 50, top: 200, right: 50, bottom: 260),
+              left: 40, top: 110, right: 90, bottom: 270),
           duration: const Duration(milliseconds: 700));
     } catch (_) {}
   }
@@ -628,6 +639,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
 
   void _setDestination(LatLng p, String name) {
     FocusScope.of(context).unfocus();
+    _excluded.clear();
     setState(() {
       _dest = p;
       _destName = name;
@@ -1036,9 +1048,30 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     ),
                   ],
                 ]),
+                if (_navigating && _settings.delivery)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 4),
+                    child: Row(children: [
+                      Icon(Icons.storefront, size: 18, color: Color(0xFFEF6C00)),
+                      SizedBox(width: 6),
+                      Text('Zásobování', style: TextStyle(color: Color(0xFFEF6C00), fontWeight: FontWeight.w700)),
+                    ]),
+                  ),
                 if (!_navigating) ...[
                   const SizedBox(height: 6),
                   Wrap(spacing: 6, runSpacing: 4, children: [
+                    FilterChip(
+                      avatar: const Icon(Icons.storefront, size: 18),
+                      label: const Text('Zásobování'),
+                      selected: _settings.delivery,
+                      visualDensity: VisualDensity.compact,
+                      onSelected: (v) {
+                        setState(() => _settings.delivery = v);
+                        _settings.save();
+                        _excluded.clear();
+                        _computeRoute();
+                      },
+                    ),
                     if (route.hasToll)
                       const Chip(label: Text('mýto'), visualDensity: VisualDensity.compact),
                     if (route.hasHighway)

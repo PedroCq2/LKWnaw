@@ -26,6 +26,8 @@ class ValhallaClient {
     required LatLng to,
     required TruckProfile profile,
     double? heading,
+    bool delivery = false,
+    List<LatLng> exclude = const [],
   }) async {
     final origin = <String, dynamic>{'lat': from.latitude, 'lon': from.longitude};
     if (heading != null && heading >= 0) {
@@ -38,7 +40,11 @@ class ValhallaClient {
         {'lat': to.latitude, 'lon': to.longitude},
       ],
       'costing': 'truck',
-      'costing_options': {'truck': profile.toValhallaCosting()},
+      'costing_options': {'truck': profile.toValhallaCosting(delivery: delivery)},
+      if (exclude.isNotEmpty)
+        'exclude_locations': [
+          for (final p in exclude) {'lat': p.latitude, 'lon': p.longitude}
+        ],
       'language': 'cs-CZ',
       'units': 'kilometers',
       'directions_options': {'units': 'kilometers', 'language': 'cs-CZ'},

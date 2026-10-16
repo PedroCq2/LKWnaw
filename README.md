@@ -16,6 +16,9 @@ Flutter aplikace pro navigaci nákladních vozidel nad OpenStreetMap a routing e
   a „Pak …“, název ulice, **české hlasové pokyny**, přepočet při sjetí z trasy.
 - **POI pro kamiony** – truckparky a odpočívky (kapacita, placené, hlídané, WC, sprchy…),
   truck servisy a pneuservisy, čerpací stanice pro kamiony (AdBlue, HGV nafta).
+- **Zásobování** (přepínač u trasy) – povolí vjezd do zón se zákazem nad X t
+  („mimo dopravní obsluhu“), výška, šířka, délka, náprava a ADR platí dál; mostům
+  s nižší nosností se trasa automaticky vyhne.
 - **Simulace jízdy** (Nastavení) – vyzkoušení navigace bez jízdy.
 
 ## Instalace APK
