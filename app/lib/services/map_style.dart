@@ -82,12 +82,19 @@ const _night = _Palette(
   boundary: '#6E6480',
 );
 
-final Map<bool, String> _cache = {};
+/// Ortofoto ČR (ČÚZK, CC BY 4.0) – dlaždice ve Web Mercatoru.
+const ortofotoTiles = 'https://ags.cuzk.gov.cz/arcgis1/rest/services/ORTOFOTO_WM/MapServer/tile/{z}/{y}/{x}';
+
+/// Podklad mapy: klasická mapa, letecké snímky, nebo snímky s názvy a silnicemi.
+enum MapLayer { map, aerial, hybrid }
+
+final Map<String, String> _cache = {};
 String? _baseJson;
 
 /// JSON stylu pro `MapLibreMap.styleString`; při chybě vrátí URL původního stylu.
-Future<String> lkwStyle({required bool night}) async {
-  final cached = _cache[night];
+Future<String> lkwStyle({required bool night, MapLayer layer = MapLayer.map}) async {
+  final key = '$night-${layer.name}';
+  final cached = _cache[key];
   if (cached != null) return cached;
   try {
     // Styl si pamatujeme – offline (bez signálu) zůstane vzhled LKWnav.
@@ -105,7 +112,8 @@ Future<String> lkwStyle({required bool night}) async {
     if (_baseJson == null) return baseStyleUrl;
     final style = jsonDecode(_baseJson!) as Map<String, dynamic>;
     applyPalette(style, night ? _night : _day);
-    return _cache[night] = jsonEncode(style);
+    if (layer != MapLayer.map) applyAerial(style, hybrid: layer == MapLayer.hybrid);
+    return _cache[key] = jsonEncode(style);
   } catch (_) {
     return baseStyleUrl;
   }
@@ -128,6 +136,16 @@ void applyPalette(Map<String, dynamic> style, Object palette) {
       continue;
     }
     final type = l['type'];
+    // Názvy česky („Václavské náměstí“, „Německo“), ne anglicky jako v původním stylu.
+    final layout = (l['layout'] as Map?)?.cast<String, dynamic>();
+    if (layout != null && jsonEncode(layout['text-field'] ?? '').contains('name_en')) {
+      layout['text-field'] = [
+        'coalesce',
+        ['get', 'name:cs'],
+        ['get', 'name'],
+      ];
+      l['layout'] = layout;
+    }
     if (type == 'background') {
       paint['background-color'] = p.land;
     } else if (type == 'symbol') {
@@ -161,6 +179,49 @@ void applyPalette(Map<String, dynamic> style, Object palette) {
       }
     }
   }
+}
+
+/// Letecký podklad pod vektorovou mapu. Letecká = jen snímky (trasu a značky kreslí aplikace),
+/// hybridní = snímky + silnice (průsvitně) a popisky – na prohlédnutí vjezdu, ramp, dvora skladu.
+void applyAerial(Map<String, dynamic> style, {required bool hybrid}) {
+  final sources = (style['sources'] as Map).cast<String, dynamic>();
+  sources['ortofoto'] = {
+    'type': 'raster',
+    'tiles': [ortofotoTiles],
+    'tileSize': 256,
+    'maxzoom': 20,
+    'attribution': '© ČÚZK',
+  };
+  final layers = (style['layers'] as List).cast<Map<String, dynamic>>();
+  for (final l in layers) {
+    final id = l['id'] as String;
+    final type = l['type'];
+    final paint = (l['paint'] as Map).cast<String, dynamic>();
+    final layout = {...?(l['layout'] as Map?)?.cast<String, dynamic>()};
+    final road = _roadColor(id, _day, false) != null && !id.contains('rail');
+    final keep = hybrid && (type == 'symbol' || (type == 'line' && (road || id.startsWith('boundary'))));
+    if (!keep) {
+      layout['visibility'] = 'none';
+    } else if (type == 'line') {
+      paint['line-opacity'] = id.endsWith('_casing') ? 0.0 : 0.55;
+    } else if (paint.containsKey('text-color')) {
+      paint['text-color'] = '#FFFFFF';
+      paint['text-halo-color'] = '#000000';
+      paint['text-halo-width'] = 1.6;
+    }
+    l['layout'] = layout;
+    if (type == 'background') {
+      l['layout'] = <String, dynamic>{};
+      paint['background-color'] = '#3A3F45';
+    }
+  }
+  final bg = layers.indexWhere((l) => l['type'] == 'background');
+  layers.insert(bg + 1, {
+    'id': 'ortofoto',
+    'type': 'raster',
+    'source': 'ortofoto',
+    'paint': {'raster-fade-duration': 150},
+  });
 }
 
 String? _roadColor(String id, _Palette p, bool casing) {

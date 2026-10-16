@@ -15,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
+      - uses: actions/checkout@v4
+
       - name: Stáhnout OSM ČR
         run: |
           mkdir -p data
@@ -24,6 +26,14 @@ jobs:
             | sed -n 's/^timestamp=\([0-9-]*\)T.*/\1/p')
           echo "OSM_DATE=${DATE:-$(date -u +%F)}" >> "$GITHUB_ENV"
           ls -la data
+
+      - name: Postavit rejstřík míst (hledání bez internetu)
+        run: |
+          pip install osmium
+          python3 backend/search/build_search_db.py data/cz.osm.pbf search-cz.sqlite
+          gzip -6 -c search-cz.sqlite > search-cz.sqlite.gz
+          rm search-cz.sqlite
+          ls -la search-cz.sqlite.gz
 
       - name: Postavit dlaždice tras
         run: |
@@ -47,7 +57,9 @@ jobs:
           rm -rf data/tiles data/cz.osm.pbf
           gzip -6 -c data/tiles.tar > cz-routing.tar.gz
           SIZE=$(stat -c %s cz-routing.tar.gz)
-          printf '{"date":"%s","size":%s,"valhalla":"3.9.0","region":"CZ"}\n' "$OSM_DATE" "$SIZE" > routing-cz.json
+          SSIZE=$(stat -c %s search-cz.sqlite.gz)
+          printf '{"date":"%s","size":%s,"searchSize":%s,"valhalla":"3.9.0","region":"CZ"}\n' \
+            "$OSM_DATE" "$SIZE" "$SSIZE" > routing-cz.json
           cat routing-cz.json
           ls -la cz-routing.tar.gz data/tiles.tar
 
@@ -60,4 +72,5 @@ jobs:
           make_latest: false
           files: |
             cz-routing.tar.gz
+            search-cz.sqlite.gz
             routing-cz.json

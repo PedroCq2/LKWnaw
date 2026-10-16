@@ -265,6 +265,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
               subtitle: Text(
                 'Mapová data © přispěvatelé OpenStreetMap (ODbL)\n'
                 'Vektorové mapy: OpenFreeMap / OpenMapTiles\n'
+                'Letecké snímky: Ortofoto ČR © ČÚZK (CC BY 4.0)\n'
                 'Výpočet tras: Valhalla, vyhledávání: Nominatim, POI a omezení: Overpass API',
               ),
               isThreeLine: true,

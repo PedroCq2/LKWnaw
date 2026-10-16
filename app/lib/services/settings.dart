@@ -1,6 +1,7 @@
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/truck_profile.dart';
+import 'map_style.dart';
 import 'sun.dart';
 
 const defaultValhallaUrl = 'https://valhalla1.openstreetmap.de';
@@ -12,6 +13,7 @@ class AppSettings {
   bool simulate; // demo: jízda po trase bez GPS
   int mapStyle; // 0 = auto, 1 = den, 2 = noc
   bool view3d;
+  MapLayer mapLayer; // mapa / letecká / hybridní
   bool delivery; // zásobování
   String? voiceName; // vybraný český hlas (null = nejlepší dostupný)
   double speechRate; // 0,3–0,8
@@ -24,6 +26,7 @@ class AppSettings {
     this.simulate = false,
     this.mapStyle = 0,
     this.view3d = true,
+    this.mapLayer = MapLayer.map,
     this.delivery = false,
     this.voiceName,
     this.speechRate = 0.5,
@@ -57,6 +60,7 @@ class AppSettings {
       simulate: p.getBool('simulate') ?? false,
       mapStyle: p.getInt('mapStyle') ?? 0,
       view3d: p.getBool('view3d') ?? true,
+      mapLayer: MapLayer.values[(p.getInt('mapLayer') ?? 0).clamp(0, MapLayer.values.length - 1)],
       delivery: p.getBool('delivery') ?? false,
       voiceName: p.getString('voiceName'),
       speechRate: p.getDouble('speechRate') ?? 0.5,
@@ -72,6 +76,7 @@ class AppSettings {
     await p.setBool('simulate', simulate);
     await p.setInt('mapStyle', mapStyle);
     await p.setBool('view3d', view3d);
+    await p.setInt('mapLayer', mapLayer.index);
     await p.setBool('delivery', delivery);
     if (voiceName == null) {
       await p.remove('voiceName');

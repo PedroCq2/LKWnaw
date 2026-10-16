@@ -80,6 +80,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   final Set<TruckRoute> _extrasLoaded = {};
   String? _styleJson;
   bool? _styleNight;
+  MapLayer? _styleLayer;
   Timer? _searchDebounce;
   int _searchSeq = 0;
   NavEngine? _engine;
@@ -112,9 +113,11 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
 
   Future<void> _loadStyle() async {
     final night = _night;
-    if (_styleNight == night && _styleJson != null) return;
+    final layer = _settings.mapLayer;
+    if (_styleNight == night && _styleLayer == layer && _styleJson != null) return;
     _styleNight = night;
-    final json = await lkwStyle(night: night);
+    _styleLayer = layer;
+    final json = await lkwStyle(night: night, layer: layer);
     if (mounted) setState(() => _styleJson = json);
   }
 
@@ -1247,6 +1250,48 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     );
   }
 
+  Future<void> _chooseLayer() async {
+    final v = await showModalBottomSheet<MapLayer>(
+      context: context,
+      backgroundColor: Lkw.panel,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final (l, icon, title, sub) in [
+              (MapLayer.map, Icons.map, 'Mapa', 'Klasická mapa se silnicemi a názvy'),
+              (MapLayer.aerial, Icons.satellite_alt, 'Letecká', 'Letecké snímky ČR (ČÚZK)'),
+              (
+                MapLayer.hybrid,
+                Icons.layers,
+                'Hybridní',
+                'Snímky s názvy ulic a silnicemi – vjezdy, rampy, dvůr skladu',
+              ),
+            ])
+              ListTile(
+                leading: Icon(icon, color: l == _settings.mapLayer ? Lkw.amber : null),
+                title: Text(title),
+                subtitle: Text(sub),
+                trailing: l == _settings.mapLayer ? const Icon(Icons.check, color: Lkw.amber) : null,
+                onTap: () => Navigator.pop(ctx, l),
+              ),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Text(
+                'Letecké snímky potřebují internet (nebo předem stažený úsek trasy).',
+                style: TextStyle(color: Lkw.muted, fontSize: 12),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (v == null || v == _settings.mapLayer) return;
+    setState(() => _settings.mapLayer = v);
+    _settings.save();
+    _loadStyle();
+  }
+
   Future<void> _doSearch(String q, {bool quiet = false}) async {
     if (q.trim().length < 3) return;
     _searchDebounce?.cancel();
@@ -1258,7 +1303,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       setState(() => _results = r);
       if (r.isEmpty && !quiet) _toast('Nic nenalezeno.');
     } catch (e) {
-      _toast('Vyhledávání selhalo: $e');
+      if (!mounted || seq != _searchSeq) return;
+      _toast(e is SearchException ? e.message : 'Vyhledávání se nepovedlo, zkuste to znovu.');
     } finally {
       if (mounted) setState(() => _searching = false);
     }
@@ -1321,7 +1367,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       }
       _showPoiSheet(items, kind, alongRoute: route != null);
     } catch (e) {
-      _toast('Hledání selhalo: $e');
+      _toast('Hledání se nepovedlo – zkontrolujte připojení k internetu.');
     }
   }
 
@@ -1438,7 +1484,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   Widget build(BuildContext context) {
     final route = _route;
     final nav = _nav;
-    if (_styleNight != _night) _loadStyle();
+    if (_styleNight != _night || _styleLayer != _settings.mapLayer) _loadStyle();
     final limitRaw = nav != null ? route?.speedLimitAt(nav.segmentIndex) : null;
     final limit = limitRaw == null ? null : math.min(limitRaw, _settings.profile.maxSpeed);
     final bottomPad = MediaQuery.of(context).padding.bottom;
@@ -1536,6 +1582,15 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                         if (!_settings.voice) Voice.instance.stop();
                         _settings.save();
                       },
+                    ),
+                    RoundButton(
+                      icon: switch (_settings.mapLayer) {
+                        MapLayer.map => Icons.layers_outlined,
+                        MapLayer.aerial => Icons.satellite_alt,
+                        MapLayer.hybrid => Icons.layers,
+                      },
+                      tooltip: 'Mapa / letecká / hybridní',
+                      onPressed: _chooseLayer,
                     ),
                     RoundButton(
                       icon: _settings.view3d ? Icons.view_in_ar : Icons.map_outlined,

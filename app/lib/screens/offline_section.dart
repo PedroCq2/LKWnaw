@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../services/offline_routing.dart';
+import '../services/offline_search.dart';
 import '../services/settings.dart';
 import '../theme.dart';
 
@@ -73,6 +74,10 @@ class _OfflineRoutingSectionState extends State<OfflineRoutingSection> {
           subtitle: Text(
             [
               if (_r.ready) 'data OSM z ${_date(_r.dataDate)} · ${_mb(_r.sizeBytes)}',
+              if (_r.ready)
+                OfflineSearch.instance.ready
+                    ? 'hledání adres bez internetu: zapnuto'
+                    : 'hledání adres bez internetu: stáhněte znovu',
               if (latest != null)
                 'nejnovější: ${_date(latest.$1)}${latest.$2 != null ? ' · ke stažení ${_mb(latest.$2)}' : ''}',
               if (latest == null) 'nejnovější: nelze zjistit (bez internetu?)',
@@ -138,6 +143,7 @@ class _OfflineRoutingSectionState extends State<OfflineRoutingSection> {
         const Padding(
           padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
           child: Text(
+            'Balík obsahuje trasy a rejstřík adres a firem pro hledání bez signálu. '
             'Doporučeno stahovat přes Wi‑Fi. Aktualizace stahuje vždy celý balík – starý zůstává, '
             'dokud se nový nestáhne celý.',
             style: TextStyle(color: Lkw.muted, fontSize: 12),

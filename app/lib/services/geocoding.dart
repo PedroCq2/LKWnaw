@@ -5,6 +5,7 @@ import 'package:latlong2/latlong.dart';
 
 import '../models/route.dart';
 import 'http_headers.dart';
+import 'offline_search.dart';
 import 'restrictions.dart';
 
 class Place {
@@ -16,11 +17,21 @@ class Place {
   Place(this.name, this.point, {this.kind, this.address, this.features = const []});
 }
 
+/// Chyba hledání srozumitelná pro řidiče (bez technických detailů).
+class SearchException implements Exception {
+  final String message;
+  SearchException(this.message);
+  @override
+  String toString() => message;
+}
+
 /// Vyhledávání míst: Photon (OSM, toleruje názvy firem jako „kaufland dc olomouc“),
-/// záložně Nominatim.
+/// záložně Nominatim. Bez internetu (nebo když servery nic nenajdou) hledá
+/// ve staženém rejstříku ČR v telefonu ([OfflineSearch]).
 Future<List<Place>> searchPlaces(String query, {LatLng? near}) async {
   final q = query.trim();
   if (q.isEmpty) return [];
+  final local = OfflineSearch.instance.ready ? OfflineSearch.instance.search(q) : <Place>[];
   // Řidičský slang → jak bývá místo pojmenované v OSM.
   final variants = <String>{q};
   final low = q.toLowerCase();
@@ -31,8 +42,12 @@ Future<List<Place>> searchPlaces(String query, {LatLng? near}) async {
   }
   final results = <Place>[];
   final seen = <String>{};
+  var online = false;
   try {
-    final lists = await Future.wait(variants.map((v) => _photon(v, near)));
+    final lists = await Future.wait(
+      variants.map((v) => _photon(v, near).timeout(Duration(seconds: local.isEmpty ? 12 : 6))),
+    );
+    online = true;
     for (final list in lists) {
       for (final p in list) {
         final key =
@@ -41,8 +56,30 @@ Future<List<Place>> searchPlaces(String query, {LatLng? near}) async {
       }
     }
   } catch (_) {}
-  if (results.isNotEmpty) return rankPlaces(results, low).take(12).toList();
-  return _nominatim(q, near);
+  if (results.isNotEmpty) return _withLocal(rankPlaces(results, low).take(12).toList(), local);
+  if (local.isNotEmpty) return local;
+  try {
+    return await _nominatim(q, near);
+  } catch (_) {
+    if (online) return [];
+    throw SearchException(
+      OfflineSearch.instance.ready
+          ? 'Bez internetu. V rejstříku v telefonu se nic nenašlo.'
+          : 'Bez internetu nelze hledat. Stáhněte si data ČR v Nastavení → Trasy v telefonu.',
+    );
+  }
+}
+
+/// Doplní výsledky z telefonu, které servery nevrátily (např. přesné číslo popisné).
+List<Place> _withLocal(List<Place> online, List<Place> local) {
+  const d = Distance();
+  final out = [...online];
+  for (final p in local.take(4)) {
+    if (out.length >= 14) break;
+    if (out.any((o) => d(o.point, p.point) < 300)) continue;
+    out.add(p);
+  }
+  return out;
 }
 
 const _skipValues = {'bus_stop', 'tram_stop', 'stop_position', 'platform', 'station', 'halt'};
