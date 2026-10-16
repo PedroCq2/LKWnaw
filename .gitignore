@@ -1,2 +1,3 @@
 backend/custom_files/
 *.apk
+app/android/build/
