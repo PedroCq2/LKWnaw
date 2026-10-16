@@ -148,6 +148,15 @@ class ValhallaClient {
           'edge.names',
           'edge.begin_shape_index',
           'edge.end_shape_index',
+          'edge.way_id',
+          'edge.road_class',
+          'edge.use',
+          'edge.begin_heading',
+          'edge.end_heading',
+          'node.intersecting_edge.road_class',
+          'node.intersecting_edge.begin_heading',
+          'node.intersecting_edge.driveability',
+          'node.intersecting_edge.use',
         ],
         'action': 'include',
       },
@@ -163,8 +172,23 @@ class ValhallaClient {
     final n = math.max(0, route.shape.length - 1);
     final limits = List<int?>.filled(n, null);
     final names = List<String?>.filled(n, null);
+    final edges = <EdgeAttr>[];
     for (final e in (data['edges'] as List? ?? const [])) {
       final b = (e['begin_shape_index'] as num?)?.toInt() ?? 0;
+      edges.add(EdgeAttr(
+        begin: b,
+        end: (e['end_shape_index'] as num?)?.toInt() ?? b,
+        wayId: (e['way_id'] as num?)?.toInt(),
+        roadClass: e['road_class'] as String?,
+        use: e['use'] as String?,
+        names: ((e['names'] as List?) ?? const []).map((x) => '$x').toList(),
+        beginHeading: (e['begin_heading'] as num?)?.toInt(),
+        endHeading: (e['end_heading'] as num?)?.toInt(),
+        intersecting: [
+          for (final ie in ((e['end_node'] as Map?)?['intersecting_edges'] as List? ?? const []))
+            Map<String, dynamic>.from(ie as Map)
+        ],
+      ));
       final en = math.min(n, (e['end_shape_index'] as num?)?.toInt() ?? 0);
       final lim = (e['speed_limit'] as num?)?.toInt();
       final nm = (e['names'] as List?)?.isNotEmpty == true ? (e['names'] as List).first as String : null;
@@ -175,6 +199,7 @@ class ValhallaClient {
     }
     route.speedLimits = limits;
     route.roadNames = names;
+    route.edges = edges;
   }
 
   static TruckRoute parseTrip(Map<String, dynamic> trip) {

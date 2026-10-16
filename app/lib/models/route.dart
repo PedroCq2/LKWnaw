@@ -1,10 +1,38 @@
 import 'package:latlong2/latlong.dart';
 
+/// Jízdní pruhy před manévrem (z OSM `turn:lanes`); [active] = pruhy pro naši trasu.
+class LaneInfo {
+  final List<Set<String>> turns;
+  final List<bool> active;
+  LaneInfo(this.turns, this.active);
+}
+
+/// Úsek trasy s atributy z Valhally (trace_attributes).
+class EdgeAttr {
+  final int begin, end; // indexy do shape
+  final int? wayId;
+  final String? roadClass, use;
+  final List<String> names;
+  final int? beginHeading, endHeading;
+  final List<Map<String, dynamic>> intersecting; // odbočky v koncovém uzlu
+  EdgeAttr({
+    required this.begin,
+    required this.end,
+    this.wayId,
+    this.roadClass,
+    this.use,
+    this.names = const [],
+    this.beginHeading,
+    this.endHeading,
+    this.intersecting = const [],
+  });
+}
+
 class Maneuver {
   final int type;
   final String instruction;
-  final String? alertInstruction;
-  final String? preInstruction;
+  String? alertInstruction;
+  String? preInstruction;
   final String? postInstruction;
   final List<String> streetNames;
   final int beginShapeIndex;
@@ -14,7 +42,13 @@ class Maneuver {
   /// Dopravní značení výjezdu (Valhalla `sign`): číslo exitu, silnice, směr.
   final String? exitNumber;
   final List<String> exitBranch;
-  final List<String> exitToward;
+  List<String> exitToward;
+
+  /// Doplněno z OSM: jízdní pruhy a směr („Ostrava“).
+  LaneInfo? lanes;
+
+  /// Vložený pokyn „Pokračujte rovně“ na rozdvojení, které Valhalla nehlásí.
+  final bool synthetic;
 
   Maneuver({
     required this.type,
@@ -29,6 +63,7 @@ class Maneuver {
     this.exitNumber,
     this.exitBranch = const [],
     this.exitToward = const [],
+    this.synthetic = false,
   });
 
   static List<String> _signTexts(Map? sign, String key) =>
@@ -66,6 +101,7 @@ class TruckRoute {
   /// Rychlostní limit (km/h) a název silnice pro každý segment `shape[i]→shape[i+1]`.
   List<int?> speedLimits = const [];
   List<String?> roadNames = const [];
+  List<EdgeAttr> edges = const [];
 
   /// Kamionová omezení a radary podél trasy (doplňuje se na pozadí).
   List<RouteWarning> warnings = const [];

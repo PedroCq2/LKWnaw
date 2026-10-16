@@ -15,6 +15,7 @@ import '../navigation/nav_engine.dart';
 import '../navigation/simulator.dart';
 import '../services/geocoding.dart';
 import '../services/restrictions.dart';
+import '../services/lanes.dart';
 import '../services/map_style.dart';
 import '../services/settings.dart';
 import '../services/valhalla.dart';
@@ -622,12 +623,13 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     final pre = math.max(60.0, mps * 8);
     final alert = _speedKmh > 80 ? 1500.0 : (_speedKmh > 50 ? 800.0 : 300.0);
     if (d <= pre) {
-      if (_engine!.preSpoken.add(i)) {
-        _engine!.alertSpoken.add(i);
+      // Klíč = místo manévru (indexy se mění, když se doplní pokyny na rozdvojení).
+      if (_engine!.preSpoken.add(m.beginShapeIndex)) {
+        _engine!.alertSpoken.add(m.beginShapeIndex);
         _say(m.preInstruction ?? m.instruction);
       }
     } else if (d <= alert && d > pre + 150) {
-      if (_engine!.alertSpoken.add(i)) {
+      if (_engine!.alertSpoken.add(m.beginShapeIndex)) {
         _say('${_spokenDistance(d)} ${m.alertInstruction ?? m.instruction}');
       }
     }
@@ -740,6 +742,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   Future<void> _loadRouteExtras(ValhallaClient client, TruckRoute r) async {
     try {
       await client.loadEdgeAttributes(r);
+      if (mounted) setState(() {});
+      await enrichManeuvers(r);
       if (mounted) setState(() {});
     } catch (_) {}
     try {

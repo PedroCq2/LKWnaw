@@ -92,10 +92,15 @@ class ManeuverBanner extends StatelessWidget {
             Expanded(
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 Row(children: [
-                  Text(formatDistance(distance),
-                      style: const TextStyle(
-                          color: Lkw.amber, fontSize: 36, fontWeight: FontWeight.w900, height: 1.05)),
-                  const Spacer(),
+                  Expanded(
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerLeft,
+                      child: Text(formatDistance(distance),
+                          style: const TextStyle(
+                              color: Lkw.amber, fontSize: 36, fontWeight: FontWeight.w900, height: 1.05)),
+                    ),
+                  ),
                   if (m?.exitNumber != null) _exitTag(m!.exitNumber!),
                 ]),
                 Text(title,
@@ -107,22 +112,37 @@ class ManeuverBanner extends StatelessWidget {
             ),
           ]),
         ),
+        if (m?.lanes != null && distance < 2500)
+          Container(
+            color: Lkw.graphite,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+            child: FittedBox(fit: BoxFit.scaleDown, child: LaneRow(lanes: m!.lanes!)),
+          ),
         if (road != null || (m?.exitBranch.isNotEmpty ?? false))
           Container(
             color: Lkw.graphite,
             padding: const EdgeInsets.fromLTRB(14, 6, 16, 6),
             child: Row(children: [
               if (road != null) ...[
-                RoadShield(name: road!),
+                ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 120), child: RoadShield(name: road!)),
                 if (roadKm != null) ...[
                   const SizedBox(width: 8),
                   Text('${roadKm!.toStringAsFixed(1).replaceAll('.', ',')} km',
                       style: const TextStyle(color: Lkw.text, fontSize: 17, fontWeight: FontWeight.w800)),
                 ],
               ],
-              const Spacer(),
-              for (final b in (m?.exitBranch ?? const <String>[]).take(2))
-                Padding(padding: const EdgeInsets.only(left: 6), child: RoadShield(name: b, small: true)),
+              Expanded(
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: Wrap(spacing: 6, children: [
+                    for (final b in (m?.exitBranch ?? const <String>[]).take(2))
+                      ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 70),
+                          child: RoadShield(name: b, small: true)),
+                  ]),
+                ),
+              ),
             ]),
           ),
         if (then != null)
@@ -406,5 +426,53 @@ class RouteCard extends StatelessWidget {
         ]),
       ),
     );
+  }
+}
+
+/// Jízdní pruhy: pruhy pro naši trasu bíle na jantarovém podkladu, ostatní šedě.
+class LaneRow extends StatelessWidget {
+  final LaneInfo lanes;
+  const LaneRow({super.key, required this.lanes});
+
+  static IconData _icon(Set<String> t) {
+    const order = [
+      'sharp_left', 'left', 'slight_left', 'merge_to_left',
+      'sharp_right', 'right', 'slight_right', 'merge_to_right', 'reverse',
+    ];
+    for (final o in order) {
+      if (t.contains(o)) {
+        return switch (o) {
+          'sharp_left' => Icons.turn_sharp_left,
+          'left' => Icons.turn_left,
+          'slight_left' => Icons.turn_slight_left,
+          'sharp_right' => Icons.turn_sharp_right,
+          'right' => Icons.turn_right,
+          'slight_right' => Icons.turn_slight_right,
+          'reverse' => Icons.u_turn_left,
+          _ => Icons.merge,
+        };
+      }
+    }
+    return Icons.straight;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+      for (var i = 0; i < lanes.turns.length; i++) ...[
+        if (i > 0)
+          Container(width: 2, height: 30, margin: const EdgeInsets.symmetric(horizontal: 3), color: Lkw.panelHi),
+        Container(
+          width: 44,
+          height: 40,
+          decoration: BoxDecoration(
+            color: lanes.active[i] ? Lkw.amber : Colors.transparent,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Icon(_icon(lanes.turns[i]),
+              size: 32, color: lanes.active[i] ? Colors.black : const Color(0xFF5C6570)),
+        ),
+      ],
+    ]);
   }
 }
