@@ -124,3 +124,9 @@ String formatDistance(double m) {
   if (m >= 100) return '${(m / 50).round() * 50} m';
   return '${(m / 10).round() * 10} m';
 }
+
+String formatDuration(Duration d) {
+  final h = d.inHours;
+  final m = d.inMinutes.remainder(60);
+  return h > 0 ? '$h h ${m.toString().padLeft(2, '0')} min' : '$m min';
+}

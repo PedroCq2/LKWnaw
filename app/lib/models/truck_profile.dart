@@ -8,6 +8,7 @@ class TruckProfile {
   double weight; // t (celková hmotnost)
   double axleLoad; // t
   int axleCount;
+  int maxSpeed; // km/h – omezovač / zákonný limit pro kamiony
   bool hazmat; // ADR náklad
   bool avoidTolls;
   bool avoidFerries;
@@ -19,6 +20,7 @@ class TruckProfile {
     this.weight = 40.0,
     this.axleLoad = 11.5,
     this.axleCount = 5,
+    this.maxSpeed = 80,
     this.hazmat = false,
     this.avoidTolls = false,
     this.avoidFerries = false,
@@ -43,6 +45,7 @@ class TruckProfile {
         'weight': weight,
         'axleLoad': axleLoad,
         'axleCount': axleCount,
+        'maxSpeed': maxSpeed,
         'hazmat': hazmat,
         'avoidTolls': avoidTolls,
         'avoidFerries': avoidFerries,
@@ -57,6 +60,7 @@ class TruckProfile {
       weight: d('weight', 40.0),
       axleLoad: d('axleLoad', 11.5),
       axleCount: (j['axleCount'] as num?)?.toInt() ?? 5,
+      maxSpeed: (j['maxSpeed'] as num?)?.toInt() ?? 80,
       hazmat: j['hazmat'] as bool? ?? false,
       avoidTolls: j['avoidTolls'] as bool? ?? false,
       avoidFerries: j['avoidFerries'] as bool? ?? false,

@@ -1,22 +1,22 @@
-# LKW Navi – navigace pro kamiony (Android APK)
+# LKWnav – navigace pro kamiony (Android APK)
 
 Flutter aplikace pro navigaci nákladních vozidel nad OpenStreetMap a routing enginem
 [Valhalla](https://github.com/valhalla/valhalla) s profilem `truck`.
 
 ## Funkce
 
+- **3D vektorová mapa** (MapLibre + OpenFreeMap) – budovy ve 3D, náklon ve směru jízdy,
+  přepínání 2D/3D, denní/noční vzhled.
 - **Kamionové trasy** – výška, šířka, délka, hmotnost, zatížení nápravy, počet náprav,
-  ADR (nebezpečný náklad), vyhnutí se mýtu / trajektům. Předvolby: tahač 40 t, sólo 18 t, dodávka 3,5 t.
-- **Turn-by-turn navigace** – přichycení GPS k trase, natáčení mapy ve směru jízdy,
-  vzdálenost k manévru, **české hlasové pokyny** (TTS), automatické **přepočítání při sjetí z trasy**.
-- **Vyhledávání cíle** (Nominatim) nebo dlouhé podržení prstu na mapě.
-- **Doba řízení dle 561/2006** – sledování 4,5 h nepřetržitého řízení (přestávka 45 min
-  nebo 15 + 30), 9 h denně, hlasové varování 30/15/0 min před limitem,
-  upozornění „cestou nutná přestávka“.
-- **Parkoviště pro kamiony** (Overpass/OSM) – při navigaci hledá v místě, kam dojedete
-  před vypršením doby řízení; jedním ťuknutím na ně naviguje.
-
-> Doba řízení se odhaduje z GPS rychlosti a je pouze orientační – závazný je tachograf.
+  ADR (nebezpečný náklad), max. rychlost vozidla, vyhnutí se mýtu / trajektům.
+- **Výstrahy na trase** – omezení výšky, hmotnosti, šířky, délky a nápravy z OSM
+  (červeně, pokud je vaše vozidlo překračuje, + hlasové varování) a radary.
+- **Rychlostní limit** úseku (omezený max. rychlostí kamionu) a aktuální rychlost.
+- **Turn-by-turn navigace** – plynulý pohyb, přichycení k trase, tabule s manévrem
+  a „Pak …“, název ulice, **české hlasové pokyny**, přepočet při sjetí z trasy.
+- **POI pro kamiony** – truckparky a odpočívky (kapacita, placené, hlídané, WC, sprchy…),
+  truck servisy a pneuservisy, čerpací stanice pro kamiony (AdBlue, HGV nafta).
+- **Simulace jízdy** (Nastavení) – vyzkoušení navigace bez jízdy.
 
 ## Instalace APK
 
@@ -56,16 +56,18 @@ a v aplikaci (ikona kamionu → *Valhalla server*) zadejte `http://<IP-serveru>:
 |---|---|
 | `app/lib/services/valhalla.dart` | Valhalla `/route` klient, dekódování polyline6 |
 | `app/lib/navigation/nav_engine.dart` | map matching, postup po trase, detekce sjetí |
-| `app/lib/services/drive_timer.dart` | doba řízení / přestávky (561/2006) |
-| `app/lib/services/geocoding.dart` | vyhledávání adres, parkoviště HGV |
+| `app/lib/services/geocoding.dart` | vyhledávání adres, POI pro kamiony |
+| `app/lib/services/restrictions.dart` | omezení (výška/hmotnost…) a radary podél trasy |
+| `app/lib/navigation/simulator.dart` | simulace jízdy |
 | `app/lib/screens/map_screen.dart` | mapa, navigační UI, hlasové pokyny |
 | `app/lib/screens/profile_screen.dart` | profil vozidla a nastavení |
 | `backend/docker-compose.yml` | vlastní Valhalla server |
 
 ## Plán dalšího vývoje
 
-- Offline mapy (vektorové dlaždice z Planetileru + MapLibre) a offline routing.
-- Čtení `.ddd` souborů z karty řidiče místo odhadu z GPS.
-- Zobrazení omezení (podjezdy, zákazy vjezdu) přímo v mapě.
+- Offline mapy po státech (CZ, DE, PL…) a offline výpočet tras.
+- Uložená místa / vjezdy do areálů a ramp.
+- Přehled mýtného (CZ, SK, DE, AT…).
+- ADR kategorie tunelů (B–E) v profilu.
 
 Mapová data © přispěvatelé OpenStreetMap (ODbL).

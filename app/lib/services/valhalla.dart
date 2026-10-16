@@ -1,7 +1,10 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
+
+import 'http_headers.dart';
 
 import '../models/route.dart';
 import '../models/truck_profile.dart';
@@ -45,10 +48,7 @@ class ValhallaClient {
     try {
       res = await http
           .post(uri,
-              headers: {
-                'Content-Type': 'application/json',
-                'User-Agent': 'LKWnaw/1.0 (truck navigation)',
-              },
+              headers: uaHeaders({'Content-Type': 'application/json'}),
               body: jsonEncode(body))
           .timeout(const Duration(seconds: 30));
     } catch (e) {
@@ -60,6 +60,49 @@ class ValhallaClient {
           'Trasu nelze vypočítat: ${data['error'] ?? res.statusCode}');
     }
     return parseTrip(data['trip'] as Map<String, dynamic>);
+  }
+
+  /// Doplní k trase rychlostní limity a názvy silnic (Valhalla trace_attributes).
+  Future<void> loadEdgeAttributes(TruckRoute route) async {
+    final enc = route.encodedShape;
+    if (enc == null) return;
+    final body = {
+      'encoded_polyline': enc,
+      'costing': 'truck',
+      'shape_match': 'edge_walk',
+      'filters': {
+        'attributes': [
+          'edge.speed_limit',
+          'edge.names',
+          'edge.begin_shape_index',
+          'edge.end_shape_index',
+        ],
+        'action': 'include',
+      },
+    };
+    final uri = Uri.parse('${baseUrl.replaceAll(RegExp(r'/+$'), '')}/trace_attributes');
+    final res = await http
+        .post(uri,
+            headers: uaHeaders({'Content-Type': 'application/json'}),
+            body: jsonEncode(body))
+        .timeout(const Duration(seconds: 60));
+    if (res.statusCode != 200) return;
+    final data = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+    final n = math.max(0, route.shape.length - 1);
+    final limits = List<int?>.filled(n, null);
+    final names = List<String?>.filled(n, null);
+    for (final e in (data['edges'] as List? ?? const [])) {
+      final b = (e['begin_shape_index'] as num?)?.toInt() ?? 0;
+      final en = math.min(n, (e['end_shape_index'] as num?)?.toInt() ?? 0);
+      final lim = (e['speed_limit'] as num?)?.toInt();
+      final nm = (e['names'] as List?)?.isNotEmpty == true ? (e['names'] as List).first as String : null;
+      for (var i = b; i < en; i++) {
+        limits[i] = (lim != null && lim > 0 && lim < 200) ? lim : null;
+        names[i] = nm;
+      }
+    }
+    route.speedLimits = limits;
+    route.roadNames = names;
   }
 
   static TruckRoute parseTrip(Map<String, dynamic> trip) {
@@ -86,11 +129,16 @@ class ValhallaClient {
       timeSec: (summary['time'] as num).toDouble(),
       hasToll: summary['has_toll'] as bool? ?? false,
       hasHighway: summary['has_highway'] as bool? ?? false,
+      encodedShape: (trip['legs'] as List).length == 1
+          ? (trip['legs'] as List).first['shape'] as String
+          : null,
     );
   }
 }
 
 /// Dekóduje Google polyline s přesností 1e6 (formát Valhally).
+///
+/// Bez operátoru `~`: na webu (JS) dává nezáporný 32bitový výsledek.
 List<LatLng> decodePolyline6(String encoded) {
   final out = <LatLng>[];
   var index = 0, lat = 0, lng = 0;
@@ -101,7 +149,7 @@ List<LatLng> decodePolyline6(String encoded) {
       result |= (b & 0x1f) << shift;
       shift += 5;
     } while (b >= 0x20);
-    lat += (result & 1) != 0 ? ~(result >> 1) : (result >> 1);
+    lat += (result & 1) != 0 ? -(result >> 1) - 1 : (result >> 1);
     result = 0;
     shift = 0;
     do {
@@ -109,7 +157,7 @@ List<LatLng> decodePolyline6(String encoded) {
       result |= (b & 0x1f) << shift;
       shift += 5;
     } while (b >= 0x20);
-    lng += (result & 1) != 0 ? ~(result >> 1) : (result >> 1);
+    lng += (result & 1) != 0 ? -(result >> 1) - 1 : (result >> 1);
     out.add(LatLng(lat / 1e6, lng / 1e6));
   }
   return out;

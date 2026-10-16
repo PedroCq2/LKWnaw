@@ -1,43 +1,54 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:maplibre_gl/maplibre_gl.dart' as ml;
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../models/route.dart';
 import '../navigation/nav_engine.dart';
-import '../services/drive_timer.dart';
+import '../navigation/simulator.dart';
 import '../services/geocoding.dart';
+import '../services/restrictions.dart';
 import '../services/settings.dart';
 import '../services/valhalla.dart';
+import '../widgets/nav_widgets.dart';
 import 'profile_screen.dart';
+
+const _styleDay = 'https://tiles.openfreemap.org/styles/liberty';
+const _styleNight = 'https://tiles.openfreemap.org/styles/dark';
+
+ml.LatLng _ml(LatLng p) => ml.LatLng(p.latitude, p.longitude);
+List<double> _xy(LatLng p) => [p.longitude, p.latitude];
 
 class MapScreen extends StatefulWidget {
   final AppSettings settings;
-  final DriveTimer timer;
-  const MapScreen({super.key, required this.settings, required this.timer});
+  const MapScreen({super.key, required this.settings});
 
   @override
   State<MapScreen> createState() => _MapScreenState();
 }
 
 class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMixin {
-  final _map = MapController();
+  ml.MapLibreMapController? _map;
+  bool _styleReady = false;
   final _tts = FlutterTts();
   final _search = TextEditingController();
   StreamSubscription<Position>? _posSub;
-  Timer? _ticker;
+  Size _screen = Size.zero;
 
+  // Poslední GPS (nebo simulovaný) fix.
   LatLng? _pos;
   double _heading = 0;
   double _speedKmh = 0;
   bool _follow = true;
 
-  // Plynulá animace polohy/kamery mezi GPS fixy (1 Hz).
+  // Plynulá animace polohy/kamery mezi fixy (1 Hz).
   late final AnimationController _anim =
       AnimationController(vsync: this, duration: const Duration(seconds: 1))
         ..addListener(_onAnimTick);
@@ -47,6 +58,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   LatLng? _fromPos, _toPos;
   double _fromHead = 0, _toHead = 0, _fromZoom = 16, _toZoom = 16;
   DateTime? _lastFix;
+  bool _camBusy = false;
+  bool _meBusy = false;
 
   LatLng? _dest;
   String? _destName;
@@ -57,96 +70,110 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   bool _routing = false;
   DateTime _lastReroute = DateTime.fromMillisecondsSinceEpoch(0);
   bool _arrivedSpoken = false;
+  RouteSimulator? _sim;
+  final Set<RouteWarning> _warnSpoken = {};
 
   List<Place> _results = [];
   List<Place> _parking = [];
+  PoiKind _poiKind = PoiKind.parking;
   bool _searching = false;
 
-  final Set<int> _breakWarnings = {};
-
-  DriveTimer get _timer => widget.timer;
+  AppSettings get _settings => widget.settings;
 
   @override
   void initState() {
     super.initState();
     _initTts();
     _initLocation();
-    _ticker = Timer.periodic(const Duration(seconds: 30), (_) {
-      if (mounted) setState(() {});
-    });
   }
 
   @override
   void dispose() {
     _posSub?.cancel();
-    _ticker?.cancel();
+    _sim?.stop();
     _anim.dispose();
-    _timer.save();
     WakelockPlus.disable();
     super.dispose();
   }
 
+  // ------------------------------------------------------------ hlas
+
   Future<void> _initTts() async {
     try {
       await _tts.setLanguage('cs-CZ');
-      await _tts.setSpeechRate(0.5);
+      await _tts.setSpeechRate(kIsWeb ? 1.0 : 0.5);
       await _tts.awaitSpeakCompletion(false);
     } catch (_) {}
   }
 
   Future<void> _say(String text) async {
-    if (!widget.settings.voice || text.isEmpty) return;
+    if (!_settings.voice || text.isEmpty) return;
     try {
       await _tts.speak(text);
     } catch (_) {}
   }
 
+  // ------------------------------------------------------------ poloha
+
   Future<void> _initLocation() async {
-    if (!await Geolocator.isLocationServiceEnabled()) {
-      _toast('Zapněte prosím polohu (GPS).');
-    }
-    var perm = await Geolocator.checkPermission();
-    if (perm == LocationPermission.denied) {
-      perm = await Geolocator.requestPermission();
-    }
-    if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) {
-      _toast('Bez oprávnění k poloze navigace nefunguje.');
-      return;
-    }
-    // Poslední známá poloha hned – nečekat na první přesný GPS fix.
     try {
-      final last = await Geolocator.getLastKnownPosition();
-      if (last != null && _pos == null) _onPosition(last);
+      if (!await Geolocator.isLocationServiceEnabled()) {
+        _toast('Zapněte prosím polohu (GPS).');
+      }
+      var perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied) {
+        perm = await Geolocator.requestPermission();
+      }
+      if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) {
+        _toast('Bez oprávnění k poloze navigace nefunguje.');
+        return;
+      }
+      // Poslední známá poloha hned – nečekat na první přesný GPS fix.
+      if (!kIsWeb) {
+        final last = await Geolocator.getLastKnownPosition();
+        if (last != null && _pos == null) _onPosition(last);
+      }
     } catch (_) {}
-    final settings = AndroidSettings(
-      accuracy: LocationAccuracy.bestForNavigation,
-      distanceFilter: 0,
-      intervalDuration: const Duration(seconds: 1),
-      foregroundNotificationConfig: const ForegroundNotificationConfig(
-        notificationTitle: 'LKW Navi',
-        notificationText: 'Navigace a sledování doby řízení běží',
-        enableWakeLock: true,
-      ),
-    );
+    final LocationSettings settings;
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      settings = AndroidSettings(
+        accuracy: LocationAccuracy.bestForNavigation,
+        distanceFilter: 0,
+        intervalDuration: const Duration(seconds: 1),
+        foregroundNotificationConfig: const ForegroundNotificationConfig(
+          notificationTitle: 'LKWnav',
+          notificationText: 'Kamionová navigace běží',
+          enableWakeLock: true,
+        ),
+      );
+    } else {
+      settings = const LocationSettings(accuracy: LocationAccuracy.bestForNavigation);
+    }
     _posSub = Geolocator.getPositionStream(locationSettings: settings)
         .listen(_onPosition, onError: (e) => _toast('Chyba GPS: $e'));
   }
 
   void _onPosition(Position p) {
-    final pos = LatLng(p.latitude, p.longitude);
-    final speed = p.speed.isFinite && p.speed > 0 ? p.speed * 3.6 : 0.0;
+    if (_sim != null) return; // v simulaci se skutečné GPS ignoruje
+    final speed = p.speed.isFinite && p.speed > 0 ? p.speed : 0.0;
+    _onFix(LatLng(p.latitude, p.longitude), speed,
+        p.heading.isFinite && p.heading >= 0 ? p.heading : null);
+  }
+
+  void _onFix(LatLng pos, double speedMps, double? heading, {bool simulated = false}) {
+    if (_pos == null && kIsWeb) _webDemo();
+    final speed = speedMps * 3.6;
     // Kurz z GPS je spolehlivý jen za jízdy.
-    if (speed > 3 && p.heading.isFinite && p.heading >= 0) _heading = p.heading;
+    if (speed > 3 && heading != null) _heading = heading;
     _pos = pos;
     _speedKmh = speed;
-    _timer.update(speed, DateTime.now());
-    _checkBreakWarnings();
 
     if (_engine != null) {
       final nav = _engine!.update(pos);
       _nav = nav;
       if (_navigating) {
         _voiceGuidance(nav);
+        _warningVoice(nav);
         if (nav.arrived && !_arrivedSpoken) {
           _arrivedSpoken = true;
           _say('Jste v cíli.');
@@ -160,9 +187,28 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         }
       }
     }
-
     _animateTo();
   }
+
+  /// Web/test: `?dest=lat,lon&go=1` nastaví cíl (a spustí navigaci).
+  void _webDemo() {
+    final q = Uri.base.queryParameters;
+    final d = q['dest']?.split(',');
+    if (d == null || d.length != 2) return;
+    final p = LatLng(double.parse(d[0]), double.parse(d[1]));
+    Future.delayed(const Duration(seconds: 2), () async {
+      _setDestination(p, q['name'] ?? 'Cíl');
+      if (q['go'] == '1') {
+        for (var i = 0; i < 40 && _route == null; i++) {
+          await Future.delayed(const Duration(milliseconds: 500));
+        }
+        await Future.delayed(const Duration(seconds: 3));
+        _startNavigation();
+      }
+    });
+  }
+
+  // ------------------------------------------------------------ kamera
 
   /// Cílová poloha/natočení/zoom pro aktuální stav a spuštění animace k nim.
   void _animateTo() {
@@ -186,24 +232,19 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     if (_navigating) {
       // Hystereze, aby zoom neskákal kolem hranic rychlosti.
       final keep = _toZoom < 15 ? 16.5 : _toZoom;
-      final z = _speedKmh > 85 ? 15.5 : (_speedKmh > 45 ? 16.5 : (_speedKmh < 35 ? 17.5 : keep));
-      zoom = z;
+      zoom = _speedKmh > 85 ? 16.0 : (_speedKmh > 45 ? 16.8 : (_speedKmh < 35 ? 17.6 : keep));
     } else {
-      try {
-        zoom = _map.camera.zoom;
-      } catch (_) {}
+      zoom = _map?.cameraPosition?.zoom ?? 16;
+      if (zoom < 12) zoom = 16;
     }
 
     final now = DateTime.now();
     final last = _lastFix;
     _lastFix = now;
     if (_dispPos == null) {
-      _dispPos = target;
-      _dispHeading = heading;
-      _dispZoom = _navigating ? zoom : 16;
-      _toPos = target;
-      _toHead = heading;
-      _toZoom = _dispZoom;
+      _dispPos = _toPos = target;
+      _dispHeading = _toHead = heading;
+      _dispZoom = _toZoom = zoom;
       _applyCamera();
       if (mounted) setState(() {});
       return;
@@ -230,53 +271,191 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     _dispHeading = (_fromHead + dh * t) % 360;
     _dispZoom = _fromZoom + (_toZoom - _fromZoom) * t;
     if (_follow) _applyCamera();
+    _updateMeLayer();
     if (mounted) setState(() {});
   }
 
   void _applyCamera() {
+    final map = _map;
     final pos = _dispPos;
-    if (pos == null) return;
+    if (map == null || pos == null || _camBusy) return;
+    final cam = _navigating
+        ? ml.CameraPosition(
+            target: _ml(pos),
+            zoom: _dispZoom,
+            bearing: _dispHeading,
+            tilt: _settings.view3d ? 55 : 0)
+        : ml.CameraPosition(target: _ml(pos), zoom: _dispZoom, bearing: 0, tilt: 0);
+    _camBusy = true;
+    map.moveCamera(ml.CameraUpdate.newCameraPosition(cam)).whenComplete(() => _camBusy = false);
+  }
+
+  /// Horní odsazení, aby byl kamion ve spodní části obrazovky.
+  double get _topInset => _navigating && _screen.height > 0 ? _screen.height * 0.42 : 0;
+
+  Future<void> _applyInsets() async {
     try {
-      if (_navigating) {
-        // Poloha ve spodní části obrazovky: střed mapy posunut dopředu ve směru jízdy.
-        final mpp = 40075016.686 * math.cos(pos.latitude * math.pi / 180) /
-            (256 * math.pow(2, _dispZoom));
-        final center = const Distance().offset(pos, 150 * mpp, _dispHeading);
-        _map.moveAndRotate(center, _dispZoom, -_dispHeading);
-      } else {
-        _map.move(pos, _map.camera.zoom < 12 ? 16 : _map.camera.zoom);
+      await _map?.updateContentInsets(EdgeInsets.only(top: _topInset), false);
+    } catch (_) {}
+  }
+
+  void _recenter() {
+    setState(() => _follow = true);
+    _applyInsets().then((_) => _applyCamera());
+  }
+
+  // ------------------------------------------------------------ vrstvy mapy
+
+  Future<void> _onStyleLoaded() async {
+    final m = _map;
+    if (m == null) return;
+    _styleReady = false;
+    const empty = {'type': 'FeatureCollection', 'features': []};
+    try {
+      for (final id in ['route', 'warn', 'parking', 'dest', 'me']) {
+        await m.addGeoJsonSource(id, empty);
       }
+      await m.addLineLayer(
+          'route', 'route-casing',
+          const ml.LineLayerProperties(
+              lineColor: '#0D47A1', lineWidth: 13, lineJoin: 'round', lineCap: 'round'));
+      await m.addLineLayer(
+          'route', 'route-line',
+          const ml.LineLayerProperties(
+              lineColor: '#2E7DFF', lineWidth: 9, lineJoin: 'round', lineCap: 'round'));
+      await m.addCircleLayer(
+          'dest', 'dest-circle',
+          const ml.CircleLayerProperties(
+              circleRadius: 10, circleColor: '#E53935', circleStrokeColor: '#FFFFFF', circleStrokeWidth: 3));
+      await m.addCircleLayer(
+          'parking', 'parking-circle',
+          const ml.CircleLayerProperties(
+              circleRadius: 13, circleColor: '#1565C0', circleStrokeColor: '#FFFFFF', circleStrokeWidth: 2));
+      await m.addSymbolLayer(
+          'parking', 'parking-label',
+          const ml.SymbolLayerProperties(
+              textField: ['get', 'l'], textSize: 16, textColor: '#FFFFFF',
+              textFont: ['Noto Sans Bold'], textAllowOverlap: true, textIgnorePlacement: true));
+      await m.addCircleLayer(
+          'warn', 'warn-circle',
+          const ml.CircleLayerProperties(
+              circleRadius: 17,
+              circleColor: ['case', ['==', ['get', 'cam'], true], '#FFC107', '#FFFFFF'],
+              circleStrokeColor: ['case', ['==', ['get', 'cam'], true], '#FFFFFF', '#D50000'],
+              circleStrokeWidth: 4,
+              circlePitchAlignment: 'viewport'));
+      await m.addSymbolLayer(
+          'warn', 'warn-label',
+          const ml.SymbolLayerProperties(
+              textField: ['get', 'label'], textSize: 11, textColor: '#000000',
+              textFont: ['Noto Sans Bold'], textAllowOverlap: true, textIgnorePlacement: true));
+      await m.addImage('truck-arrow', await _arrowPng());
+      await m.addSymbolLayer(
+          'me', 'me-arrow',
+          const ml.SymbolLayerProperties(
+              iconImage: 'truck-arrow',
+              iconSize: 0.55,
+              iconRotate: ['get', 'h'],
+              iconRotationAlignment: 'map',
+              iconPitchAlignment: 'map',
+              iconAllowOverlap: true,
+              iconIgnorePlacement: true));
+      _styleReady = true;
+      await _syncLayers();
+      await _applyInsets();
+      if (_follow) _applyCamera();
+    } catch (e) {
+      debugPrint('style layers: $e');
+    }
+  }
+
+  Map<String, dynamic> _points(Iterable<(LatLng, Map<String, dynamic>)> pts) => {
+        'type': 'FeatureCollection',
+        'features': [
+          for (final (p, props) in pts)
+            {
+              'type': 'Feature',
+              'properties': props,
+              'geometry': {'type': 'Point', 'coordinates': _xy(p)},
+            }
+        ],
+      };
+
+  Future<void> _syncLayers() async {
+    final m = _map;
+    if (m == null || !_styleReady) return;
+    try {
+      final r = _route;
+      await m.setGeoJsonSource('route', {
+        'type': 'FeatureCollection',
+        'features': [
+          if (r != null)
+            {
+              'type': 'Feature',
+              'properties': <String, dynamic>{},
+              'geometry': {'type': 'LineString', 'coordinates': r.shape.map(_xy).toList()},
+            }
+        ],
+      });
+      await m.setGeoJsonSource(
+          'warn',
+          _points([
+            for (final w in r?.warnings ?? const <RouteWarning>[])
+              (w.point, {
+                'label': w.type == WarningType.speedCamera ? '' : w.label.replaceAll(' ', ''),
+                'cam': w.type == WarningType.speedCamera,
+              })
+          ]));
+      final letter = switch (_poiKind) { PoiKind.parking => 'P', PoiKind.service => 'S', PoiKind.fuel => 'D' };
+      await m.setGeoJsonSource(
+          'parking', _points([for (final p in _parking) (p.point, {'l': letter})]));
+      await m.setGeoJsonSource('dest', _points([if (_dest != null) (_dest!, {})]));
+      await _updateMeLayer();
+    } catch (_) {}
+  }
+
+  /// Šipka vozidla jako vrstva mapy – vždy přesně na silnici, v 3D leží naplocho.
+  Future<void> _updateMeLayer() async {
+    final m = _map;
+    final p = _dispPos ?? _pos;
+    if (m == null || !_styleReady || _meBusy) return;
+    _meBusy = true;
+    try {
+      await m.setGeoJsonSource('me', _points([if (p != null) (p, {'h': _dispHeading})]));
     } catch (_) {
-      // Mapa ještě není vykreslená.
+    } finally {
+      _meBusy = false;
     }
   }
 
-  void _moveCamera() {
-    _follow = true;
-    if (!_navigating) {
-      try {
-        _map.rotate(0);
-      } catch (_) {}
-    }
-    _applyCamera();
+  static Future<Uint8List> _arrowPng() async {
+    const size = 120.0;
+    final rec = ui.PictureRecorder();
+    final c = Canvas(rec);
+    final path = ui.Path()
+      ..moveTo(size / 2, 8)
+      ..lineTo(size - 16, size - 12)
+      ..lineTo(size / 2, size - 34)
+      ..lineTo(16, size - 12)
+      ..close();
+    c.drawPath(path.shift(const Offset(0, 4)),
+        Paint()
+          ..color = const Color(0x55000000)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4));
+    c.drawPath(path, Paint()..color = const Color(0xFFFF3D00));
+    c.drawPath(
+        path,
+        Paint()
+          ..color = Colors.white
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 7
+          ..strokeJoin = StrokeJoin.round);
+    final img = await rec.endRecording().toImage(size.toInt(), size.toInt());
+    final data = await img.toByteData(format: ui.ImageByteFormat.png);
+    return data!.buffer.asUint8List();
   }
 
-  void _checkBreakWarnings() {
-    final rem = _timer.remaining.inMinutes;
-    if (rem > 30) {
-      _breakWarnings.clear();
-      return;
-    }
-    if (_speedKmh < 5) return;
-    for (final limit in [30, 15, 0]) {
-      if (rem <= limit && _breakWarnings.add(limit)) {
-        _say(limit == 0
-            ? 'Překročena doba řízení. Zastavte a udělejte přestávku.'
-            : 'Do povinné přestávky zbývá $rem minut.');
-        break;
-      }
-    }
-  }
+  // ------------------------------------------------------------ hlasové pokyny
 
   void _voiceGuidance(NavState nav) {
     final i = nav.nextManeuverIndex;
@@ -298,8 +477,27 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     }
   }
 
+  void _warningVoice(NavState nav) {
+    for (final w in _route?.warnings ?? const <RouteWarning>[]) {
+      final d = w.atMeters - nav.traveled;
+      if (d < 0) continue;
+      if (d > 1200) break;
+      final speak = w.violates ? d <= 1000 : (w.type == WarningType.speedCamera && d <= 500);
+      if (speak && _warnSpoken.add(w)) {
+        final dist = _spokenDistance(d).replaceAll(',', '');
+        if (w.type == WarningType.speedCamera) {
+          _say('$dist radar.');
+        } else {
+          final unit = w.type == WarningType.weight || w.type == WarningType.axleLoad ? 'tun' : 'metru';
+          final v = w.value!.toStringAsFixed(1).replaceAll('.', ',');
+          _say('Pozor! $dist ${w.spokenName} $v $unit. Vaše vozidlo limit překračuje.');
+        }
+      }
+    }
+  }
+
   String _spokenDistance(double m) {
-    if (m < 1000) return 'Za ${(m / 50).round() * 50} metrů,';
+    if (m < 1000) return 'Za ${math.max(50, (m / 50).round() * 50)} metrů,';
     final km = (m / 100).round() / 10;
     if (km == km.roundToDouble()) {
       final k = km.round();
@@ -308,6 +506,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     }
     return 'Za ${km.toString().replaceAll('.', ',')} kilometru,';
   }
+
+  // ------------------------------------------------------------ trasa
 
   Future<void> _computeRoute({bool reroute = false}) async {
     final from = _pos;
@@ -319,10 +519,11 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     }
     setState(() => _routing = true);
     try {
-      final r = await ValhallaClient(widget.settings.valhallaUrl).route(
+      final client = ValhallaClient(_settings.valhallaUrl);
+      final r = await client.route(
         from: from,
         to: to,
-        profile: widget.settings.profile,
+        profile: _settings.profile,
         heading: reroute || _speedKmh > 5 ? _heading : null,
       );
       if (!mounted) return;
@@ -331,8 +532,11 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         _engine = NavEngine(r);
         _nav = _engine!.update(from);
         _arrivedSpoken = false;
+        _warnSpoken.clear();
       });
+      await _syncLayers();
       if (!reroute && !_navigating) _fitRoute(r);
+      _loadRouteExtras(client, r);
     } on RoutingException catch (e) {
       _toast(e.message);
     } catch (e) {
@@ -342,30 +546,71 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     }
   }
 
-  void _fitRoute(TruckRoute r) {
-    _follow = false;
+  /// Rychlostní limity a kamionové výstrahy – na pozadí, trasa je použitelná hned.
+  Future<void> _loadRouteExtras(ValhallaClient client, TruckRoute r) async {
     try {
-      _map.rotate(0);
-      _map.fitCamera(CameraFit.coordinates(
-          coordinates: r.shape,
-          padding: const EdgeInsets.fromLTRB(40, 140, 40, 220)));
+      await client.loadEdgeAttributes(r);
+      if (mounted) setState(() {});
+    } catch (_) {}
+    try {
+      final w = await loadRouteWarnings(r, _settings.profile);
+      if (!mounted || _route != r) return;
+      setState(() => r.warnings = w);
+      await _syncLayers();
+      final bad = w.where((x) => x.violates).length;
+      if (bad > 0) _toast('Pozor: na trase je $bad omezení, která vaše vozidlo překračuje.');
     } catch (_) {}
   }
 
-  void _startNavigation() {
-    if (_route == null) return;
+  Future<void> _fitRoute(TruckRoute r) async {
+    setState(() => _follow = false);
+    await _updateMeLayer();
+    var s = 90.0, w = 180.0, n = -90.0, e = -180.0;
+    for (final p in r.shape) {
+      s = math.min(s, p.latitude);
+      n = math.max(n, p.latitude);
+      w = math.min(w, p.longitude);
+      e = math.max(e, p.longitude);
+    }
+    try {
+      await _map?.updateContentInsets(EdgeInsets.zero, false);
+      await _map?.moveCamera(ml.CameraUpdate.bearingTo(0));
+      await _map?.moveCamera(ml.CameraUpdate.tiltTo(0));
+      await _map?.animateCamera(
+          ml.CameraUpdate.newLatLngBounds(
+              ml.LatLngBounds(southwest: ml.LatLng(s, w), northeast: ml.LatLng(n, e)),
+              left: 50, top: 200, right: 50, bottom: 260),
+          duration: const Duration(milliseconds: 700));
+    } catch (_) {}
+  }
+
+  Future<void> _startNavigation() async {
+    final r = _route;
+    if (r == null) return;
     setState(() {
       _navigating = true;
       _follow = true;
+      _results = [];
     });
+    await _applyInsets();
+    await _updateMeLayer();
     WakelockPlus.enable();
-    final first = _route!.maneuvers.isNotEmpty ? _route!.maneuvers.first : null;
+    final first = r.maneuvers.isNotEmpty ? r.maneuvers.first : null;
     _say(first?.preInstruction ?? 'Navigace spuštěna.');
-    _moveCamera();
+    if (_settings.simulate) {
+      _sim?.stop();
+      _sim = RouteSimulator(r, _settings.profile.maxSpeed,
+          (p, s, h) => _onFix(p, s, h, simulated: true),
+          startAt: _nav?.traveled ?? 0)
+        ..start();
+    }
+    _animateTo();
   }
 
-  void _stopNavigation() {
+  Future<void> _stopNavigation() async {
     WakelockPlus.disable();
+    _sim?.stop();
+    _sim = null;
     setState(() {
       _navigating = false;
       _route = null;
@@ -374,10 +619,11 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       _dest = null;
       _destName = null;
       _parking = [];
+      _follow = true;
     });
-    try {
-      _map.rotate(0);
-    } catch (_) {}
+    await _applyInsets();
+    await _syncLayers();
+    _applyCamera();
   }
 
   void _setDestination(LatLng p, String name) {
@@ -387,7 +633,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       _destName = name;
       _results = [];
     });
-    _computeRoute();
+    _syncLayers();
+    _computeRoute(reroute: _navigating);
   }
 
   Future<void> _doSearch(String q) async {
@@ -404,13 +651,36 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     }
   }
 
-  Future<void> _findParking() async {
-    // Hledej kolem bodu, kam kamion dojede před koncem doby řízení.
+  static IconData _poiIcon(PoiKind k) => switch (k) {
+        PoiKind.parking => Icons.local_parking,
+        PoiKind.service => Icons.build,
+        PoiKind.fuel => Icons.local_gas_station,
+      };
+
+  void _choosePoi() {
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          for (final k in PoiKind.values)
+            ListTile(
+              leading: Icon(_poiIcon(k)),
+              title: Text(k.label),
+              onTap: () {
+                Navigator.pop(ctx);
+                _findPois(k);
+              },
+            ),
+        ]),
+      ),
+    );
+  }
+
+  Future<void> _findPois(PoiKind kind) async {
+    // Při navigaci hledej ~15 km před vozidlem po trase, jinak kolem polohy.
     LatLng? center = _pos;
     if (_navigating && _route != null && _nav != null) {
-      final reachM = _timer.remaining.inSeconds *
-          (_route!.lengthKm * 1000 / math.max(1, _route!.timeSec));
-      final target = math.min(_nav!.traveled + reachM * 0.9, _route!.cumulative.last);
+      final target = math.min(_nav!.traveled + 15000, _route!.cumulative.last);
       final idx = _route!.cumulative.indexWhere((c) => c >= target);
       center = _route!.shape[idx < 0 ? _route!.shape.length - 1 : idx];
     }
@@ -418,94 +688,81 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       _toast('Čekám na GPS polohu…');
       return;
     }
-    _toast('Hledám parkoviště pro kamiony…');
+    _toast('Hledám: ${kind.label.toLowerCase()}…');
     try {
-      final places = await findTruckParking(center);
+      final places = await findTruckPois(center, kind);
       if (!mounted) return;
-      setState(() => _parking = places);
+      setState(() {
+        _parking = places;
+        _poiKind = kind;
+      });
+      await _syncLayers();
       if (places.isEmpty) {
-        _toast('V okolí nebylo nalezeno parkoviště.');
+        _toast('V okolí 30 km nic nenalezeno.');
         return;
       }
-      _showParkingSheet(places);
+      _showPoiSheet(places, kind);
     } catch (e) {
-      _toast('Hledání parkovišť selhalo: $e');
+      _toast('Hledání selhalo: $e');
     }
   }
 
-  void _showParkingSheet(List<Place> places) {
+  void _showPoiSheet(List<Place> places, PoiKind kind) {
     const dist = Distance();
     showModalBottomSheet(
       context: context,
-      builder: (ctx) => ListView(
-        children: [
-          const ListTile(title: Text('Parkoviště a odpočívky')),
-          for (final p in places.take(25))
-            ListTile(
-              leading: const Icon(Icons.local_parking),
-              title: Text(p.name),
-              subtitle: _pos == null
-                  ? null
-                  : Text('vzdušnou čarou ${formatDistance(dist(_pos!, p.point))}'),
-              onTap: () {
-                Navigator.pop(ctx);
-                final wasNavigating = _navigating;
-                _setDestination(p.point, p.name);
-                if (wasNavigating) _say('Naviguji na parkoviště.');
-              },
-            ),
-        ],
-      ),
-    );
-  }
-
-  void _showTimerDialog() {
-    final now = DateTime.now();
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Doba řízení (561/2006)'),
-        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text('Nepřetržité řízení: ${formatDuration(_timer.continuous)} / 4 h 30 min'),
-          Text('Do přestávky: ${formatDuration(_timer.remainingContinuous)}'),
-          const SizedBox(height: 8),
-          Text('Denní řízení: ${formatDuration(_timer.daily)} / 9 h'),
-          Text('Zbývá dnes: ${formatDuration(_timer.remainingDaily)}'),
-          const SizedBox(height: 8),
-          if (_timer.stopStart != null)
-            Text('Aktuální stání: ${formatDuration(_timer.currentStop(now))}'),
-          if (_timer.partialBreakTaken)
-            const Text('První část dělené přestávky (15 min) splněna – zbývá 30 min.'),
-          const SizedBox(height: 12),
-          const Text(
-            'Orientační výpočet z GPS. Závazný je vždy údaj tachografu.',
-            style: TextStyle(fontSize: 12, fontStyle: FontStyle.italic),
-          ),
-        ]),
-        actions: [
-          TextButton(
-              onPressed: () {
-                _timer.reset();
-                Navigator.pop(ctx);
-                setState(() {});
-              },
-              child: const Text('Vynulovat')),
-          TextButton(
-              onPressed: () {
-                Navigator.pop(ctx);
-                _findParking();
-              },
-              child: const Text('Najít parkoviště')),
-          FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK')),
-        ],
+      isScrollControlled: true,
+      builder: (ctx) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.55,
+        builder: (ctx, scroll) => ListView(
+          controller: scroll,
+          children: [
+            ListTile(title: Text(kind.label, style: Theme.of(ctx).textTheme.titleMedium)),
+            for (final p in places.take(30))
+              ListTile(
+                leading: CircleAvatar(child: Icon(_poiIcon(kind), size: 20)),
+                title: Text(p.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text([
+                    if (p.kind != null) p.kind!,
+                    if (_pos != null) formatDistance(dist(_pos!, p.point)),
+                  ].join(' · ')),
+                  if (p.features.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Wrap(spacing: 4, runSpacing: 4, children: [
+                        for (final f in p.features)
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                            decoration: BoxDecoration(
+                                color: Theme.of(ctx).colorScheme.secondaryContainer,
+                                borderRadius: BorderRadius.circular(10)),
+                            child: Text(f, style: const TextStyle(fontSize: 12)),
+                          ),
+                      ]),
+                    ),
+                ]),
+                isThreeLine: p.features.isNotEmpty,
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _setDestination(p.point, p.name);
+                  if (_navigating) _say('Naviguji na ${p.name}.');
+                },
+              ),
+          ],
+        ),
       ),
     );
   }
 
   Future<void> _openProfile() async {
     final changed = await Navigator.push<bool>(
-        context, MaterialPageRoute(builder: (_) => ProfileScreen(settings: widget.settings)));
-    if (changed == true && _dest != null) _computeRoute(reroute: _navigating);
+        context, MaterialPageRoute(builder: (_) => ProfileScreen(settings: _settings)));
+    if (changed == true) {
+      setState(() {});
+      if (_dest != null) _computeRoute(reroute: _navigating);
+    }
   }
 
   void _toast(String msg) {
@@ -520,110 +777,153 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   @override
   Widget build(BuildContext context) {
     final route = _route;
+    final nav = _nav;
+    final night = _settings.night;
+    final limitRaw = nav != null ? route?.speedLimitAt(nav.segmentIndex) : null;
+    final limit = limitRaw == null ? null : math.min(limitRaw, _settings.profile.maxSpeed);
+    final bottomPad = MediaQuery.of(context).padding.bottom;
+
     return Scaffold(
-      body: Stack(children: [
-        FlutterMap(
-          mapController: _map,
-          options: MapOptions(
-            initialCenter: const LatLng(49.8, 15.5),
-            initialZoom: 7,
-            onLongPress: (_, p) => _setDestination(
-                p, '${p.latitude.toStringAsFixed(5)}, ${p.longitude.toStringAsFixed(5)}'),
-            onPositionChanged: (_, hasGesture) {
-              if (hasGesture && _follow) setState(() => _follow = false);
+      resizeToAvoidBottomInset: false,
+      body: LayoutBuilder(builder: (context, box) {
+        if (box.biggest != _screen) {
+          _screen = box.biggest;
+          WidgetsBinding.instance.addPostFrameCallback((_) => _applyInsets());
+        }
+        return Stack(children: [
+          Listener(
+            onPointerMove: (e) {
+              if (_follow && e.delta.distance > 1.5) {
+                setState(() => _follow = false);
+              }
             },
+            child: ml.MapLibreMap(
+              styleString: night ? _styleNight : _styleDay,
+              initialCameraPosition:
+                  const ml.CameraPosition(target: ml.LatLng(49.8, 15.5), zoom: 6),
+              onMapCreated: (c) => _map = c,
+              onStyleLoadedCallback: _onStyleLoaded,
+              trackCameraPosition: true,
+              compassEnabled: false,
+              rotateGesturesEnabled: true,
+              tiltGesturesEnabled: true,
+              attributionButtonPosition: ml.AttributionButtonPosition.bottomLeft,
+              // Atribuce OSM je v Nastavení → O aplikaci, na mapě nepřekáží.
+              attributionButtonMargins: const math.Point(-200, -200),
+              attributionButtonColor: Colors.transparent,
+              logoEnabled: false,
+              webPreserveDrawingBuffer: true,
+              onMapLongClick: (_, p) => _setDestination(LatLng(p.latitude, p.longitude),
+                  '${p.latitude.toStringAsFixed(5)}, ${p.longitude.toStringAsFixed(5)}'),
+            ),
           ),
-          children: [
-            TileLayer(
-              urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-              userAgentPackageName: 'cz.lkwnaw.truck_nav',
-              maxZoom: 19,
-            ),
-            if (route != null)
-              PolylineLayer(polylines: [
-                Polyline(
-                    points: route.shape,
-                    strokeWidth: 9,
-                    color: Colors.white,
-                    borderStrokeWidth: 0),
-                Polyline(points: route.shape, strokeWidth: 6, color: const Color(0xFF1565C0)),
-              ]),
-            MarkerLayer(markers: [
-              for (final p in _parking)
-                Marker(
-                  point: p.point,
-                  width: 30,
-                  height: 30,
-                  child: GestureDetector(
-                    onTap: () => _setDestination(p.point, p.name),
-                    child: const CircleAvatar(
-                        backgroundColor: Color(0xFF0D47A1),
-                        child: Text('P',
-                            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold))),
-                  ),
-                ),
-              if (_dest != null)
-                Marker(
-                  point: _dest!,
-                  width: 44,
-                  height: 44,
-                  alignment: Alignment.topCenter,
-                  child: const Icon(Icons.location_on, color: Colors.red, size: 44),
-                ),
-              if (_pos != null)
-                Marker(
-                  point: _dispPos ?? _pos!,
-                  width: 48,
-                  height: 48,
-                  child: Transform.rotate(
-                    angle: _dispHeading * math.pi / 180,
-                    child: const Icon(Icons.navigation, color: Color(0xFFE65100), size: 44,
-                        shadows: [Shadow(blurRadius: 4, color: Colors.black54)]),
-                  ),
-                ),
+          SafeArea(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              if (_navigating && route != null) _banner(route, nav) else _searchBar(),
+              if (!_navigating && _results.isNotEmpty) _resultsList(),
+              Expanded(
+                child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const Spacer(),
+                  if (_navigating) _warningsColumn(route, nav),
+                ]),
+              ),
             ]),
-          ],
-        ),
-        SafeArea(
-          child: Column(children: [
-            if (_navigating) _maneuverBanner() else _searchBar(),
-            if (!_navigating && _results.isNotEmpty) _resultsList(),
-            Align(alignment: Alignment.centerRight, child: _timerChip()),
-          ]),
-        ),
-        Positioned(
-          right: 12,
-          bottom: route != null ? 170 : 24,
-          child: Column(children: [
-            FloatingActionButton.small(
-              heroTag: 'parking',
-              tooltip: 'Parkoviště pro kamiony',
-              onPressed: _findParking,
-              child: const Icon(Icons.local_parking),
+          ),
+          // Pravý sloupec tlačítek
+          Positioned(
+            right: 12,
+            bottom: (route != null ? 170 : 24) + bottomPad,
+            child: Column(children: [
+              if (!_navigating)
+                RoundButton(icon: Icons.local_shipping, tooltip: 'Profil vozidla', onPressed: _openProfile),
+              RoundButton(icon: Icons.local_parking, tooltip: 'Truckparky, servisy, nafta', onPressed: _choosePoi),
+              RoundButton(
+                icon: _settings.voice ? Icons.volume_up : Icons.volume_off,
+                tooltip: 'Hlas',
+                onPressed: () {
+                  setState(() => _settings.voice = !_settings.voice);
+                  if (!_settings.voice) _tts.stop();
+                  _settings.save();
+                },
+              ),
+              RoundButton(
+                icon: _settings.view3d ? Icons.view_in_ar : Icons.map_outlined,
+                tooltip: '2D / 3D',
+                onPressed: () {
+                  setState(() => _settings.view3d = !_settings.view3d);
+                  _settings.save();
+                  _applyCamera();
+                },
+              ),
+              if (!_follow)
+                RoundButton(
+                    icon: Icons.my_location,
+                    tooltip: 'Moje poloha',
+                    onPressed: _recenter,
+                    color: Theme.of(context).colorScheme.primary),
+            ]),
+          ),
+          if (_navigating && (limit != null || _speedKmh > 0))
+            Positioned(
+              left: 12,
+              bottom: 170 + bottomPad,
+              child: SpeedWidget(limit: limit, speedKmh: _speedKmh),
             ),
-            const SizedBox(height: 8),
-            FloatingActionButton.small(
-              heroTag: 'profile',
-              tooltip: 'Profil vozidla',
-              onPressed: _openProfile,
-              child: const Icon(Icons.local_shipping),
+          if (_navigating && nav != null && route != null)
+            Positioned(
+              left: 110,
+              right: 90,
+              bottom: 150 + bottomPad,
+              child: Center(child: _roadPill(route.roadNameAt(nav.segmentIndex))),
             ),
-            const SizedBox(height: 8),
-            FloatingActionButton(
-              heroTag: 'center',
-              tooltip: 'Moje poloha',
-              onPressed: () {
-                setState(() => _follow = true);
-                _moveCamera();
-              },
-              child: Icon(_follow ? Icons.gps_fixed : Icons.gps_not_fixed),
-            ),
-          ]),
-        ),
-        if (route != null)
-          Positioned(left: 0, right: 0, bottom: 0, child: _bottomPanel(route)),
-        if (_routing) const Center(child: CircularProgressIndicator()),
+          if (route != null) Positioned(left: 0, right: 0, bottom: 0, child: _bottomPanel(route)),
+          if (_routing) const Center(child: CircularProgressIndicator()),
+        ]);
+      }),
+    );
+  }
+
+  Widget _banner(TruckRoute route, NavState? nav) {
+    final i = nav?.nextManeuverIndex ?? -1;
+    final m = i >= 0 ? route.maneuvers[i] : null;
+    Maneuver? then;
+    if (m != null && i + 1 < route.maneuvers.length) {
+      final gap = route.cumulative[route.maneuvers[i + 1].beginShapeIndex] -
+          route.cumulative[m.beginShapeIndex];
+      if (gap < 500) then = route.maneuvers[i + 1];
+    }
+    return ManeuverBanner(maneuver: m, distance: nav?.distanceToNextManeuver ?? 0, then: then);
+  }
+
+  Widget _warningsColumn(TruckRoute? route, NavState? nav) {
+    if (route == null || nav == null) return const SizedBox.shrink();
+    final ahead = route.warnings
+        .where((w) {
+          final d = w.atMeters - nav.traveled;
+          return d > -5 && d < (w.type == WarningType.speedCamera ? 1500 : 3000);
+        })
+        .take(3)
+        .toList();
+    return Padding(
+      padding: const EdgeInsets.only(top: 10, right: 8),
+      child: Column(children: [
+        for (final w in ahead) WarningCard(w: w, distance: math.max(0, w.atMeters - nav.traveled)),
       ]),
+    );
+  }
+
+  Widget _roadPill(String? name) {
+    if (name == null || name.isEmpty) return const SizedBox.shrink();
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.75),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(name,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w600)),
     );
   }
 
@@ -680,52 +980,6 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         ),
       );
 
-  Widget _timerChip() {
-    final rem = _timer.remaining;
-    final color = rem.inMinutes <= 15
-        ? Colors.red
-        : rem.inMinutes <= 30
-            ? Colors.orange
-            : Colors.green.shade700;
-    return Padding(
-      padding: const EdgeInsets.all(12),
-      child: ActionChip(
-        avatar: Icon(Icons.timer, color: color),
-        label: Text('Řízení: ${formatDuration(rem)}'),
-        onPressed: _showTimerDialog,
-      ),
-    );
-  }
-
-  Widget _maneuverBanner() {
-    final nav = _nav;
-    final route = _route!;
-    final m = nav != null && nav.nextManeuverIndex >= 0
-        ? route.maneuvers[nav.nextManeuverIndex]
-        : null;
-    return Container(
-      margin: const EdgeInsets.fromLTRB(8, 8, 8, 0),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-          color: const Color(0xFF1B5E20), borderRadius: BorderRadius.circular(16)),
-      child: Row(children: [
-        Icon(maneuverIcon(m?.type ?? 4), color: Colors.white, size: 56),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(nav == null ? '' : formatDistance(nav.distanceToNextManeuver),
-                style: const TextStyle(
-                    color: Colors.white, fontSize: 30, fontWeight: FontWeight.bold)),
-            Text(m?.instruction ?? 'Cíl',
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: Colors.white, fontSize: 17)),
-          ]),
-        ),
-      ]),
-    );
-  }
-
   Widget _bottomPanel(TruckRoute route) {
     final nav = _nav;
     final remainingM = nav?.remaining ?? route.lengthKm * 1000;
@@ -733,111 +987,98 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     final remainingSec = route.timeSec * ratio;
     final eta = DateTime.now().add(Duration(seconds: remainingSec.round()));
     final etaStr = '${eta.hour}:${eta.minute.toString().padLeft(2, '0')}';
-    final needsBreak = Duration(seconds: remainingSec.round()) > _timer.remaining;
+    final bad = route.warnings.where((w) => w.violates).length;
+    const green = Color(0xFF0B7A4B);
 
     return Material(
       elevation: 12,
-      borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+      borderRadius: const BorderRadius.vertical(top: Radius.circular(22)),
       child: SafeArea(
         top: false,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            if (!_navigating && _destName != null)
-              Text(_destName!, maxLines: 1, overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.titleSmall),
-            const SizedBox(height: 6),
-            Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
-              _stat(formatDuration(Duration(seconds: remainingSec.round())), 'čas'),
-              _stat(formatDistance(remainingM), 'vzdálenost'),
-              _stat(etaStr, 'příjezd'),
-              if (_navigating) _stat('${_speedKmh.round()}', 'km/h'),
-            ]),
-            if (!_navigating)
-              Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Wrap(spacing: 6, children: [
-                  if (route.hasToll) const Chip(label: Text('mýto'), visualDensity: VisualDensity.compact),
-                  if (route.hasHighway) const Chip(label: Text('dálnice'), visualDensity: VisualDensity.compact),
-                  if (needsBreak)
-                    const Chip(
-                        avatar: Icon(Icons.coffee, size: 16),
-                        label: Text('cestou nutná přestávka'),
-                        visualDensity: VisualDensity.compact),
-                ]),
-              ),
-            const SizedBox(height: 8),
-            Row(children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: _stopNavigation,
-                  icon: const Icon(Icons.close),
-                  label: Text(_navigating ? 'Ukončit' : 'Zrušit'),
-                ),
-              ),
-              if (!_navigating) ...[
-                const SizedBox(width: 12),
-                Expanded(
-                  flex: 2,
-                  child: FilledButton.icon(
-                    onPressed: _startNavigation,
-                    icon: const Icon(Icons.navigation),
-                    label: const Text('Start'),
+          padding: const EdgeInsets.fromLTRB(20, 14, 16, 12),
+          child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (!_navigating && _destName != null)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Text(_destName!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleSmall),
                   ),
-                ),
-              ],
-            ]),
-          ]),
+                Row(children: [
+                  Expanded(
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(formatDuration(Duration(seconds: remainingSec.round())),
+                          style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w800, color: green)),
+                      Text('${formatDistance(remainingM)} · $etaStr',
+                          style: TextStyle(
+                              fontSize: 18, color: Theme.of(context).colorScheme.onSurfaceVariant)),
+                    ]),
+                  ),
+                  if (_navigating) ...[
+                    IconButton.outlined(
+                      iconSize: 28,
+                      tooltip: 'Přehled trasy',
+                      onPressed: () => _fitRoute(route),
+                      icon: const Icon(Icons.alt_route),
+                    ),
+                    const SizedBox(width: 10),
+                    IconButton.filled(
+                      iconSize: 30,
+                      style: IconButton.styleFrom(backgroundColor: const Color(0xFFC62828)),
+                      tooltip: 'Ukončit navigaci',
+                      onPressed: _stopNavigation,
+                      icon: const Icon(Icons.close, color: Colors.white),
+                    ),
+                  ],
+                ]),
+                if (!_navigating) ...[
+                  const SizedBox(height: 6),
+                  Wrap(spacing: 6, runSpacing: 4, children: [
+                    if (route.hasToll)
+                      const Chip(label: Text('mýto'), visualDensity: VisualDensity.compact),
+                    if (route.hasHighway)
+                      const Chip(label: Text('dálnice'), visualDensity: VisualDensity.compact),
+                    if (bad > 0)
+                      Chip(
+                          avatar: const Icon(Icons.warning, size: 16, color: Colors.red),
+                          label: Text('$bad omezení'),
+                          visualDensity: VisualDensity.compact),
+                    if (_settings.simulate)
+                      const Chip(
+                          avatar: Icon(Icons.play_circle, size: 16),
+                          label: Text('simulace'),
+                          visualDensity: VisualDensity.compact),
+                  ]),
+                  const SizedBox(height: 8),
+                  Row(children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _stopNavigation,
+                        icon: const Icon(Icons.close),
+                        label: const Text('Zrušit'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      flex: 2,
+                      child: FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                            backgroundColor: green, padding: const EdgeInsets.symmetric(vertical: 14)),
+                        onPressed: _startNavigation,
+                        icon: const Icon(Icons.navigation),
+                        label: const Text('Start', style: TextStyle(fontSize: 18)),
+                      ),
+                    ),
+                  ]),
+                ],
+              ]),
         ),
       ),
     );
-  }
-
-  Widget _stat(String value, String label) => Column(children: [
-        Text(value, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-        Text(label, style: const TextStyle(fontSize: 12)),
-      ]);
-}
-
-IconData maneuverIcon(int type) {
-  switch (type) {
-    case 4:
-    case 5:
-    case 6:
-      return Icons.flag;
-    case 9:
-    case 23:
-      return Icons.turn_slight_right;
-    case 10:
-      return Icons.turn_right;
-    case 11:
-      return Icons.turn_sharp_right;
-    case 12:
-      return Icons.u_turn_right;
-    case 13:
-      return Icons.u_turn_left;
-    case 14:
-      return Icons.turn_sharp_left;
-    case 15:
-      return Icons.turn_left;
-    case 16:
-    case 24:
-      return Icons.turn_slight_left;
-    case 18:
-    case 20:
-      return Icons.ramp_right;
-    case 19:
-    case 21:
-      return Icons.ramp_left;
-    case 25:
-      return Icons.merge;
-    case 26:
-    case 27:
-      return Icons.roundabout_right;
-    case 28:
-    case 29:
-      return Icons.directions_boat;
-    default:
-      return Icons.straight;
   }
 }

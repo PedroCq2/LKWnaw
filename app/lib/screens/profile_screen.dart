@@ -16,6 +16,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
   late TruckProfile p = TruckProfile.fromJson(widget.settings.profile.toJson());
   late final _url = TextEditingController(text: widget.settings.valhallaUrl);
   late bool _voice = widget.settings.voice;
+  late bool _simulate = widget.settings.simulate;
+  late int _mapStyle = widget.settings.mapStyle;
 
   Widget _num(String label, String unit, double value, void Function(double) set,
       {double min = 0, double max = 100}) {
@@ -42,7 +44,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
     widget.settings
       ..profile = p
       ..valhallaUrl = _url.text.trim().isEmpty ? defaultValhallaUrl : _url.text.trim()
-      ..voice = _voice;
+      ..voice = _voice
+      ..simulate = _simulate
+      ..mapStyle = _mapStyle;
     await widget.settings.save();
     if (mounted) Navigator.pop(context, true);
   }
@@ -71,7 +75,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   label: const Text('Dodávka 3,5 t'),
                   onPressed: () => setState(() => p = TruckProfile(
                       height: 2.8, width: 2.1, length: 7, weight: 3.5,
-                      axleLoad: 2, axleCount: 2))),
+                      axleLoad: 2, axleCount: 2, maxSpeed: 130))),
             ]),
             const SizedBox(height: 8),
             // Key vynutí přestavění polí po výběru předvolby.
@@ -85,6 +89,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 _num('Zatížení nápravy', 't', p.axleLoad, (v) => p.axleLoad = v, max: 20),
                 _num('Počet náprav', '', p.axleCount.toDouble(),
                     (v) => p.axleCount = v.round(), min: 2, max: 10),
+                _num('Max. rychlost vozidla', 'km/h', p.maxSpeed.toDouble(),
+                    (v) => p.maxSpeed = v.round(), min: 30, max: 130),
               ]),
             ),
             SwitchListTile(
@@ -107,6 +113,24 @@ class _ProfileScreenState extends State<ProfileScreen> {
               value: _voice,
               onChanged: (v) => setState(() => _voice = v),
             ),
+            SwitchListTile(
+              title: const Text('Simulace jízdy (demo)'),
+              subtitle: const Text('Po stisku Start jede kamion po trase sám – pro vyzkoušení'),
+              value: _simulate,
+              onChanged: (v) => setState(() => _simulate = v),
+            ),
+            ListTile(
+              title: const Text('Vzhled mapy'),
+              trailing: SegmentedButton<int>(
+                segments: const [
+                  ButtonSegment(value: 0, label: Text('Auto')),
+                  ButtonSegment(value: 1, label: Text('Den')),
+                  ButtonSegment(value: 2, label: Text('Noc')),
+                ],
+                selected: {_mapStyle},
+                onSelectionChanged: (v) => setState(() => _mapStyle = v.first),
+              ),
+            ),
             const Divider(),
             TextField(
               controller: _url,
@@ -124,10 +148,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
             const Divider(),
             const ListTile(
               leading: Icon(Icons.info_outline),
-              title: Text('O aplikaci'),
+              title: Text('O aplikaci LKWnav'),
               subtitle: Text('Mapová data © přispěvatelé OpenStreetMap (ODbL)\n'
-                  'Mapové dlaždice: openstreetmap.org\n'
-                  'Výpočet tras: Valhalla, vyhledávání: Nominatim, parkoviště: Overpass API'),
+                  'Vektorové mapy: OpenFreeMap / OpenMapTiles\n'
+                  'Výpočet tras: Valhalla, vyhledávání: Nominatim, POI a omezení: Overpass API'),
               isThreeLine: true,
             ),
           ],

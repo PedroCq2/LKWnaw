@@ -3,7 +3,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:truck_nav/models/route.dart';
 import 'package:truck_nav/navigation/nav_engine.dart';
-import 'package:truck_nav/services/drive_timer.dart';
+import 'package:truck_nav/services/restrictions.dart';
 import 'package:truck_nav/services/valhalla.dart';
 
 void main() {
@@ -16,6 +16,7 @@ void main() {
     expect(pts.length, 3);
     expect(pts[0].latitude, closeTo(38.5, 1e-6));
     expect(pts[2].longitude, closeTo(-126.453, 1e-6));
+    expect(pts[1].longitude, closeTo(-120.95, 1e-6));
   });
 
   TruckRoute line() => TruckRoute(
@@ -49,27 +50,26 @@ void main() {
     expect(e.isOffRoute, isTrue);
   });
 
-  test('DriveTimer breaks', () {
-    final t = DriveTimer();
-    var now = DateTime(2026, 1, 1, 6);
-    t.update(60, now);
-    for (var i = 0; i < 4 * 60; i++) {
-      now = now.add(const Duration(minutes: 1));
-      t.update(60, now);
-    }
-    expect(t.continuous.inMinutes, 240);
-    expect(t.remainingContinuous.inMinutes, 30);
-    // 15 min stání = první část dělené přestávky.
-    t.update(0, now);
-    now = now.add(const Duration(minutes: 16));
-    t.update(60, now);
-    expect(t.partialBreakTaken, isTrue);
-    expect(t.continuous.inMinutes, 240);
-    // 30 min stání dokončí přestávku.
-    t.update(0, now);
-    now = now.add(const Duration(minutes: 31));
-    t.update(60, now);
-    expect(t.continuous, Duration.zero);
-    expect(t.daily.inMinutes, 240);
+  test('parse OSM limits', () {
+    expect(parseMeters('4.1'), 4.1);
+    expect(parseMeters('3,8 m'), 3.8);
+    expect(parseMeters("13'6\""), closeTo(4.11, 0.01));
+    expect(parseMeters('default').isNaN, isTrue);
+    expect(parseTonnes('7.5 t'), 7.5);
+    expect(parseTonnes('3500 kg'), 3.5);
+  });
+
+  test('RouteIndex locates points along route', () {
+    final idx = RouteIndex(line());
+    final at = idx.locate(const LatLng(50.00005, 14.015), 15);
+    expect(at, closeTo(1072, 15));
+    expect(idx.locate(const LatLng(50.01, 14.015), 15), isNull);
+  });
+
+  test('mergeWarnings joins one zone', () {
+    RouteWarning w(double at) => RouteWarning(
+        type: WarningType.weight, value: 3.5, atMeters: at, point: const LatLng(50, 14), violates: true);
+    final m = mergeWarnings([w(100), w(300), w(650), w(2000)]);
+    expect(m.map((e) => e.atMeters), [100, 2000]);
   });
 }
