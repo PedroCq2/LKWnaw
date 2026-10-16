@@ -31,6 +31,7 @@ class NavEngine {
   final TruckRoute route;
   int _lastSegment = 0;
   int _offRouteCount = 0;
+  DateTime? _offSince;
 
   /// Indexy manévrů, pro které už zazněla hlášení.
   final Set<int> alertSpoken = {};
@@ -40,18 +41,26 @@ class NavEngine {
 
   static const offRouteMeters = 60.0;
 
-  NavState update(LatLng pos) {
+  /// [accuracy] = přesnost GPS (m); při horším signálu se práh sjetí zvětší.
+  NavState update(LatLng pos, {double accuracy = 10, DateTime? now}) {
     final shape = route.shape;
     // Hledej nejdřív v okně kolem posledního segmentu, pak globálně.
-    var best = _search(pos, math.max(0, _lastSegment - 5),
-        math.min(shape.length - 1, _lastSegment + 300));
+    var best = _search(pos, math.max(0, _lastSegment - 5), math.min(shape.length - 1, _lastSegment + 300));
     if (best.$2 > offRouteMeters) {
       final global = _search(pos, 0, shape.length - 1);
       if (global.$2 < best.$2) best = global;
     }
     final (seg, dist, t, snapped) = best;
     _lastSegment = seg;
-    _offRouteCount = dist > offRouteMeters ? _offRouteCount + 1 : 0;
+    final limit = math.max(offRouteMeters, accuracy * 1.5);
+    if (dist > limit) {
+      _offRouteCount++;
+      _offSince ??= now ?? DateTime.now();
+    } else {
+      _offRouteCount = 0;
+      _offSince = null;
+    }
+    _lastNow = now ?? DateTime.now();
 
     final cum = route.cumulative;
     final segLen = seg + 1 < shape.length ? cum[seg + 1] - cum[seg] : 0.0;
@@ -82,8 +91,13 @@ class NavEngine {
     );
   }
 
-  /// Sjetí z trasy potvrzené několika po sobě jdoucími polohami.
-  bool get isOffRoute => _offRouteCount >= 3;
+  DateTime _lastNow = DateTime.now();
+
+  /// Sjetí z trasy: aspoň 4 polohy po sobě a 6 s mimo trasu (krátký výkyv GPS nestačí).
+  bool get isOffRoute =>
+      _offRouteCount >= 4 &&
+      _offSince != null &&
+      _lastNow.difference(_offSince!) >= const Duration(seconds: 6);
 
   (int, double, double, LatLng) _search(LatLng p, int from, int to) {
     final shape = route.shape;
@@ -108,8 +122,10 @@ class NavEngine {
         bestDist = d2;
         bestSeg = i;
         bestT = t;
-        bestPt = LatLng(a.latitude + t * (b.latitude - a.latitude),
-            a.longitude + t * (b.longitude - a.longitude));
+        bestPt = LatLng(
+          a.latitude + t * (b.latitude - a.latitude),
+          a.longitude + t * (b.longitude - a.longitude),
+        );
       }
     }
     return (bestSeg, _haversine(p, bestPt), bestT, bestPt);

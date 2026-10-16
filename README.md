@@ -26,6 +26,14 @@ Flutter aplikace pro navigaci nákladních vozidel nad OpenStreetMap a routing e
 - **Zásobování** (přepínač u trasy) – povolí vjezd do zón se zákazem nad X t
   („mimo dopravní obsluhu“), výška, šířka, délka, náprava a ADR platí dál; mostům
   s nižší nosností se trasa automaticky vyhne.
+- **Uložená místa s vjezdem pro kamiony** – u firmy zvlášť adresa a brána (dlouhé podržení
+  na mapě) + poznámka („Příjezd zezadu, vrátnice u rampy 12“), přečte se před cílem.
+- **POI podél trasy** – truckparky/pumpy/servisy seřazené podle dojezdu (km, min, odbočka
+  od trasy) s filtry WC, sprchy, jídlo, zdarma, hlídané.
+- **Objet toto místo** – dlouhé podržení na trase → trasa se přepočítá kolem.
+- **Mapa offline** – stažení mapy podél trasy (MapLibre offline regiony, zoom 8–14).
+- **Klidné přepočítávání** – krátký výkyv GPS nespouští novou trasu; bez internetu vede dál
+  po uložené trase a ukazuje stav.
 - **Simulace jízdy** (Nastavení) – vyzkoušení navigace bez jízdy.
 
 ## Instalace APK

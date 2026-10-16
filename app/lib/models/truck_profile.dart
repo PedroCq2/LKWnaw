@@ -29,29 +29,40 @@ class TruckProfile {
   /// [delivery] = zásobování: hmotnostní zóny („mimo dopravní obsluhu“) se ignorují,
   /// výška/šířka/délka/náprava/ADR platí dál. Mosty hlídá aplikace zvlášť.
   Map<String, dynamic> toValhallaCosting({bool delivery = false}) => {
-        'height': height,
-        'width': width,
-        'length': length,
-        'weight': delivery ? 0.0 : weight,
-        'axle_load': axleLoad,
-        'axle_count': axleCount,
-        'hazmat': hazmat,
-        'use_tolls': avoidTolls ? 0.0 : 0.5,
-        'use_ferry': avoidFerries ? 0.0 : 0.5,
-      };
+    'height': height,
+    'width': width,
+    'length': length,
+    'weight': delivery ? 0.0 : weight,
+    'axle_load': axleLoad,
+    'axle_count': axleCount,
+    'hazmat': hazmat,
+    'use_tolls': avoidTolls ? 0.0 : 0.5,
+    'use_ferry': avoidFerries ? 0.0 : 0.5,
+  };
+
+  /// Krátký přehled aktivního profilu (výška × šířka × délka · hmotnost): „4 m × 2,55 m × 16,5 m · 40 t“.
+  String get summary {
+    String n(double v) {
+      var t = v.toStringAsFixed(2).replaceAll(RegExp(r'0+$'), '');
+      if (t.endsWith('.')) t = t.substring(0, t.length - 1);
+      return t.replaceAll('.', ',');
+    }
+
+    return '${n(height)} m × ${n(width)} m × ${n(length)} m · ${n(weight)} t${hazmat ? ' · ADR' : ''}';
+  }
 
   Map<String, dynamic> toJson() => {
-        'height': height,
-        'width': width,
-        'length': length,
-        'weight': weight,
-        'axleLoad': axleLoad,
-        'axleCount': axleCount,
-        'maxSpeed': maxSpeed,
-        'hazmat': hazmat,
-        'avoidTolls': avoidTolls,
-        'avoidFerries': avoidFerries,
-      };
+    'height': height,
+    'width': width,
+    'length': length,
+    'weight': weight,
+    'axleLoad': axleLoad,
+    'axleCount': axleCount,
+    'maxSpeed': maxSpeed,
+    'hazmat': hazmat,
+    'avoidTolls': avoidTolls,
+    'avoidFerries': avoidFerries,
+  };
 
   factory TruckProfile.fromJson(Map<String, dynamic> j) {
     double d(String k, double def) => (j[k] as num?)?.toDouble() ?? def;
@@ -70,6 +81,5 @@ class TruckProfile {
   }
 
   String encode() => jsonEncode(toJson());
-  static TruckProfile decode(String s) =>
-      TruckProfile.fromJson(jsonDecode(s) as Map<String, dynamic>);
+  static TruckProfile decode(String s) => TruckProfile.fromJson(jsonDecode(s) as Map<String, dynamic>);
 }

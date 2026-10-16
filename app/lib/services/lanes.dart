@@ -32,7 +32,6 @@ _Dir _dirOf(Maneuver m) {
 
 const _highway = {'motorway', 'trunk'};
 
-
 /// Doplní trasu o pokyny na dálničních rozdvojeních („Pokračujte rovně na D1 směr Ostrava“),
 /// o jízdní pruhy a směry z OSM. Vyžaduje [TruckRoute.edges] (Valhalla trace_attributes).
 Future<void> enrichManeuvers(TruckRoute route) async {
@@ -41,34 +40,47 @@ Future<void> enrichManeuvers(TruckRoute route) async {
 
   // 1) Rozdvojení, kde trasa zůstává na dálnici a odbočuje jiná dálnice – Valhalla mlčí.
   final existing = route.maneuvers.map((m) => m.beginShapeIndex).toList();
+  // Bez dat z Overpassu ověř sjezdy přes OSM API (vede sjezd na jinou dálnici?).
+  if (route.interchangeLinks.isEmpty && !route.osmRampsChecked) {
+    route.osmRampsChecked = true;
+    route.interchangeLinks = await _interchangeRampsFromOsm(route);
+  }
   final forks = <Maneuver>[];
   for (var k = 0; k + 1 < edges.length; k++) {
     final e = edges[k], next = edges[k + 1];
     if (!_highway.contains(e.roadClass) || e.use == 'ramp') continue;
     if (!_highway.contains(next.roadClass) || next.use == 'ramp') continue;
-    final branch = e.intersecting.where((ie) =>
-        ie['road_class'] == 'motorway' &&
-        (ie['driveability'] == 'forward' || ie['driveability'] == 'both'));
+    // Jen skutečné dálniční křižovatky: dálnice se rozdělí (odbočka = hlavní pás),
+    // nebo sjezd podle OSM vede na jinou dálnici. Obyčejné exity se nehlásí.
+    final forkPoint = route.shape[e.end];
+    bool isInterchangeRamp() => route.interchangeLinks.any((l) => const Distance()(l.$1, forkPoint) < 80);
+    final branch = e.intersecting.where(
+      (ie) =>
+          ie['road_class'] == 'motorway' &&
+          (ie['driveability'] == 'forward' || ie['driveability'] == 'both') &&
+          (ie['use'] != 'ramp' || isInterchangeRamp()),
+    );
     if (branch.isEmpty) continue;
     if (existing.any((i) => (i - e.end).abs() <= 3)) continue;
-    // Rozdvojení blíž než 1,5 km od předchozího hlásíme jen jednou.
-    if (forks.isNotEmpty &&
-        route.cumulative[e.end] - route.cumulative[forks.last.beginShapeIndex] < 1500) {
-      continue;
-    }
+    // Rozdvojení blíž než 3 km od předchozího (i už vloženého) hlásíme jen jednou.
+    final atM = route.cumulative[e.end];
+    bool near(Maneuver m) => m.synthetic && (route.cumulative[m.beginShapeIndex] - atM).abs() < 3000;
+    if (forks.any(near) || route.maneuvers.any(near)) continue;
     final ref = next.names.isNotEmpty ? next.names.first : (e.names.isNotEmpty ? e.names.first : null);
-    final text = ref == null ? 'Pokračujte rovně.' : 'Pokračujte rovně na $ref.';
-    forks.add(Maneuver(
-      type: 22, // „stay straight“
-      instruction: text,
-      alertInstruction: text,
-      preInstruction: text,
-      streetNames: ref == null ? const [] : [ref],
-      beginShapeIndex: e.end,
-      endShapeIndex: e.end,
-      lengthKm: 0,
-      synthetic: true,
-    ));
+    final text = ref == null ? 'Pokračujte rovně.' : 'Pokračujte rovně po $ref.';
+    forks.add(
+      Maneuver(
+        type: 22, // „stay straight“
+        instruction: text,
+        alertInstruction: text,
+        preInstruction: text,
+        streetNames: ref == null ? const [] : [ref],
+        beginShapeIndex: e.end,
+        endShapeIndex: e.end,
+        lengthKm: 0,
+        synthetic: true,
+      ),
+    );
   }
   route.maneuvers
     ..addAll(forks)
@@ -96,6 +108,8 @@ Future<void> enrichManeuvers(TruckRoute route) async {
 
   final targets = <Maneuver, (List<EdgeAttr>, EdgeAttr?)>{};
   for (final m in route.maneuvers) {
+    if (m.enriched) continue; // druhé volání (po načtení OSM dat) řeší jen nové pokyny
+    m.enriched = true;
     final a = approach(m.beginShapeIndex);
     if (a.isEmpty || !(_highway.contains(a.first.roadClass) || a.first.roadClass == 'primary')) continue;
     targets[m] = (a, after(m.beginShapeIndex));
@@ -109,9 +123,13 @@ Future<void> enrichManeuvers(TruckRoute route) async {
     final m = entry.key;
     final (a, b) = entry.value;
     // Nejbližší úsek před manévrem, který má pruhy zapsané.
-    final at = a.map((e) => tags[e.wayId]).whereType<Map<String, String>>().firstWhere(
-        (t) => t.containsKey('turn:lanes') || t.containsKey('turn:lanes:forward'),
-        orElse: () => tags[a.first.wayId] ?? const <String, String>{});
+    final at = a
+        .map((e) => tags[e.wayId])
+        .whereType<Map<String, String>>()
+        .firstWhere(
+          (t) => t.containsKey('turn:lanes') || t.containsKey('turn:lanes:forward'),
+          orElse: () => tags[a.first.wayId] ?? const <String, String>{},
+        );
     final bt = tags[b?.wayId] ?? const <String, String>{};
     final ref = b != null && b.names.isNotEmpty ? b.names.first : null;
     m.lanes = _lanes(at, _dirOf(m), ref);
@@ -123,18 +141,19 @@ Future<void> enrichManeuvers(TruckRoute route) async {
           .where((s) => s.isNotEmpty)
           .take(2)
           .toList();
-      if (dest != null && dest.isNotEmpty) m.exitToward = dest;
+      if (dest != null && dest.isNotEmpty) m.exitToward = _unique(dest);
     }
   }
 
   // 3) Vložené pokyny bez značení: směr = nejbližší větší město dál po trase.
   for (final m in forks) {
+    m.exitToward = _unique(m.exitToward);
     if (m.exitToward.isEmpty) {
       final city = await _cityAhead(route, m.beginShapeIndex);
       if (city != null) m.exitToward = [city];
     }
     if (m.exitToward.isNotEmpty) {
-      final ref = m.streetNames.isNotEmpty ? ' na ${m.streetNames.first}' : '';
+      final ref = m.streetNames.isNotEmpty ? ' po ${m.streetNames.first}' : '';
       final t = 'Pokračujte rovně$ref směr ${m.exitToward.join(', ')}.';
       m
         ..alertInstruction = t
@@ -163,7 +182,7 @@ LaneInfo? _lanes(Map<String, String> t, _Dir dir, String? ref) {
           _Dir.straight => isThrough(s),
           _Dir.left => isSide(s, 'left'),
           _Dir.right => isSide(s, 'right'),
-        }
+        },
     ];
   }
   if (!active.contains(true)) return null;
@@ -186,13 +205,14 @@ Future<Map<int, Map<String, String>>> _osmWayTags(List<int> ids) async {
     final chunk = ids.sublist(i, (i + 100).clamp(0, ids.length));
     try {
       final res = await http
-          .get(Uri.parse('https://api.openstreetmap.org/api/0.6/ways.json?ways=${chunk.join(',')}'),
-              headers: uaHeaders())
+          .get(
+            Uri.parse('https://api.openstreetmap.org/api/0.6/ways.json?ways=${chunk.join(',')}'),
+            headers: uaHeaders(),
+          )
           .timeout(const Duration(seconds: 20));
       if (res.statusCode != 200) continue;
       for (final e in (jsonDecode(utf8.decode(res.bodyBytes))['elements'] as List)) {
-        out[(e['id'] as num).toInt()] =
-            ((e['tags'] as Map?) ?? const {}).map((k, v) => MapEntry('$k', '$v'));
+        out[(e['id'] as num).toInt()] = ((e['tags'] as Map?) ?? const {}).map((k, v) => MapEntry('$k', '$v'));
       }
     } catch (_) {}
   }
@@ -215,9 +235,12 @@ Future<String?> _cityAhead(TruckRoute route, int fromIdx) async {
     try {
       final res = await http
           .get(
-              Uri.parse('https://photon.komoot.io/reverse?lat=${p.latitude}&lon=${p.longitude}'
-                  '&radius=25&limit=1&osm_tag=$tag'),
-              headers: uaHeaders())
+            Uri.parse(
+              'https://photon.komoot.io/reverse?lat=${p.latitude}&lon=${p.longitude}'
+              '&radius=25&limit=1&osm_tag=$tag',
+            ),
+            headers: uaHeaders(),
+          )
           .timeout(const Duration(seconds: 6));
       if (res.statusCode != 200) continue;
       final f = jsonDecode(utf8.decode(res.bodyBytes))['features'] as List;
@@ -225,4 +248,98 @@ Future<String?> _cityAhead(TruckRoute route, int fromIdx) async {
     } catch (_) {}
   }
   return null;
+}
+
+/// Bez opakování („Olomouc, Olomouc“) a nejvýš 2 směry.
+List<String> _unique(List<String> xs) {
+  final seen = <String>{};
+  return [
+    for (final x in xs)
+      if (seen.add(x.toLowerCase())) x,
+  ].take(2).toList();
+}
+
+/// Záloha bez Overpassu: u sjezdů z dálnice zjistí z oficiálního OSM API, zda vedou na jinou
+/// dálnici (`destination:ref` = D…). Vrací začátky takových sjezdů (prvních ~300 km trasy).
+Future<List<(LatLng, String)>> _interchangeRampsFromOsm(TruckRoute route) async {
+  final edges = route.edges;
+  final cands = <(int, LatLng)>[]; // (wayId přijezdu, bod rozdvojení)
+  for (var k = 0; k + 1 < edges.length; k++) {
+    final e = edges[k];
+    if (e.roadClass != 'motorway' || e.use == 'ramp' || e.wayId == null) continue;
+    if (route.cumulative[e.end] > 300000) break;
+    final ramp = e.intersecting.any(
+      (ie) =>
+          ie['road_class'] == 'motorway' &&
+          ie['use'] == 'ramp' &&
+          (ie['driveability'] == 'forward' || ie['driveability'] == 'both'),
+    );
+    if (ramp) cands.add((e.wayId!, route.shape[e.end]));
+  }
+  if (cands.isEmpty) return [];
+  // Uzly přijezdových cest + jejich souřadnice (dávkově).
+  final wayNodes = <int, List<int>>{};
+  final ids = cands.map((c) => c.$1).toSet().toList();
+  for (var i = 0; i < ids.length; i += 100) {
+    final chunk = ids.sublist(i, (i + 100).clamp(0, ids.length));
+    final j = await _osmGet('ways.json?ways=${chunk.join(',')}');
+    for (final w in (j?['elements'] as List? ?? const [])) {
+      wayNodes[(w['id'] as num).toInt()] = [for (final n in (w['nodes'] as List)) (n as num).toInt()];
+    }
+  }
+  final nodeIds = wayNodes.values.expand((l) => l).toSet().toList();
+  final coords = <int, LatLng>{};
+  for (var i = 0; i < nodeIds.length; i += 300) {
+    final chunk = nodeIds.sublist(i, (i + 300).clamp(0, nodeIds.length));
+    final j = await _osmGet('nodes.json?nodes=${chunk.join(',')}');
+    for (final n in (j?['elements'] as List? ?? const [])) {
+      coords[(n['id'] as num).toInt()] = LatLng((n['lat'] as num).toDouble(), (n['lon'] as num).toDouble());
+    }
+  }
+  const dist = Distance();
+  final out = <(LatLng, String)>[];
+  final checked = <int>{};
+  // Po 4 souběžně, ať nepřetěžujeme OSM API.
+  final queue = [...cands];
+  Future<void> worker() async {
+    while (queue.isNotEmpty) {
+      final (wayId, fork) = queue.removeLast();
+      int? best;
+      var bestD = 40.0;
+      for (final n in wayNodes[wayId] ?? const <int>[]) {
+        final c = coords[n];
+        if (c == null) continue;
+        final d = dist(c, fork);
+        if (d < bestD) {
+          bestD = d;
+          best = n;
+        }
+      }
+      if (best == null || !checked.add(best)) continue;
+      final j = await _osmGet('node/$best/ways.json');
+      for (final w in (j?['elements'] as List? ?? const [])) {
+        final t = (w['tags'] as Map?) ?? const {};
+        final ref = '${t['destination:ref'] ?? ''}';
+        if (t['highway'] == 'motorway_link' && RegExp(r'(^|;)\s*D\s*\d').hasMatch(ref)) {
+          out.add((coords[best]!, ref));
+          break;
+        }
+      }
+    }
+  }
+
+  await Future.wait(List.generate(4, (_) => worker()));
+  return out;
+}
+
+Future<Map<String, dynamic>?> _osmGet(String path) async {
+  try {
+    final res = await http
+        .get(Uri.parse('https://api.openstreetmap.org/api/0.6/$path'), headers: uaHeaders())
+        .timeout(const Duration(seconds: 20));
+    if (res.statusCode != 200) return null;
+    return jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+  } catch (_) {
+    return null;
+  }
 }

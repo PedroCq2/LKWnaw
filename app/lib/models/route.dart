@@ -50,6 +50,9 @@ class Maneuver {
   /// Vložený pokyn „Pokračujte rovně“ na rozdvojení, které Valhalla nehlásí.
   final bool synthetic;
 
+  /// Pruhy/směry z OSM už doplněné.
+  bool enriched = false;
+
   Maneuver({
     required this.type,
     required this.instruction,
@@ -70,21 +73,19 @@ class Maneuver {
       ((sign?[key] as List?) ?? const []).map((e) => '${(e as Map)['text']}').toList();
 
   factory Maneuver.fromJson(Map<String, dynamic> j) => Maneuver(
-        type: (j['type'] as num).toInt(),
-        instruction: j['instruction'] as String? ?? '',
-        alertInstruction: j['verbal_transition_alert_instruction'] as String?,
-        preInstruction: j['verbal_pre_transition_instruction'] as String?,
-        postInstruction: j['verbal_post_transition_instruction'] as String?,
-        streetNames: ((j['street_names'] as List?) ?? const [])
-            .map((e) => e.toString())
-            .toList(),
-        beginShapeIndex: (j['begin_shape_index'] as num).toInt(),
-        endShapeIndex: (j['end_shape_index'] as num).toInt(),
-        lengthKm: (j['length'] as num?)?.toDouble() ?? 0,
-        exitNumber: _signTexts(j['sign'] as Map?, 'exit_number_elements').firstOrNull,
-        exitBranch: _signTexts(j['sign'] as Map?, 'exit_branch_elements'),
-        exitToward: _signTexts(j['sign'] as Map?, 'exit_toward_elements'),
-      );
+    type: (j['type'] as num).toInt(),
+    instruction: j['instruction'] as String? ?? '',
+    alertInstruction: j['verbal_transition_alert_instruction'] as String?,
+    preInstruction: j['verbal_pre_transition_instruction'] as String?,
+    postInstruction: j['verbal_post_transition_instruction'] as String?,
+    streetNames: ((j['street_names'] as List?) ?? const []).map((e) => e.toString()).toList(),
+    beginShapeIndex: (j['begin_shape_index'] as num).toInt(),
+    endShapeIndex: (j['end_shape_index'] as num).toInt(),
+    lengthKm: (j['length'] as num?)?.toDouble() ?? 0,
+    exitNumber: _signTexts(j['sign'] as Map?, 'exit_number_elements').firstOrNull,
+    exitBranch: _signTexts(j['sign'] as Map?, 'exit_branch_elements'),
+    exitToward: _signTexts(j['sign'] as Map?, 'exit_toward_elements'),
+  );
 }
 
 class TruckRoute {
@@ -102,6 +103,11 @@ class TruckRoute {
   List<int?> speedLimits = const [];
   List<String?> roadNames = const [];
   List<EdgeAttr> edges = const [];
+
+  /// Začátky sjezdů, které vedou na jinou dálnici (OSM `destination:ref` = D…) –
+  /// jen tam je dálniční křižovatka a hlásí se „Pokračujte rovně“.
+  List<(LatLng, String)> interchangeLinks = const [];
+  bool osmRampsChecked = false;
 
   /// Kamionová omezení a radary podél trasy (doplňuje se na pozadí).
   List<RouteWarning> warnings = const [];

@@ -56,8 +56,7 @@ class ManeuverBanner extends StatelessWidget {
   /// Aktuální silnice a staničení (zobrazí se v liště tabule).
   final String? road;
   final double? roadKm;
-  const ManeuverBanner(
-      {super.key, this.maneuver, required this.distance, this.then, this.road, this.roadKm});
+  const ManeuverBanner({super.key, this.maneuver, required this.distance, this.then, this.road, this.roadKm});
 
   @override
   Widget build(BuildContext context) {
@@ -67,8 +66,8 @@ class ManeuverBanner extends StatelessWidget {
     final title = m == null
         ? 'Cíl'
         : toward.isNotEmpty
-            ? toward.take(2).join(', ')
-            : (m.streetNames.isNotEmpty ? m.streetNames.take(2).join(' / ') : m.instruction);
+        ? toward.take(2).join(', ')
+        : (m.streetNames.isNotEmpty ? m.streetNames.take(2).join(' / ') : m.instruction);
     return Container(
       margin: const EdgeInsets.fromLTRB(10, 8, 10, 0),
       decoration: BoxDecoration(
@@ -78,109 +77,156 @@ class ManeuverBanner extends StatelessWidget {
         boxShadow: const [BoxShadow(blurRadius: 12, color: Colors.black45)],
       ),
       clipBehavior: Clip.antiAlias,
-      child: Column(mainAxisSize: MainAxisSize.min, children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 12, 16, 12),
-          child: Row(children: [
-            Container(
-              width: 72,
-              height: 72,
-              decoration: BoxDecoration(color: Lkw.amber, borderRadius: BorderRadius.circular(14)),
-              child: Icon(maneuverIcon(m?.type ?? 4), color: Colors.black, size: 58),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 12, 16, 12),
+            child: Row(
+              children: [
+                Container(
+                  width: 72,
+                  height: 72,
+                  decoration: BoxDecoration(color: Lkw.amber, borderRadius: BorderRadius.circular(14)),
+                  child: Icon(maneuverIcon(m?.type ?? 4), color: Colors.black, size: 58),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: FittedBox(
+                              fit: BoxFit.scaleDown,
+                              alignment: Alignment.centerLeft,
+                              child: Text(
+                                formatDistance(distance),
+                                style: const TextStyle(
+                                  color: Lkw.amber,
+                                  fontSize: 36,
+                                  fontWeight: FontWeight.w900,
+                                  height: 1.05,
+                                ),
+                              ),
+                            ),
+                          ),
+                          if (m?.exitNumber != null) _exitTag(m!.exitNumber!),
+                        ],
+                      ),
+                      Text(
+                        title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Lkw.text,
+                          fontSize: 21,
+                          fontWeight: FontWeight.w700,
+                          height: 1.15,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Row(children: [
+          ),
+          if (m?.lanes != null && distance < 2500)
+            Container(
+              color: Lkw.graphite,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: LaneRow(lanes: m!.lanes!),
+              ),
+            ),
+          if (road != null || (m?.exitBranch.isNotEmpty ?? false))
+            Container(
+              color: Lkw.graphite,
+              padding: const EdgeInsets.fromLTRB(14, 6, 16, 6),
+              child: Row(
+                children: [
+                  if (road != null) ...[
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 120),
+                      child: RoadShield(name: road!),
+                    ),
+                    if (roadKm != null) ...[
+                      const SizedBox(width: 8),
+                      Text(
+                        '${roadKm!.toStringAsFixed(1).replaceAll('.', ',')} km',
+                        style: const TextStyle(color: Lkw.text, fontSize: 17, fontWeight: FontWeight.w800),
+                      ),
+                    ],
+                  ],
                   Expanded(
-                    child: FittedBox(
-                      fit: BoxFit.scaleDown,
-                      alignment: Alignment.centerLeft,
-                      child: Text(formatDistance(distance),
-                          style: const TextStyle(
-                              color: Lkw.amber, fontSize: 36, fontWeight: FontWeight.w900, height: 1.05)),
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: Wrap(
+                        spacing: 6,
+                        children: [
+                          for (final b in (m?.exitBranch ?? const <String>[]).take(2))
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 70),
+                              child: RoadShield(name: b, small: true),
+                            ),
+                        ],
+                      ),
                     ),
                   ),
-                  if (m?.exitNumber != null) _exitTag(m!.exitNumber!),
-                ]),
-                Text(title,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        color: Lkw.text, fontSize: 21, fontWeight: FontWeight.w700, height: 1.15)),
-              ]),
-            ),
-          ]),
-        ),
-        if (m?.lanes != null && distance < 2500)
-          Container(
-            color: Lkw.graphite,
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-            child: FittedBox(fit: BoxFit.scaleDown, child: LaneRow(lanes: m!.lanes!)),
-          ),
-        if (road != null || (m?.exitBranch.isNotEmpty ?? false))
-          Container(
-            color: Lkw.graphite,
-            padding: const EdgeInsets.fromLTRB(14, 6, 16, 6),
-            child: Row(children: [
-              if (road != null) ...[
-                ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 120), child: RoadShield(name: road!)),
-                if (roadKm != null) ...[
-                  const SizedBox(width: 8),
-                  Text('${roadKm!.toStringAsFixed(1).replaceAll('.', ',')} km',
-                      style: const TextStyle(color: Lkw.text, fontSize: 17, fontWeight: FontWeight.w800)),
                 ],
-              ],
-              Expanded(
-                child: Align(
-                  alignment: Alignment.centerRight,
-                  child: Wrap(spacing: 6, children: [
-                    for (final b in (m?.exitBranch ?? const <String>[]).take(2))
-                      ConstrainedBox(
-                          constraints: const BoxConstraints(maxWidth: 70),
-                          child: RoadShield(name: b, small: true)),
-                  ]),
-                ),
               ),
-            ]),
-          ),
-        if (then != null)
-          Container(
-            color: Lkw.graphite,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
-            child: Row(children: [
-              const Text('PAK', style: TextStyle(color: Lkw.amber, fontSize: 14, fontWeight: FontWeight.w800)),
-              const SizedBox(width: 10),
-              Icon(maneuverIcon(then!.type), color: Lkw.text, size: 24),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                    then!.streetNames.isNotEmpty ? then!.streetNames.first : then!.instruction,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: Lkw.text, fontSize: 16)),
+            ),
+          if (then != null)
+            Container(
+              color: Lkw.graphite,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
+              child: Row(
+                children: [
+                  const Text(
+                    'PAK',
+                    style: TextStyle(color: Lkw.amber, fontSize: 14, fontWeight: FontWeight.w800),
+                  ),
+                  const SizedBox(width: 10),
+                  Icon(maneuverIcon(then!.type), color: Lkw.text, size: 24),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      then!.streetNames.isNotEmpty ? then!.streetNames.first : then!.instruction,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: Lkw.text, fontSize: 16),
+                    ),
+                  ),
+                ],
               ),
-            ]),
-          ),
-      ]),
+            ),
+        ],
+      ),
     );
   }
 }
 
 Widget _exitTag(String n) => Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: const Color(0xFF0B6B3A),
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: Colors.white, width: 2),
+  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+  decoration: BoxDecoration(
+    color: const Color(0xFF0B6B3A),
+    borderRadius: BorderRadius.circular(6),
+    border: Border.all(color: Colors.white, width: 2),
+  ),
+  child: Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      const Icon(Icons.exit_to_app, color: Colors.white, size: 16),
+      const SizedBox(width: 4),
+      Text(
+        n,
+        style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w900),
       ),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        const Icon(Icons.exit_to_app, color: Colors.white, size: 16),
-        const SizedBox(width: 4),
-        Text(n, style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w900)),
-      ]),
-    );
+    ],
+  ),
+);
 
 /// Označení silnice v barvách českého značení (D červeně, E zeleně, ostatní modře).
 class RoadShield extends StatelessWidget {
@@ -206,10 +252,12 @@ class RoadShield extends StatelessWidget {
         borderRadius: BorderRadius.circular(5),
         border: Border.all(color: Colors.white, width: small ? 1.5 : 2),
       ),
-      child: Text(name,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(color: fg, fontSize: small ? 13 : 16, fontWeight: FontWeight.w900)),
+      child: Text(
+        name,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(color: fg, fontSize: small ? 13 : 16, fontWeight: FontWeight.w900),
+      ),
     );
   }
 }
@@ -232,10 +280,13 @@ class WarningSign extends StatelessWidget {
           shape: BoxShape.circle,
           border: Border.all(color: const Color(0xFFD50000), width: size * 0.11),
         ),
-        child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-          Icon(Icons.local_shipping, size: size * 0.3, color: const Color(0xFFD50000)),
-          Icon(Icons.directions_car, size: size * 0.26, color: Colors.black),
-        ]),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.local_shipping, size: size * 0.3, color: const Color(0xFFD50000)),
+            Icon(Icons.directions_car, size: size * 0.26, color: Colors.black),
+          ],
+        ),
       );
     }
     if (w.type == WarningType.speedCamera) {
@@ -243,16 +294,19 @@ class WarningSign extends StatelessWidget {
         width: size,
         height: size,
         decoration: BoxDecoration(
-            color: const Color(0xFFFFC107),
-            shape: BoxShape.circle,
-            border: Border.all(color: Colors.white, width: 3)),
+          color: const Color(0xFFFFC107),
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white, width: 3),
+        ),
         child: Icon(Icons.photo_camera, size: size * 0.5, color: Colors.black87),
       );
     }
     final arrows = switch (w.type) {
       WarningType.height => const Icon(Icons.height, size: 16, color: Colors.black87),
       WarningType.width => const RotatedBox(
-          quarterTurns: 1, child: Icon(Icons.height, size: 16, color: Colors.black87)),
+        quarterTurns: 1,
+        child: Icon(Icons.height, size: 16, color: Colors.black87),
+      ),
       WarningType.length => const Icon(Icons.local_shipping, size: 14, color: Colors.black87),
       WarningType.axleLoad => const Icon(Icons.trip_origin, size: 14, color: Colors.black87),
       _ => const SizedBox.shrink(),
@@ -265,16 +319,21 @@ class WarningSign extends StatelessWidget {
         shape: BoxShape.circle,
         border: Border.all(color: const Color(0xFFD50000), width: size * 0.11),
       ),
-      child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-        arrows,
-        FittedBox(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4),
-            child: Text(w.label.replaceAll(' ', ''),
-                style: const TextStyle(fontWeight: FontWeight.w800, color: Colors.black)),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          arrows,
+          FittedBox(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Text(
+                w.label.replaceAll(' ', ''),
+                style: const TextStyle(fontWeight: FontWeight.w800, color: Colors.black),
+              ),
+            ),
           ),
-        ),
-      ]),
+        ],
+      ),
     );
   }
 }
@@ -297,20 +356,30 @@ class WarningCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(14),
         boxShadow: const [BoxShadow(blurRadius: 6, color: Colors.black38)],
       ),
-      child: Column(children: [
-        WarningSign(w: w, size: 60),
-        if (w.type == WarningType.noOvertakingHgv && w.note != null)
-          Text(w.note!,
-              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: Lkw.muted)),
-        if (w.onBridge)
-          Text('MOST',
+      child: Column(
+        children: [
+          WarningSign(w: w, size: 60),
+          if (w.type == WarningType.noOvertakingHgv && w.note != null)
+            Text(
+              w.note!,
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: Lkw.muted),
+            ),
+          if (w.onBridge)
+            Text(
+              'MOST',
               style: TextStyle(
-                  fontSize: 11, fontWeight: FontWeight.w800, color: bad ? Colors.white : Lkw.muted)),
-        const SizedBox(height: 4),
-        Text(formatDistance(distance),
-            style: TextStyle(
-                fontSize: 18, fontWeight: FontWeight.w800, color: Lkw.text)),
-      ]),
+                fontSize: 11,
+                fontWeight: FontWeight.w800,
+                color: bad ? Colors.white : Lkw.muted,
+              ),
+            ),
+          const SizedBox(height: 4),
+          Text(
+            formatDistance(distance),
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Lkw.text),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -332,26 +401,32 @@ class SpeedWidget extends StatelessWidget {
         borderRadius: BorderRadius.circular(18),
         boxShadow: const [BoxShadow(blurRadius: 6, color: Colors.black38)],
       ),
-      child: Column(mainAxisSize: MainAxisSize.min, children: [
-        if (limit != null)
-          Container(
-            width: 66,
-            height: 66,
-            decoration: BoxDecoration(
-              color: Colors.white,
-              shape: BoxShape.circle,
-              border: Border.all(color: const Color(0xFFD50000), width: 7),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (limit != null)
+            Container(
+              width: 66,
+              height: 66,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                shape: BoxShape.circle,
+                border: Border.all(color: const Color(0xFFD50000), width: 7),
+              ),
+              alignment: Alignment.center,
+              child: Text(
+                '$limit',
+                style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w800, color: Colors.black),
+              ),
             ),
-            alignment: Alignment.center,
-            child: Text('$limit',
-                style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w800, color: Colors.black)),
+          const SizedBox(height: 4),
+          Text(
+            '${speedKmh.round()}',
+            style: TextStyle(fontSize: 30, fontWeight: FontWeight.w900, color: Lkw.text),
           ),
-        const SizedBox(height: 4),
-        Text('${speedKmh.round()}',
-            style: TextStyle(
-                fontSize: 30, fontWeight: FontWeight.w900, color: Lkw.text)),
-        Text('km/h', style: TextStyle(fontSize: 12, color: over ? Colors.white : Lkw.muted)),
-      ]),
+          Text('km/h', style: TextStyle(fontSize: 12, color: over ? Colors.white : Lkw.muted)),
+        ],
+      ),
     );
   }
 }
@@ -361,27 +436,32 @@ class RoundButton extends StatelessWidget {
   final VoidCallback onPressed;
   final String tooltip;
   final Color? color;
-  const RoundButton(
-      {super.key, required this.icon, required this.onPressed, required this.tooltip, this.color});
+  const RoundButton({
+    super.key,
+    required this.icon,
+    required this.onPressed,
+    required this.tooltip,
+    this.color,
+  });
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(top: 10),
-        child: Material(
-          color: Lkw.panel,
-          elevation: 6,
-          shadowColor: Colors.black,
-          borderRadius: BorderRadius.circular(16),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(16),
-            onTap: onPressed,
-            child: Tooltip(
-              message: tooltip,
-              child: SizedBox(width: 56, height: 56, child: Icon(icon, size: 28, color: color ?? Lkw.text)),
-            ),
-          ),
+    padding: const EdgeInsets.only(top: 10),
+    child: Material(
+      color: Lkw.panel,
+      elevation: 6,
+      shadowColor: Colors.black,
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: onPressed,
+        child: Tooltip(
+          message: tooltip,
+          child: SizedBox(width: 56, height: 56, child: Icon(icon, size: 28, color: color ?? Lkw.text)),
         ),
-      );
+      ),
+    ),
+  );
 }
 
 /// Karta varianty trasy v přehledu.
@@ -390,8 +470,26 @@ class RouteCard extends StatelessWidget {
   final TruckRoute route;
   final bool selected;
   final VoidCallback onTap;
-  const RouteCard(
-      {super.key, required this.label, required this.route, required this.selected, required this.onTap});
+
+  /// Nejrychlejší varianta – karta ukáže rozdíl „+12 min · +7 km“.
+  final TruckRoute? base;
+  const RouteCard({
+    super.key,
+    required this.label,
+    required this.route,
+    required this.selected,
+    required this.onTap,
+    this.base,
+  });
+
+  String? get _diff {
+    final b = base;
+    if (b == null || identical(b, route)) return null;
+    final dm = ((route.timeSec - b.timeSec) / 60).round();
+    final dk = (route.lengthKm - b.lengthKm).round();
+    String sign(int v) => v > 0 ? '+$v' : '$v';
+    return '${sign(dm)} min · ${sign(dk)} km';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -400,7 +498,7 @@ class RouteCard extends StatelessWidget {
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
-        width: 168,
+        width: 184,
         margin: const EdgeInsets.only(right: 10),
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
@@ -408,22 +506,51 @@ class RouteCard extends StatelessWidget {
           borderRadius: BorderRadius.circular(16),
           border: Border.all(color: selected ? Lkw.amber : Lkw.panelHi, width: selected ? 3 : 2),
         ),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(label.toUpperCase(),
-              style: TextStyle(
-                  color: selected ? Lkw.amber : Lkw.muted, fontSize: 12, fontWeight: FontWeight.w800)),
-          const SizedBox(height: 2),
-          Text(formatDuration(Duration(seconds: route.timeSec.round())),
-              style: const TextStyle(color: Lkw.text, fontSize: 22, fontWeight: FontWeight.w900)),
-          Text('${route.lengthKm.toStringAsFixed(route.lengthKm < 100 ? 1 : 0).replaceAll('.', ',')} km'
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Flexible(
+                  child: Text(
+                    label.toUpperCase(),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: selected ? Lkw.amber : Lkw.muted,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                if (_diff != null) ...[
+                  const SizedBox(width: 6),
+                  Text(
+                    _diff!,
+                    style: const TextStyle(color: Lkw.text, fontSize: 11, fontWeight: FontWeight.w700),
+                  ),
+                ],
+              ],
+            ),
+            const SizedBox(height: 2),
+            Text(
+              formatDuration(Duration(seconds: route.timeSec.round())),
+              style: const TextStyle(color: Lkw.text, fontSize: 22, fontWeight: FontWeight.w900),
+            ),
+            Text(
+              '${route.lengthKm.toStringAsFixed(route.lengthKm < 100 ? 1 : 0).replaceAll('.', ',')} km'
               '${route.hasToll ? ' · mýto' : ''}',
-              style: const TextStyle(color: Lkw.muted, fontSize: 14)),
-          if (via.isNotEmpty)
-            Text('přes ${via.join(', ')}',
+              style: const TextStyle(color: Lkw.muted, fontSize: 14),
+            ),
+            if (via.isNotEmpty)
+              Text(
+                'přes ${via.join(', ')}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: Lkw.text, fontSize: 13, fontWeight: FontWeight.w600)),
-        ]),
+                style: const TextStyle(color: Lkw.text, fontSize: 13, fontWeight: FontWeight.w600),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -436,8 +563,15 @@ class LaneRow extends StatelessWidget {
 
   static IconData _icon(Set<String> t) {
     const order = [
-      'sharp_left', 'left', 'slight_left', 'merge_to_left',
-      'sharp_right', 'right', 'slight_right', 'merge_to_right', 'reverse',
+      'sharp_left',
+      'left',
+      'slight_left',
+      'merge_to_left',
+      'sharp_right',
+      'right',
+      'slight_right',
+      'merge_to_right',
+      'reverse',
     ];
     for (final o in order) {
       if (t.contains(o)) {
@@ -458,21 +592,32 @@ class LaneRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-      for (var i = 0; i < lanes.turns.length; i++) ...[
-        if (i > 0)
-          Container(width: 2, height: 30, margin: const EdgeInsets.symmetric(horizontal: 3), color: Lkw.panelHi),
-        Container(
-          width: 44,
-          height: 40,
-          decoration: BoxDecoration(
-            color: lanes.active[i] ? Lkw.amber : Colors.transparent,
-            borderRadius: BorderRadius.circular(8),
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        for (var i = 0; i < lanes.turns.length; i++) ...[
+          if (i > 0)
+            Container(
+              width: 2,
+              height: 30,
+              margin: const EdgeInsets.symmetric(horizontal: 3),
+              color: Lkw.panelHi,
+            ),
+          Container(
+            width: 44,
+            height: 40,
+            decoration: BoxDecoration(
+              color: lanes.active[i] ? Lkw.amber : Colors.transparent,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(
+              _icon(lanes.turns[i]),
+              size: 32,
+              color: lanes.active[i] ? Colors.black : const Color(0xFF5C6570),
+            ),
           ),
-          child: Icon(_icon(lanes.turns[i]),
-              size: 32, color: lanes.active[i] ? Colors.black : const Color(0xFF5C6570)),
-        ),
+        ],
       ],
-    ]);
+    );
   }
 }

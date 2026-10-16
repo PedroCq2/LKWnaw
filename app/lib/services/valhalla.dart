@@ -17,7 +17,8 @@ class RouteOption {
 
 class RoutingException implements Exception {
   final String message;
-  RoutingException(this.message);
+  final bool network; // server nedostupný (bez internetu)
+  RoutingException(this.message, {this.network = false});
   @override
   String toString() => message;
 }
@@ -34,10 +35,14 @@ class ValhallaClient {
     double? heading,
     bool delivery = false,
     List<LatLng> exclude = const [],
-  }) async =>
-      (await _request(
-              from: from, to: to, profile: profile, heading: heading, delivery: delivery, exclude: exclude))
-          .first;
+  }) async => (await _request(
+    from: from,
+    to: to,
+    profile: profile,
+    heading: heading,
+    delivery: delivery,
+    exclude: exclude,
+  )).first;
 
   /// Několik variant: nejrychlejší + alternativa, bez mýta, nejkratší (bez duplicit).
   Future<List<RouteOption>> routeOptions({
@@ -50,22 +55,47 @@ class ValhallaClient {
   }) async {
     Future<List<TruckRoute>> safe(Future<List<TruckRoute>> f) => f.catchError((_) => <TruckRoute>[]);
     final main = _request(
-        from: from, to: to, profile: profile, heading: heading, delivery: delivery, exclude: exclude,
-        alternates: 2);
-    final noToll = safe(_request(
-        from: from, to: to, profile: profile, heading: heading, delivery: delivery, exclude: exclude,
-        extra: {'use_tolls': 0.0, 'exclude_tolls': true}));
-    final shortest = safe(_request(
-        from: from, to: to, profile: profile, heading: heading, delivery: delivery, exclude: exclude,
-        extra: {'shortest': true}));
+      from: from,
+      to: to,
+      profile: profile,
+      heading: heading,
+      delivery: delivery,
+      exclude: exclude,
+      alternates: 2,
+    );
+    final noToll = safe(
+      _request(
+        from: from,
+        to: to,
+        profile: profile,
+        heading: heading,
+        delivery: delivery,
+        exclude: exclude,
+        extra: {'use_tolls': 0.0, 'exclude_tolls': true},
+      ),
+    );
+    final shortest = safe(
+      _request(
+        from: from,
+        to: to,
+        profile: profile,
+        heading: heading,
+        delivery: delivery,
+        exclude: exclude,
+        extra: {'shortest': true},
+      ),
+    );
     final res = await Future.wait([main, noToll, shortest]);
     final out = <RouteOption>[];
     void add(String label, TruckRoute r) {
-      final dup = out.any((o) =>
-          (o.route.lengthKm - r.lengthKm).abs() < r.lengthKm * 0.01 + 0.2 &&
-          (o.route.timeSec - r.timeSec).abs() < r.timeSec * 0.02 + 30);
+      final dup = out.any(
+        (o) =>
+            (o.route.lengthKm - r.lengthKm).abs() < r.lengthKm * 0.01 + 0.2 &&
+            (o.route.timeSec - r.timeSec).abs() < r.timeSec * 0.02 + 30,
+      );
       if (!dup) out.add(RouteOption(label, r));
     }
+
     for (final (i, r) in res[0].indexed) {
       add(i == 0 ? 'Nejrychlejší' : 'Alternativa', r);
     }
@@ -100,12 +130,12 @@ class ValhallaClient {
       ],
       'costing': 'truck',
       'costing_options': {
-        'truck': {...profile.toValhallaCosting(delivery: delivery), ...extra}
+        'truck': {...profile.toValhallaCosting(delivery: delivery), ...extra},
       },
       if (alternates > 0) 'alternates': alternates,
       if (exclude.isNotEmpty)
         'exclude_locations': [
-          for (final p in exclude) {'lat': p.latitude, 'lon': p.longitude}
+          for (final p in exclude) {'lat': p.latitude, 'lon': p.longitude},
         ],
       'language': 'cs-CZ',
       'units': 'kilometers',
@@ -115,17 +145,14 @@ class ValhallaClient {
     final http.Response res;
     try {
       res = await http
-          .post(uri,
-              headers: uaHeaders({'Content-Type': 'application/json'}),
-              body: jsonEncode(body))
+          .post(uri, headers: uaHeaders({'Content-Type': 'application/json'}), body: jsonEncode(body))
           .timeout(const Duration(seconds: 30));
     } catch (e) {
-      throw RoutingException('Server tras není dostupný: $e');
+      throw RoutingException('Server tras není dostupný: $e', network: true);
     }
     final data = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
     if (res.statusCode != 200) {
-      throw RoutingException(
-          'Trasu nelze vypočítat: ${data['error'] ?? res.statusCode}');
+      throw RoutingException('Trasu nelze vypočítat: ${data['error'] ?? res.statusCode}');
     }
     return [
       parseTrip(data['trip'] as Map<String, dynamic>),
@@ -163,9 +190,7 @@ class ValhallaClient {
     };
     final uri = Uri.parse('${baseUrl.replaceAll(RegExp(r'/+$'), '')}/trace_attributes');
     final res = await http
-        .post(uri,
-            headers: uaHeaders({'Content-Type': 'application/json'}),
-            body: jsonEncode(body))
+        .post(uri, headers: uaHeaders({'Content-Type': 'application/json'}), body: jsonEncode(body))
         .timeout(const Duration(seconds: 60));
     if (res.statusCode != 200) return;
     final data = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
@@ -175,20 +200,22 @@ class ValhallaClient {
     final edges = <EdgeAttr>[];
     for (final e in (data['edges'] as List? ?? const [])) {
       final b = (e['begin_shape_index'] as num?)?.toInt() ?? 0;
-      edges.add(EdgeAttr(
-        begin: b,
-        end: (e['end_shape_index'] as num?)?.toInt() ?? b,
-        wayId: (e['way_id'] as num?)?.toInt(),
-        roadClass: e['road_class'] as String?,
-        use: e['use'] as String?,
-        names: ((e['names'] as List?) ?? const []).map((x) => '$x').toList(),
-        beginHeading: (e['begin_heading'] as num?)?.toInt(),
-        endHeading: (e['end_heading'] as num?)?.toInt(),
-        intersecting: [
-          for (final ie in ((e['end_node'] as Map?)?['intersecting_edges'] as List? ?? const []))
-            Map<String, dynamic>.from(ie as Map)
-        ],
-      ));
+      edges.add(
+        EdgeAttr(
+          begin: b,
+          end: (e['end_shape_index'] as num?)?.toInt() ?? b,
+          wayId: (e['way_id'] as num?)?.toInt(),
+          roadClass: e['road_class'] as String?,
+          use: e['use'] as String?,
+          names: ((e['names'] as List?) ?? const []).map((x) => '$x').toList(),
+          beginHeading: (e['begin_heading'] as num?)?.toInt(),
+          endHeading: (e['end_heading'] as num?)?.toInt(),
+          intersecting: [
+            for (final ie in ((e['end_node'] as Map?)?['intersecting_edges'] as List? ?? const []))
+              Map<String, dynamic>.from(ie as Map),
+          ],
+        ),
+      );
       final en = math.min(n, (e['end_shape_index'] as num?)?.toInt() ?? 0);
       final lim = (e['speed_limit'] as num?)?.toInt();
       final nm = (e['names'] as List?)?.isNotEmpty == true ? (e['names'] as List).first as String : null;

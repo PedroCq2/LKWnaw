@@ -40,8 +40,10 @@ class RouteSimulator {
     final a = s[seg], b = s[math.min(seg + 1, s.length - 1)];
     final len = cum[math.min(seg + 1, s.length - 1)] - cum[seg];
     final t = len <= 0 ? 0.0 : (_at - cum[seg]) / len;
-    final p = LatLng(a.latitude + (b.latitude - a.latitude) * t,
-        a.longitude + (b.longitude - a.longitude) * t);
+    final p = LatLng(
+      a.latitude + (b.latitude - a.latitude) * t,
+      a.longitude + (b.longitude - a.longitude) * t,
+    );
     var h = const Distance().bearing(a, b);
     if (h < 0) h += 360;
     onFix(p, _at >= total ? 0 : _speed, h);

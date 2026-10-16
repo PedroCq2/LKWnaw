@@ -19,23 +19,30 @@ const _overpassMirrors = [
 /// Stáhne z OSM kamionová omezení (maxheight/maxweight/…) a radary podél trasy.
 ///
 /// Při [delivery] (zásobování) se hmotnostní limit počítá jako porušení jen na mostě.
-Future<List<RouteWarning>> loadRouteWarnings(TruckRoute route, TruckProfile truck,
-    {double maxMeters = 300000, bool delivery = false}) async {
+Future<List<RouteWarning>> loadRouteWarnings(
+  TruckRoute route,
+  TruckProfile truck, {
+  double maxMeters = 300000,
+  bool delivery = false,
+}) async {
   final index = RouteIndex(route);
   final pts = _simplify(route.shape, route.cumulative, maxMeters, 10);
   final out = <RouteWarning>[];
   final seenWays = <int>{};
   final seenNodes = <int>{};
   final junctions = <(double, double, String?)>[];
+  final links = <(LatLng, String)>[];
   const chunk = 200;
   for (var i = 0; i < pts.length - 1; i += chunk - 1) {
     final part = pts.sublist(i, math.min(pts.length, i + chunk));
     final poly = part
         .map((p) => '${p.latitude.toStringAsFixed(5)},${p.longitude.toStringAsFixed(5)}')
         .join(',');
-    final q = '[out:json][timeout:60];('
+    final q =
+        '[out:json][timeout:60];('
         'way(around:12,$poly)[~"^(max(height|weight|width|axleload|length)|overtaking:hgv(:conditional)?)\$"~"."];'
         'node(around:25,$poly)["highway"="motorway_junction"]["ref"];'
+        'way(around:30,$poly)["highway"="motorway_link"]["destination:ref"~"(^|;) *D *[0-9]"];'
         'node(around:20,$poly)["highway"="speed_camera"];'
         'node(around:12,$poly)["maxheight"];'
         ');out tags geom;';
@@ -47,6 +54,16 @@ Future<List<RouteWarning>> loadRouteWarnings(TruckRoute route, TruckProfile truc
       if (e['type'] == 'way') {
         if (!seenWays.add(id)) continue;
         final geom = (e['geometry'] as List?) ?? const [];
+        if (tags['highway'] == 'motorway_link') {
+          // Sjezd na jinou dálnici: zapamatuj jeho začátek, pokud leží na trase.
+          if (geom.isEmpty) continue;
+          final g0 = geom.first;
+          final start = LatLng((g0['lat'] as num).toDouble(), (g0['lon'] as num).toDouble());
+          if (index.locate(start, 25) != null) {
+            links.add((start, '${tags['destination:ref']}'));
+          }
+          continue;
+        }
         // Cesta musí s trasou sdílet aspoň 2 body (ne jen křížení).
         final hits = <double>[];
         LatLng? first;
@@ -70,8 +87,9 @@ Future<List<RouteWarning>> loadRouteWarnings(TruckRoute route, TruckProfile truc
           final km = double.tryParse(RegExp(r'^\d+').stringMatch('${tags['ref']}') ?? '');
           if (km != null) junctions.add((at, km, route.roadNameAt(index.segmentAt(p) ?? -1)));
         } else if (tags['highway'] == 'speed_camera') {
-          out.add(RouteWarning(
-              type: WarningType.speedCamera, value: null, atMeters: at, point: p, violates: false));
+          out.add(
+            RouteWarning(type: WarningType.speedCamera, value: null, atMeters: at, point: p, violates: false),
+          );
         } else {
           out.addAll(_fromTags(tags, at, p, truck, delivery));
         }
@@ -81,6 +99,7 @@ Future<List<RouteWarning>> loadRouteWarnings(TruckRoute route, TruckProfile truc
   out.sort((a, b) => a.atMeters.compareTo(b.atMeters));
   junctions.sort((a, b) => a.$1.compareTo(b.$1));
   route.kmPoints = junctions;
+  if (links.isNotEmpty) route.interchangeLinks = links;
   return mergeWarnings(out);
 }
 
@@ -113,8 +132,7 @@ Future<List<dynamic>?> overpassQuery(String q) async {
   return null;
 }
 
-List<RouteWarning> _fromTags(
-    Map<String, dynamic> tags, double at, LatLng p, TruckProfile t, bool delivery) {
+List<RouteWarning> _fromTags(Map<String, dynamic> tags, double at, LatLng p, TruckProfile t, bool delivery) {
   final out = <RouteWarning>[];
   final bridge = tags['bridge'] != null && tags['bridge'] != 'no';
   void add(String key, WarningType type, double Function(String) parse, double truckValue) {
@@ -125,8 +143,7 @@ List<RouteWarning> _fromTags(
     var violates = truckValue > v + 1e-6;
     // Zásobování: zóny se zákazem nad X t jsou pro dopravní obsluhu průjezdné, mosty ne.
     if (delivery && type == WarningType.weight && !bridge) violates = false;
-    out.add(RouteWarning(
-        type: type, value: v, atMeters: at, point: p, violates: violates, onBridge: bridge));
+    out.add(RouteWarning(type: type, value: v, atMeters: at, point: p, violates: violates, onBridge: bridge));
   }
 
   add('maxheight', WarningType.height, parseMeters, t.height);
@@ -144,8 +161,16 @@ List<RouteWarning> _fromTags(
     if (m != null) note = '${int.parse(m.group(1)!)}–${int.parse(m.group(2)!)} h';
   }
   if (ban) {
-    out.add(RouteWarning(
-        type: WarningType.noOvertakingHgv, value: null, note: note, atMeters: at, point: p, violates: false));
+    out.add(
+      RouteWarning(
+        type: WarningType.noOvertakingHgv,
+        value: null,
+        note: note,
+        atMeters: at,
+        point: p,
+        violates: false,
+      ),
+    );
   }
   return out;
 }
@@ -218,7 +243,10 @@ List<LatLng> _simplify(List<LatLng> pts, List<double> cum, double maxMeters, dou
         ..add((idx, b));
     }
   }
-  return [for (var i = 0; i <= end; i++) if (keep[i]) pts[i]];
+  return [
+    for (var i = 0; i <= end; i++)
+      if (keep[i]) pts[i],
+  ];
 }
 
 /// Mřížkový index segmentů trasy pro rychlé „jak daleko po trase je tento bod“.
@@ -234,8 +262,12 @@ class RouteIndex {
       final cells = <int>{};
       for (var k = 0; k <= steps; k++) {
         final t = k / steps;
-        cells.add(_key(s[i].latitude + (s[i + 1].latitude - s[i].latitude) * t,
-            s[i].longitude + (s[i + 1].longitude - s[i].longitude) * t));
+        cells.add(
+          _key(
+            s[i].latitude + (s[i + 1].latitude - s[i].latitude) * t,
+            s[i].longitude + (s[i + 1].longitude - s[i].longitude) * t,
+          ),
+        );
       }
       for (final c in cells) {
         (_grid[c] ??= []).add(i);

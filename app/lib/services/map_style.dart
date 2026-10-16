@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Vlastní vzhled mapy LKWnav nad vektorovými dlaždicemi OpenFreeMap.
 ///
@@ -89,10 +90,19 @@ Future<String> lkwStyle({required bool night}) async {
   final cached = _cache[night];
   if (cached != null) return cached;
   try {
-    _baseJson ??= utf8.decode((await http
-            .get(Uri.parse(baseStyleUrl))
-            .timeout(const Duration(seconds: 15)))
-        .bodyBytes);
+    // Styl si pamatujeme – offline (bez signálu) zůstane vzhled LKWnav.
+    final prefs = await SharedPreferences.getInstance();
+    if (_baseJson == null) {
+      try {
+        final res = await http.get(Uri.parse(baseStyleUrl)).timeout(const Duration(seconds: 10));
+        if (res.statusCode == 200) {
+          _baseJson = utf8.decode(res.bodyBytes);
+          await prefs.setString('baseStyle', _baseJson!);
+        }
+      } catch (_) {}
+      _baseJson ??= prefs.getString('baseStyle');
+    }
+    if (_baseJson == null) return baseStyleUrl;
     final style = jsonDecode(_baseJson!) as Map<String, dynamic>;
     applyPalette(style, night ? _night : _day);
     return _cache[night] = jsonEncode(style);

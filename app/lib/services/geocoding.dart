@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 
+import '../models/route.dart';
 import 'http_headers.dart';
 import 'restrictions.dart';
 
@@ -14,7 +15,6 @@ class Place {
   final List<String> features; // vybavenost (WC, sprchy, …)
   Place(this.name, this.point, {this.kind, this.address, this.features = const []});
 }
-
 
 /// Vyhledávání míst: Photon (OSM, toleruje názvy firem jako „kaufland dc olomouc“),
 /// záložně Nominatim.
@@ -35,7 +35,8 @@ Future<List<Place>> searchPlaces(String query, {LatLng? near}) async {
     final lists = await Future.wait(variants.map((v) => _photon(v, near)));
     for (final list in lists) {
       for (final p in list) {
-        final key = '${p.name}|${p.point.latitude.toStringAsFixed(3)}|${p.point.longitude.toStringAsFixed(3)}';
+        final key =
+            '${p.name}|${p.point.latitude.toStringAsFixed(3)}|${p.point.longitude.toStringAsFixed(3)}';
         if (seen.add(key)) results.add(p);
       }
     }
@@ -68,9 +69,14 @@ Future<List<Place>> _photon(String q, LatLng? near) async {
       if (p['postcode'] != null) '${p['postcode']} ${city ?? ''}'.trim() else ?city,
     ].join(', ');
     final name = (p['name'] as String?) ?? (street.isNotEmpty ? street : (city ?? q));
-    out.add(Place(name, LatLng(c[1].toDouble(), c[0].toDouble()),
+    out.add(
+      Place(
+        name,
+        LatLng(c[1].toDouble(), c[0].toDouble()),
         kind: _photonKind(p['osm_key'] as String?, p['osm_value'] as String?),
-        address: address.isEmpty ? null : address));
+        address: address.isEmpty ? null : address,
+      ),
+    );
   }
   return out;
 }
@@ -102,8 +108,23 @@ String? _photonKind(String? key, String? value) {
 }
 
 const _genericWords = {
-  'dc', 'sklad', 'distribuční', 'distribucni', 'centrum', 'centrální', 'centralni', 'areál', 'areal',
-  'rampa', 'logistika', 'logistické', 'a', 's', 'u', 'v', 'na',
+  'dc',
+  'sklad',
+  'distribuční',
+  'distribucni',
+  'centrum',
+  'centrální',
+  'centralni',
+  'areál',
+  'areal',
+  'rampa',
+  'logistika',
+  'logistické',
+  'a',
+  's',
+  'u',
+  'v',
+  'na',
 };
 const _depotKinds = {'Sklad', 'Průmyslový areál', 'Logistika', 'Velkoobchod', 'Továrna', 'Komerční areál'};
 
@@ -128,8 +149,10 @@ List<Place> rankPlaces(List<Place> list, String q) {
     final hay = _fold('${p.name} ${p.address ?? ''}');
     return key.where(hay.contains).length;
   }
+
   final idx = {for (var i = 0; i < list.length; i++) list[i]: i};
-  final sorted = [...list]..sort((a, b) {
+  final sorted = [...list]
+    ..sort((a, b) {
       var c = match(b).compareTo(match(a));
       if (c != 0) return c;
       if (wantsDepot) {
@@ -146,22 +169,19 @@ List<Place> rankPlaces(List<Place> list, String q) {
 }
 
 Future<List<Place>> _nominatim(String query, LatLng? near) async {
-  final params = {
-    'q': query,
-    'format': 'jsonv2',
-    'limit': '8',
-    'accept-language': 'cs',
-  };
+  final params = {'q': query, 'format': 'jsonv2', 'limit': '8', 'accept-language': 'cs'};
   final uri = Uri.https('nominatim.openstreetmap.org', '/search', params);
   final res = await http.get(uri, headers: uaHeaders()).timeout(const Duration(seconds: 15));
   if (res.statusCode != 200) return [];
   final list = jsonDecode(utf8.decode(res.bodyBytes)) as List;
   return list
-      .map((e) => Place(
-            (e['name'] as String?)?.isNotEmpty == true ? e['name'] as String : e['display_name'] as String,
-            LatLng(double.parse(e['lat'] as String), double.parse(e['lon'] as String)),
-            address: e['display_name'] as String,
-          ))
+      .map(
+        (e) => Place(
+          (e['name'] as String?)?.isNotEmpty == true ? e['name'] as String : e['display_name'] as String,
+          LatLng(double.parse(e['lat'] as String), double.parse(e['lon'] as String)),
+          address: e['display_name'] as String,
+        ),
+      )
       .toList();
 }
 
@@ -169,36 +189,104 @@ enum PoiKind { parking, service, fuel }
 
 extension PoiKindLabel on PoiKind {
   String get label => switch (this) {
-        PoiKind.parking => 'Truckparky a odpočívky',
-        PoiKind.service => 'Truck servisy a pneuservisy',
-        PoiKind.fuel => 'Čerpací stanice pro kamiony',
-      };
+    PoiKind.parking => 'Truckparky a odpočívky',
+    PoiKind.service => 'Truck servisy a pneuservisy',
+    PoiKind.fuel => 'Čerpací stanice pro kamiony',
+  };
 }
 
 /// POI pro kamiony v okolí bodu z OpenStreetMap (Overpass API).
-Future<List<Place>> findTruckPois(LatLng p, PoiKind kind, {int radiusM = 30000}) async {
-  final a = '(around:$radiusM,${p.latitude},${p.longitude})';
+Future<List<Place>> findTruckPois(LatLng p, PoiKind kind, {int radiusM = 30000}) =>
+    _findPois(kind, '(around:$radiusM,${p.latitude},${p.longitude})', [p], radiusM ~/ 1000, p);
+
+/// POI podél trasy: kolik km/min před vámi a jak daleko od trasy.
+class RoutePoi {
+  final Place place;
+  final double aheadM; // vzdálenost po trase od aktuální polohy
+  final double offM; // vzdušně od trasy (zajížďka ≈ 2×)
+  final double etaSec;
+  RoutePoi(this.place, this.aheadM, this.offM, this.etaSec);
+}
+
+/// Truckparky / pumpy / servisy na dalších [aheadM] m trasy (do 1,5 km od ní), seřazené po trase.
+Future<List<RoutePoi>> findTruckPoisAlongRoute(
+  TruckRoute route,
+  double fromM,
+  PoiKind kind, {
+  double aheadM = 150000,
+}) async {
+  final cum = route.cumulative;
+  final toM = (fromM + aheadM).clamp(0.0, cum.last);
+  // Body trasy po ~300 m (stačí pro „around“ 1,5 km a pro výpočet polohy POI).
+  final samples = <(LatLng, double)>[];
+  var next = fromM;
+  for (var i = 0; i < route.shape.length; i++) {
+    if (cum[i] < fromM) continue;
+    if (cum[i] > toM) break;
+    if (cum[i] >= next) {
+      samples.add((route.shape[i], cum[i]));
+      next = cum[i] + 300;
+    }
+  }
+  if (samples.length < 2) return [];
+  final poly = samples
+      .map((e) => '${e.$1.latitude.toStringAsFixed(5)},${e.$1.longitude.toStringAsFixed(5)}')
+      .join(',');
+  final centers = <LatLng>[
+    for (var k = 0; k < samples.length; k += 66) samples[k].$1, // ~ každých 20 km
+  ];
+  final places = await _findPois(kind, '(around:1500,$poly)', centers, 6, samples.first.$1);
+  const dist = Distance();
+  final speed = route.timeSec > 0 ? route.lengthKm * 1000 / route.timeSec : 20.0; // m/s
+  final out = <RoutePoi>[];
+  for (final p in places) {
+    var best = double.infinity;
+    var at = 0.0;
+    for (final (q, c) in samples) {
+      final d = dist(p.point, q);
+      if (d < best) {
+        best = d;
+        at = c;
+      }
+    }
+    if (best > 2500) continue;
+    final ahead = at - fromM;
+    out.add(RoutePoi(p, ahead, best, ahead / speed));
+  }
+  out.sort((a, b) => a.aheadM.compareTo(b.aheadM));
+  return out;
+}
+
+Future<List<Place>> _findPois(
+  PoiKind kind,
+  String a,
+  List<LatLng> photonCenters,
+  int photonRadiusKm,
+  LatLng p,
+) async {
   final filters = switch (kind) {
     PoiKind.parking => [
-        'nwr["amenity"="parking"]["hgv"~"yes|designated"]$a;',
-        'nwr["highway"~"^(rest_area|services)\$"]$a;',
-      ],
+      'nwr["amenity"="parking"]["hgv"~"yes|designated"]$a;',
+      'nwr["highway"~"^(rest_area|services)\$"]$a;',
+    ],
     PoiKind.service => [
-        'nwr["shop"~"^(truck_repair|truck|tyres)\$"]$a;',
-        'nwr["craft"="truck_repair"]$a;',
-        'nwr["shop"="car_repair"]["hgv"~"yes|designated"]$a;',
-      ],
+      'nwr["shop"~"^(truck_repair|truck|tyres)\$"]$a;',
+      'nwr["craft"="truck_repair"]$a;',
+      'nwr["shop"="car_repair"]["hgv"~"yes|designated"]$a;',
+    ],
     PoiKind.fuel => [
-        'nwr["amenity"="fuel"]["hgv"~"yes|designated"]$a;',
-        'nwr["amenity"="fuel"]["fuel:HGV_diesel"="yes"]$a;',
-        'nwr["amenity"="fuel"]["fuel:adblue"="yes"]$a;',
-      ],
+      'nwr["amenity"="fuel"]["hgv"~"yes|designated"]$a;',
+      'nwr["amenity"="fuel"]["fuel:HGV_diesel"="yes"]$a;',
+      'nwr["amenity"="fuel"]["fuel:adblue"="yes"]$a;',
+    ],
   };
   // Overpass (bohatá data o vybavenosti) a Photon (rychlý, spolehlivý) souběžně.
   final overpass = overpassQuery('[out:json][timeout:25];(${filters.join()});out center tags 80;');
-  final photonF = _photonNearby(p, kind, radiusM ~/ 1000).catchError((_) => <Place>[]);
+  final photonF = Future.wait(
+    photonCenters.map((c) => _photonNearby(c, kind, photonRadiusKm).catchError((_) => <Place>[])),
+  );
   final els = await overpass;
-  final photon = await photonF;
+  final photon = (await photonF).expand((l) => l).toList();
   if (els == null && photon.isEmpty) throw Exception('servery s mapovými daty neodpovídají');
   const dist = Distance();
   final places = <Place>[];
@@ -211,8 +299,7 @@ Future<List<Place>> findTruckPois(LatLng p, PoiKind kind, {int radiusM = 30000})
     final t = Map<String, dynamic>.from((e['tags'] as Map?) ?? const {});
     final type = _poiType(t);
     final name = (t['name'] ?? t['operator'] ?? t['brand']) as String? ?? type;
-    places.add(Place(name, LatLng(lat.toDouble(), lon.toDouble()),
-        kind: type, features: _features(t)));
+    places.add(Place(name, LatLng(lat.toDouble(), lon.toDouble()), kind: type, features: _features(t)));
   }
   // Doplň z Photonu, co Overpass nemá (duplicita = do 120 m od existujícího).
   for (final ph in photon) {
@@ -226,7 +313,13 @@ Future<List<Place>> findTruckPois(LatLng p, PoiKind kind, {int radiusM = 30000})
 Future<List<Place>> _photonNearby(LatLng p, PoiKind kind, int radiusKm) async {
   final tags = switch (kind) {
     PoiKind.parking => ['highway:services', 'highway:rest_area', 'amenity:parking'],
-    PoiKind.service => ['shop:truck_repair', 'shop:truck', 'shop:tyres', 'craft:truck_repair', 'shop:car_repair'],
+    PoiKind.service => [
+      'shop:truck_repair',
+      'shop:truck',
+      'shop:tyres',
+      'craft:truck_repair',
+      'shop:car_repair',
+    ],
     PoiKind.fuel => ['amenity:fuel'],
   };
   final q = [
@@ -258,8 +351,14 @@ Future<List<Place>> _photonNearby(LatLng p, PoiKind kind, int radiusKm) async {
       'tyres' => 'Pneuservis',
       _ => 'Servis nákladních vozidel',
     };
-    out.add(Place(name.isEmpty ? type : name, LatLng(c[1].toDouble(), c[0].toDouble()),
-        kind: type, address: pr['city'] as String?));
+    out.add(
+      Place(
+        name.isEmpty ? type : name,
+        LatLng(c[1].toDouble(), c[0].toDouble()),
+        kind: type,
+        address: pr['city'] as String?,
+      ),
+    );
   }
   return out;
 }

@@ -20,15 +20,20 @@ class _ProfileScreenState extends State<ProfileScreen> {
   late int _mapStyle = widget.settings.mapStyle;
   late bool _delivery = widget.settings.delivery;
 
-  Widget _num(String label, String unit, double value, void Function(double) set,
-      {double min = 0, double max = 100}) {
+  Widget _num(
+    String label,
+    String unit,
+    double value,
+    void Function(double) set, {
+    double min = 0,
+    double max = 100,
+  }) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: TextFormField(
         initialValue: value.toString(),
         keyboardType: const TextInputType.numberWithOptions(decimal: true),
-        decoration: InputDecoration(
-            labelText: label, suffixText: unit, border: const OutlineInputBorder()),
+        decoration: InputDecoration(labelText: label, suffixText: unit, border: const OutlineInputBorder()),
         validator: (s) {
           final v = double.tryParse((s ?? '').replaceAll(',', '.'));
           if (v == null || v < min || v > max) return 'Zadejte $min – $max';
@@ -65,35 +70,64 @@ class _ProfileScreenState extends State<ProfileScreen> {
         child: ListView(
           padding: const EdgeInsets.all(16),
           children: [
-            Wrap(spacing: 8, children: [
-              ActionChip(
+            Wrap(
+              spacing: 8,
+              children: [
+                ActionChip(
                   label: const Text('Tahač + návěs 40 t'),
-                  onPressed: () => setState(() => p = TruckProfile())),
-              ActionChip(
+                  onPressed: () => setState(() => p = TruckProfile()),
+                ),
+                ActionChip(
                   label: const Text('Sólo 18 t'),
-                  onPressed: () => setState(() => p = TruckProfile(
-                      height: 3.8, length: 10, weight: 18, axleLoad: 10, axleCount: 2))),
-              ActionChip(
+                  onPressed: () => setState(
+                    () => p = TruckProfile(height: 3.8, length: 10, weight: 18, axleLoad: 10, axleCount: 2),
+                  ),
+                ),
+                ActionChip(
                   label: const Text('Dodávka 3,5 t'),
-                  onPressed: () => setState(() => p = TruckProfile(
-                      height: 2.8, width: 2.1, length: 7, weight: 3.5,
-                      axleLoad: 2, axleCount: 2, maxSpeed: 130))),
-            ]),
+                  onPressed: () => setState(
+                    () => p = TruckProfile(
+                      height: 2.8,
+                      width: 2.1,
+                      length: 7,
+                      weight: 3.5,
+                      axleLoad: 2,
+                      axleCount: 2,
+                      maxSpeed: 130,
+                    ),
+                  ),
+                ),
+              ],
+            ),
             const SizedBox(height: 8),
             // Key vynutí přestavění polí po výběru předvolby.
             KeyedSubtree(
               key: ValueKey(p),
-              child: Column(children: [
-                _num('Výška', 'm', p.height, (v) => p.height = v, max: 6),
-                _num('Šířka', 'm', p.width, (v) => p.width = v, max: 4),
-                _num('Délka', 'm', p.length, (v) => p.length = v, max: 30),
-                _num('Celková hmotnost', 't', p.weight, (v) => p.weight = v, max: 80),
-                _num('Zatížení nápravy', 't', p.axleLoad, (v) => p.axleLoad = v, max: 20),
-                _num('Počet náprav', '', p.axleCount.toDouble(),
-                    (v) => p.axleCount = v.round(), min: 2, max: 10),
-                _num('Max. rychlost vozidla', 'km/h', p.maxSpeed.toDouble(),
-                    (v) => p.maxSpeed = v.round(), min: 30, max: 130),
-              ]),
+              child: Column(
+                children: [
+                  _num('Výška', 'm', p.height, (v) => p.height = v, max: 6),
+                  _num('Šířka', 'm', p.width, (v) => p.width = v, max: 4),
+                  _num('Délka', 'm', p.length, (v) => p.length = v, max: 30),
+                  _num('Celková hmotnost', 't', p.weight, (v) => p.weight = v, max: 80),
+                  _num('Zatížení nápravy', 't', p.axleLoad, (v) => p.axleLoad = v, max: 20),
+                  _num(
+                    'Počet náprav',
+                    '',
+                    p.axleCount.toDouble(),
+                    (v) => p.axleCount = v.round(),
+                    min: 2,
+                    max: 10,
+                  ),
+                  _num(
+                    'Max. rychlost vozidla',
+                    'km/h',
+                    p.maxSpeed.toDouble(),
+                    (v) => p.maxSpeed = v.round(),
+                    min: 30,
+                    max: 130,
+                  ),
+                ],
+              ),
             ),
             SwitchListTile(
               title: const Text('Nebezpečný náklad (ADR)'),
@@ -102,8 +136,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ),
             SwitchListTile(
               title: const Text('Zásobování (dopravní obsluha)'),
-              subtitle: const Text('Povolí vjezd do zón se zákazem nad X t (např. k obchodu). '
-                  'Výška, šířka, délka, náprava a mosty se hlídají dál.'),
+              subtitle: const Text(
+                'Povolí vjezd do zón se zákazem nad X t (např. k obchodu). '
+                'Výška, šířka, délka, náprava a mosty se hlídají dál.',
+              ),
               value: _delivery,
               onChanged: (v) => setState(() => _delivery = v),
             ),
@@ -151,16 +187,17 @@ class _ProfileScreenState extends State<ProfileScreen> {
               ),
             ),
             const SizedBox(height: 24),
-            FilledButton.icon(
-                onPressed: _save, icon: const Icon(Icons.save), label: const Text('Uložit')),
+            FilledButton.icon(onPressed: _save, icon: const Icon(Icons.save), label: const Text('Uložit')),
             const SizedBox(height: 24),
             const Divider(),
             const ListTile(
               leading: Icon(Icons.info_outline),
               title: Text('O aplikaci LKWnav'),
-              subtitle: Text('Mapová data © přispěvatelé OpenStreetMap (ODbL)\n'
-                  'Vektorové mapy: OpenFreeMap / OpenMapTiles\n'
-                  'Výpočet tras: Valhalla, vyhledávání: Nominatim, POI a omezení: Overpass API'),
+              subtitle: Text(
+                'Mapová data © přispěvatelé OpenStreetMap (ODbL)\n'
+                'Vektorové mapy: OpenFreeMap / OpenMapTiles\n'
+                'Výpočet tras: Valhalla, vyhledávání: Nominatim, POI a omezení: Overpass API',
+              ),
               isThreeLine: true,
             ),
           ],

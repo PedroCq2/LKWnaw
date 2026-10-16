@@ -17,7 +17,10 @@ import '../services/geocoding.dart';
 import '../services/restrictions.dart';
 import '../services/lanes.dart';
 import '../services/map_style.dart';
+import '../services/offline_maps.dart';
+import '../services/saved_places.dart';
 import '../services/settings.dart';
+import '../services/speech.dart';
 import '../services/valhalla.dart';
 import '../theme.dart';
 import '../widgets/nav_widgets.dart';
@@ -81,6 +84,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   NavState? _nav;
   bool _navigating = false;
   bool _routing = false;
+  bool _offline = false; // poslední požadavek na server tras selhal kvůli spojení
   DateTime _lastReroute = DateTime.fromMillisecondsSinceEpoch(0);
   bool _arrivedSpoken = false;
   RouteSimulator? _sim;
@@ -88,6 +92,13 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   final List<LatLng> _excluded = []; // mosty, kterým se trasa vyhýbá (zásobování)
 
   List<Place> _results = [];
+  SavedPlaces _saved = SavedPlaces([]);
+  List<SavedPlace> _savedResults = [];
+  SavedPlace? _destSaved; // cíl je uložené místo (vjezd + poznámka)
+  LatLng? _destAddr; // adresa cíle (bez vjezdu)
+  bool _pickGate = false; // čeká se na dlouhé podržení u vjezdu pro kamiony
+  bool _noteSpoken = false;
+  double? _dlProgress; // stahování mapy trasy (0–1), null = nestahuje se
   List<Place> _parking = [];
   PoiKind _poiKind = PoiKind.parking;
   bool _searching = false;
@@ -106,6 +117,9 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   void initState() {
     super.initState();
     _loadStyle();
+    SavedPlaces.load().then((v) {
+      if (mounted) setState(() => _saved = v);
+    });
     // Den/noc podle Slunce – kontrola jednou za minutu.
     _nightTimer = Timer.periodic(const Duration(minutes: 1), (_) {
       if (mounted && _styleNight != _night) setState(() {});
@@ -138,7 +152,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   Future<void> _say(String text) async {
     if (!_settings.voice || text.isEmpty) return;
     try {
-      await _tts.speak(text);
+      await _tts.speak(forSpeech(text));
     } catch (_) {}
   }
 
@@ -185,10 +199,15 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   void _onPosition(Position p) {
     if (_sim != null) return; // v simulaci se skutečné GPS ignoruje
     final speed = p.speed.isFinite && p.speed > 0 ? p.speed : 0.0;
-    _onFix(LatLng(p.latitude, p.longitude), speed, p.heading.isFinite && p.heading >= 0 ? p.heading : null);
+    _onFix(
+      LatLng(p.latitude, p.longitude),
+      speed,
+      p.heading.isFinite && p.heading >= 0 ? p.heading : null,
+      accuracy: p.accuracy.isFinite ? p.accuracy : 10,
+    );
   }
 
-  void _onFix(LatLng pos, double speedMps, double? heading, {bool simulated = false}) {
+  void _onFix(LatLng pos, double speedMps, double? heading, {bool simulated = false, double accuracy = 10}) {
     if (_pos == null && kIsWeb) _webDemo();
     final speed = speedMps * 3.6;
     // Kurz z GPS je spolehlivý jen za jízdy.
@@ -201,20 +220,27 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     }
 
     if (_engine != null) {
-      final nav = _engine!.update(pos);
+      final nav = _engine!.update(pos, accuracy: accuracy);
       _nav = nav;
       if (_navigating) {
         _voiceGuidance(nav);
         _warningVoice(nav);
+        final note = _destSaved?.note;
+        if (note != null && !_noteSpoken && nav.remaining < 1500) {
+          _noteSpoken = true;
+          _say('Poznámka k cíli: $note');
+        }
         if (nav.arrived && !_arrivedSpoken) {
           _arrivedSpoken = true;
           _say('Jste v cíli.');
         }
+        // Přepočet jen za jízdy; bez internetu zkoušet jednou za 30 s a vést dál po staré trase.
         if (_engine!.isOffRoute &&
             !_routing &&
-            DateTime.now().difference(_lastReroute) > const Duration(seconds: 10)) {
+            speed > 5 &&
+            DateTime.now().difference(_lastReroute) > Duration(seconds: _offline ? 30 : 10)) {
           _lastReroute = DateTime.now();
-          _say('Přepočítávám trasu.');
+          if (!_offline) _say('Přepočítávám trasu.');
           _computeRoute(reroute: true);
         }
       }
@@ -710,11 +736,22 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
               exclude: _excluded,
             );
       if (!mounted || opts.isEmpty) return;
+      _offline = false;
       _options = opts;
       _extrasLoaded.clear();
+      if (!reroute) _dlProgress = null;
       await _selectRoute(0, fit: !reroute && !_navigating);
     } on RoutingException catch (e) {
-      _toast(e.message);
+      if (e.network) {
+        // Bez signálu: trasa zůstává, jen stav. Hlásit jednou, ne při každém pokusu.
+        if (!_offline) {
+          _say('Není připojení. Vedu podle uložené trasy.');
+          _toast(_route != null ? 'Bez připojení – vedu podle uložené trasy.' : e.message);
+        }
+        setState(() => _offline = true);
+      } else {
+        _toast(e.message);
+      }
     } catch (e) {
       _toast('Chyba výpočtu trasy: $e');
     } finally {
@@ -751,6 +788,11 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       if (!mounted || _route != r) return;
       setState(() => r.warnings = w);
       await _syncLayers();
+      // Teď jsou známé sjezdy na jiné dálnice → doplnit pokyny na křižovatkách.
+      if (r.interchangeLinks.isNotEmpty) {
+        await enrichManeuvers(r);
+        if (mounted) setState(() {});
+      }
       // Zásobování: trasa nesmí přes most s nižší nosností → vyhnout se mu a přepočítat.
       final bridges = w.where((x) => x.onBridge && x.violates).toList();
       if (_settings.delivery && bridges.isNotEmpty && _excluded.length < 10) {
@@ -841,16 +883,191 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     _applyCamera();
   }
 
-  void _setDestination(LatLng p, String name) {
+  void _setDestination(LatLng p, String name, {SavedPlace? saved}) {
     FocusScope.of(context).unfocus();
     _excluded.clear();
+    final sp = saved ?? _saved.near(p);
     setState(() {
-      _dest = p;
-      _destName = name;
+      _destSaved = sp;
+      _destAddr = sp?.point ?? p;
+      // Uložené místo s vjezdem pro kamiony → naviguj k bráně, ne na adresu.
+      _dest = sp?.target ?? p;
+      _destName = sp?.name ?? name;
       _results = [];
+      _savedResults = [];
+      _pickGate = false;
+      _noteSpoken = false;
     });
     _syncLayers();
     _computeRoute(reroute: _navigating);
+  }
+
+  /// Dlouhé podržení: vjezd pro kamiony / objet místo na trase / nový cíl.
+  Future<void> _onLongPress(LatLng p) async {
+    if (_pickGate) {
+      await _setGate(p);
+      return;
+    }
+    final r = _route;
+    if (r != null && RouteIndex(r).locate(p, 80) != null) {
+      final choice = await showModalBottomSheet<String>(
+        context: context,
+        builder: (ctx) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.block, color: Lkw.danger),
+                title: const Text('Objet toto místo'),
+                subtitle: const Text('Neprůjezdné, uzavírka, nízký most… – trasa se přepočítá kolem'),
+                onTap: () => Navigator.pop(ctx, 'avoid'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.flag, color: Lkw.amber),
+                title: const Text('Navigovat sem'),
+                onTap: () => Navigator.pop(ctx, 'dest'),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (choice == 'avoid') {
+        _excluded.add(p);
+        _say('Objíždím označené místo.');
+        await _computeRoute(reroute: _navigating);
+        return;
+      }
+      if (choice != 'dest') return;
+    }
+    _setDestination(p, '${p.latitude.toStringAsFixed(5)}, ${p.longitude.toStringAsFixed(5)}');
+  }
+
+  /// Uloží vjezd pro kamiony k aktuálnímu cíli a naviguje k němu.
+  Future<void> _setGate(LatLng gate) async {
+    final addr = _destAddr ?? _dest;
+    if (addr == null) return;
+    final sp =
+        _destSaved ??
+        SavedPlace(
+          id: DateTime.now().millisecondsSinceEpoch.toString(),
+          name: _destName ?? 'Místo',
+          point: addr,
+        );
+    sp.gate = gate;
+    setState(() {
+      _pickGate = false;
+      _destSaved = sp;
+      _dest = gate;
+    });
+    await _saved.upsert(sp);
+    await _syncLayers();
+    _toast('Vjezd pro kamiony uložen. Navigace povede k bráně.');
+    await _editPlace(sp);
+    _excluded.clear();
+    await _computeRoute(reroute: _navigating);
+  }
+
+  /// Dialog: název a poznámka k uloženému místu.
+  Future<void> _editPlace(SavedPlace sp) async {
+    final name = TextEditingController(text: sp.name);
+    final note = TextEditingController(text: sp.note ?? '');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Uložené místo'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: name,
+              decoration: const InputDecoration(labelText: 'Název'),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: note,
+              minLines: 2,
+              maxLines: 4,
+              decoration: const InputDecoration(
+                labelText: 'Poznámka pro příjezd',
+                hintText: 'Příjezd zezadu, vrátnice u rampy 12.',
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              sp.gate == null ? 'Vjezd pro kamiony: nenastaven' : 'Vjezd pro kamiony: nastaven ✓',
+              style: const TextStyle(color: Lkw.muted),
+            ),
+          ],
+        ),
+        actions: [
+          if (_saved.items.any((e) => e.id == sp.id))
+            TextButton(
+              onPressed: () async {
+                await _saved.remove(sp.id);
+                if (ctx.mounted) Navigator.pop(ctx, false);
+                setState(() => _destSaved = null);
+              },
+              child: const Text('Smazat', style: TextStyle(color: Lkw.danger)),
+            ),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Zrušit')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Uložit')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    sp
+      ..name = name.text.trim().isEmpty ? sp.name : name.text.trim()
+      ..note = note.text.trim().isEmpty ? null : note.text.trim();
+    await _saved.upsert(sp);
+    setState(() {
+      _destSaved = sp;
+      _destName = sp.name;
+    });
+  }
+
+  /// Přiblíží mapu na cíl (pro výběr brány).
+  Future<void> _fitDestination() async {
+    final d = _destAddr ?? _dest;
+    if (d == null) return;
+    setState(() => _follow = false);
+    try {
+      await _map?.updateContentInsets(EdgeInsets.zero, false);
+      await _map?.animateCamera(
+        ml.CameraUpdate.newCameraPosition(ml.CameraPosition(target: _ml(d), zoom: 17, tilt: 0, bearing: 0)),
+        duration: const Duration(milliseconds: 600),
+      );
+    } catch (_) {}
+  }
+
+  /// Stáhne mapu podél trasy pro jízdu bez signálu.
+  Future<void> _downloadRoute(TruckRoute r) async {
+    setState(() => _dlProgress = 0);
+    try {
+      await downloadRouteMap(
+        r,
+        onProgress: (p) {
+          if (mounted) setState(() => _dlProgress = p.clamp(0.0, 0.99));
+        },
+      );
+      if (mounted) setState(() => _dlProgress = 1);
+      _toast('Mapa podél trasy je stažená – pojede i bez signálu.');
+    } catch (e) {
+      if (mounted) setState(() => _dlProgress = null);
+      _toast('Stažení mapy selhalo: $e');
+    }
+  }
+
+  Future<void> _saveCurrentDest() async {
+    final addr = _destAddr ?? _dest;
+    if (addr == null) return;
+    await _editPlace(
+      _destSaved ??
+          SavedPlace(
+            id: DateTime.now().millisecondsSinceEpoch.toString(),
+            name: _destName ?? 'Místo',
+            point: addr,
+          ),
+    );
   }
 
   Future<void> _doSearch(String q, {bool quiet = false}) async {
@@ -899,91 +1116,124 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   }
 
   Future<void> _findPois(PoiKind kind) async {
-    // Při navigaci hledej ~15 km před vozidlem po trase, jinak kolem polohy.
-    LatLng? center = _pos;
-    if (_navigating && _route != null && _nav != null) {
-      final target = math.min(_nav!.traveled + 15000, _route!.cumulative.last);
-      final idx = _route!.cumulative.indexWhere((c) => c >= target);
-      center = _route!.shape[idx < 0 ? _route!.shape.length - 1 : idx];
-    }
-    if (center == null) {
+    final pos = _pos;
+    final route = _route;
+    if (pos == null && route == null) {
       _toast('Čekám na GPS polohu…');
       return;
     }
     _toast('Hledám: ${kind.label.toLowerCase()}…');
     try {
-      final places = await findTruckPois(center, kind);
+      // S trasou: podél celé trasy před vozidlem; bez trasy: v okolí 30 km.
+      final List<RoutePoi> items;
+      if (route != null) {
+        items = await findTruckPoisAlongRoute(route, _nav?.traveled ?? 0, kind);
+      } else {
+        const d = Distance();
+        items = [for (final p in await findTruckPois(pos!, kind)) RoutePoi(p, d(pos, p.point), 0, -1)];
+      }
       if (!mounted) return;
       setState(() {
-        _parking = places;
+        _parking = items.map((e) => e.place).toList();
         _poiKind = kind;
       });
       await _syncLayers();
-      if (places.isEmpty) {
-        _toast('V okolí 30 km nic nenalezeno.');
+      if (items.isEmpty) {
+        _toast(route != null ? 'Podél trasy nic nenalezeno.' : 'V okolí 30 km nic nenalezeno.');
         return;
       }
-      _showPoiSheet(places, kind);
+      _showPoiSheet(items, kind, alongRoute: route != null);
     } catch (e) {
       _toast('Hledání selhalo: $e');
     }
   }
 
-  void _showPoiSheet(List<Place> places, PoiKind kind) {
-    const dist = Distance();
+  static const _poiFilters = ['WC', 'sprchy', 'jídlo', 'zdarma', 'hlídané/kamery', 'AdBlue'];
+
+  void _showPoiSheet(List<RoutePoi> items, PoiKind kind, {required bool alongRoute}) {
+    final active = <String>{};
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      builder: (ctx) => DraggableScrollableSheet(
-        expand: false,
-        initialChildSize: 0.55,
-        builder: (ctx, scroll) => ListView(
-          controller: scroll,
-          children: [
-            ListTile(title: Text(kind.label, style: Theme.of(ctx).textTheme.titleMedium)),
-            for (final p in places.take(30))
-              ListTile(
-                leading: CircleAvatar(child: Icon(_poiIcon(kind), size: 20)),
-                title: Text(p.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-                subtitle: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      [
-                        if (p.kind != null) p.kind!,
-                        if (_pos != null) formatDistance(dist(_pos!, p.point)),
-                      ].join(' · '),
-                    ),
-                    if (p.features.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 4),
-                        child: Wrap(
-                          spacing: 4,
-                          runSpacing: 4,
-                          children: [
-                            for (final f in p.features)
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: Theme.of(ctx).colorScheme.secondaryContainer,
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                child: Text(f, style: const TextStyle(fontSize: 12)),
-                              ),
-                          ],
-                        ),
-                      ),
-                  ],
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) {
+          final shown = items.where((e) => active.every(e.place.features.contains)).take(40).toList();
+          final filters = _poiFilters.where((f) => items.any((e) => e.place.features.contains(f))).toList();
+          return DraggableScrollableSheet(
+            expand: false,
+            initialChildSize: 0.6,
+            builder: (ctx, scroll) => ListView(
+              controller: scroll,
+              children: [
+                ListTile(
+                  title: Text(kind.label, style: Theme.of(ctx).textTheme.titleMedium),
+                  subtitle: Text(alongRoute ? 'Podél trasy, seřazeno podle dojezdu' : 'V okolí'),
                 ),
-                isThreeLine: p.features.isNotEmpty,
-                onTap: () {
-                  Navigator.pop(ctx);
-                  _setDestination(p.point, p.name);
-                  if (_navigating) _say('Naviguji na ${p.name}.');
-                },
-              ),
-          ],
-        ),
+                if (filters.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: Wrap(
+                      spacing: 6,
+                      children: [
+                        for (final f in filters)
+                          FilterChip(
+                            label: Text(f),
+                            selected: active.contains(f),
+                            selectedColor: Lkw.amberDark,
+                            onSelected: (v) => setSheet(() => v ? active.add(f) : active.remove(f)),
+                          ),
+                      ],
+                    ),
+                  ),
+                for (final e in shown)
+                  ListTile(
+                    leading: CircleAvatar(child: Icon(_poiIcon(kind), size: 20)),
+                    title: Text(e.place.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          [
+                            if (alongRoute) 'za ${formatDistance(e.aheadM)}' else formatDistance(e.aheadM),
+                            if (alongRoute && e.etaSec >= 0)
+                              '~${formatDuration(Duration(seconds: e.etaSec.round()))}',
+                            if (alongRoute && e.offM > 150) '${formatDistance(e.offM)} od trasy',
+                            if (e.place.kind != null) e.place.kind!,
+                          ].join(' · '),
+                        ),
+                        if (e.place.features.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Wrap(
+                              spacing: 4,
+                              runSpacing: 4,
+                              children: [
+                                for (final f in e.place.features)
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: Theme.of(ctx).colorScheme.secondaryContainer,
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                    child: Text(f, style: const TextStyle(fontSize: 12)),
+                                  ),
+                              ],
+                            ),
+                          ),
+                      ],
+                    ),
+                    isThreeLine: e.place.features.isNotEmpty,
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _setDestination(e.place.point, e.place.name);
+                      if (_navigating) _say('Naviguji na ${e.place.name}.');
+                    },
+                  ),
+                if (shown.isEmpty) const ListTile(title: Text('Žádné místo neodpovídá filtru.')),
+              ],
+            ),
+          );
+        },
       ),
     );
   }
@@ -1055,10 +1305,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     attributionButtonColor: Colors.transparent,
                     logoEnabled: false,
                     webPreserveDrawingBuffer: true,
-                    onMapLongClick: (_, p) => _setDestination(
-                      LatLng(p.latitude, p.longitude),
-                      '${p.latitude.toStringAsFixed(5)}, ${p.longitude.toStringAsFixed(5)}',
-                    ),
+                    onMapLongClick: (_, p) => _onLongPress(LatLng(p.latitude, p.longitude)),
                   ),
                 ),
               SafeArea(
@@ -1066,14 +1313,21 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     if (_navigating && route != null) _banner(route, nav) else _searchBar(),
-                    if (!_navigating && _results.isNotEmpty) _resultsList(),
+                    if (!_navigating && (_results.isNotEmpty || _savedResults.isNotEmpty)) _resultsList(),
+                    if (_pickGate)
+                      Container(
+                        margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(color: Lkw.amber, borderRadius: BorderRadius.circular(14)),
+                        child: const Text(
+                          'Dlouze podržte mapu na místě vjezdu / brány pro kamiony.',
+                          style: TextStyle(color: Colors.black, fontWeight: FontWeight.w800, fontSize: 16),
+                        ),
+                      ),
                     Expanded(
                       child: Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                                  const Spacer(),
-                          if (_navigating) _warningsColumn(route, nav),
-                        ],
+                        children: [const Spacer(), if (_navigating) _warningsColumn(route, nav)],
                       ),
                     ),
                   ],
@@ -1130,6 +1384,22 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                   bottom: panelH + 16 + bottomPad,
                   child: SpeedWidget(limit: limit, speedKmh: _speedKmh),
                 ),
+              if (_offline)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: panelH + 16 + bottomPad,
+                  child: Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                      decoration: BoxDecoration(color: Lkw.danger, borderRadius: BorderRadius.circular(20)),
+                      child: Text(
+                        route != null ? 'Bez připojení – vedu podle uložené trasy' : 'Bez připojení',
+                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                  ),
+                ),
               if (route != null) Positioned(left: 0, right: 0, bottom: 0, child: _bottomPanel(route)),
               if (_routing) const Center(child: CircularProgressIndicator()),
             ],
@@ -1179,6 +1449,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
 
   void _onSearchChanged(String q) {
     _searchDebounce?.cancel();
+    setState(() => _savedResults = _saved.search(q).take(5).toList());
     if (q.trim().length < 3) {
       if (_results.isNotEmpty) setState(() => _results = []);
       return;
@@ -1197,6 +1468,12 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         controller: _search,
         textInputAction: TextInputAction.search,
         onChanged: _onSearchChanged,
+        // Prázdné pole: nabídni uložená místa (firmy s vjezdem pro kamiony).
+        onTap: () {
+          if (_search.text.isEmpty && _saved.items.isNotEmpty) {
+            setState(() => _savedResults = _saved.items.take(8).toList());
+          }
+        },
         onSubmitted: (q) => _doSearch(q),
         style: const TextStyle(color: Lkw.text, fontSize: 17),
         cursorColor: Lkw.amber,
@@ -1214,6 +1491,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                   onPressed: () => setState(() {
                     _search.clear();
                     _results = [];
+                    _savedResults = [];
                   }),
                 ),
           border: InputBorder.none,
@@ -1237,10 +1515,35 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
           child: ListView.separated(
             shrinkWrap: true,
             padding: EdgeInsets.zero,
-            itemCount: _results.length,
+            itemCount: _savedResults.length + _results.length,
             separatorBuilder: (_, _) => const Divider(height: 1, color: Lkw.panelHi),
             itemBuilder: (_, i) {
-              final r = _results[i];
+              if (i < _savedResults.length) {
+                final sp = _savedResults[i];
+                return ListTile(
+                  leading: Icon(sp.gate != null ? Icons.local_shipping : Icons.star, color: Lkw.amber),
+                  title: Text(
+                    sp.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Lkw.text, fontWeight: FontWeight.w700),
+                  ),
+                  subtitle: Text(
+                    [if (sp.gate != null) 'vjezd pro kamiony', ?sp.note].join(' · ').ifEmpty('uložené místo'),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Lkw.muted),
+                  ),
+                  trailing: _pos == null
+                      ? null
+                      : Text(
+                          formatDistance(dist(_pos!, sp.target)),
+                          style: const TextStyle(color: Lkw.muted, fontSize: 13),
+                        ),
+                  onTap: () => _setDestination(sp.target, sp.name, saved: sp),
+                );
+              }
+              final r = _results[i - _savedResults.length];
               final sub = [
                 if (r.kind != null) r.kind!,
                 if (r.address != null && r.address != r.name) r.address!,
@@ -1314,10 +1617,27 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                             '${formatDistance(remainingM)} · příjezd $etaStr',
                             style: const TextStyle(fontSize: 17, color: Lkw.text),
                           ),
-                          if (_settings.delivery)
-                            const Text(
-                              'ZÁSOBOVÁNÍ',
-                              style: TextStyle(color: Lkw.amber, fontSize: 12, fontWeight: FontWeight.w800),
+                          if (_destSaved?.note != null && remainingM < 3000)
+                            Text(
+                              _destSaved!.note!,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Lkw.amber,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            )
+                          else
+                            Text(
+                              '${_settings.delivery ? 'ZÁSOBOVÁNÍ · ' : ''}${_settings.profile.summary}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: _settings.delivery ? Lkw.amber : Lkw.muted,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                              ),
                             ),
                         ],
                       ),
@@ -1339,16 +1659,47 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                             const Icon(Icons.flag, color: Lkw.amber, size: 20),
                             const SizedBox(width: 6),
                             Expanded(
-                              child: Text(
-                                _destName!,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  color: Lkw.text,
-                                  fontSize: 17,
-                                  fontWeight: FontWeight.w700,
-                                ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    _destName!,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      color: Lkw.text,
+                                      fontSize: 17,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                  if (_destSaved?.note != null)
+                                    Text(
+                                      _destSaved!.note!,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(color: Lkw.amber, fontSize: 13),
+                                    ),
+                                ],
                               ),
+                            ),
+                            IconButton(
+                              tooltip: 'Vjezd pro kamiony',
+                              icon: Icon(
+                                Icons.local_shipping,
+                                color: _destSaved?.gate != null ? Lkw.amber : Lkw.muted,
+                              ),
+                              onPressed: () {
+                                setState(() => _pickGate = true);
+                                _fitDestination();
+                              },
+                            ),
+                            IconButton(
+                              tooltip: _destSaved == null ? 'Uložit místo' : 'Upravit místo',
+                              icon: Icon(
+                                _destSaved == null ? Icons.star_border : Icons.star,
+                                color: Lkw.amber,
+                              ),
+                              onPressed: _saveCurrentDest,
                             ),
                           ],
                         ),
@@ -1363,6 +1714,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                               label: o.label,
                               route: o.route,
                               selected: i == _sel,
+                              base: _options.first.route,
                               onTap: () => _selectRoute(i),
                             ),
                         ],
@@ -1373,6 +1725,31 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                       spacing: 6,
                       runSpacing: 4,
                       children: [
+                        if (!kIsWeb)
+                          ActionChip(
+                            avatar: Icon(
+                              _dlProgress == 1 ? Icons.download_done : Icons.download,
+                              size: 18,
+                              color: Lkw.amber,
+                            ),
+                            label: Text(
+                              _dlProgress == null
+                                  ? 'Mapa offline'
+                                  : _dlProgress! >= 1
+                                  ? 'Staženo'
+                                  : 'Stahuji ${(_dlProgress! * 100).round()} %',
+                            ),
+                            visualDensity: VisualDensity.compact,
+                            onPressed: _dlProgress != null && _dlProgress! < 1
+                                ? null
+                                : () => _downloadRoute(route),
+                          ),
+                        ActionChip(
+                          avatar: const Icon(Icons.local_shipping, size: 18, color: Lkw.amber),
+                          label: Text(_settings.profile.summary),
+                          visualDensity: VisualDensity.compact,
+                          onPressed: _openProfile,
+                        ),
                         FilterChip(
                           avatar: const Icon(Icons.storefront, size: 18),
                           label: const Text('Zásobování'),
@@ -1443,4 +1820,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       ),
     ),
   );
+}
+
+extension on String {
+  String ifEmpty(String other) => isEmpty ? other : this;
 }

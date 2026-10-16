@@ -18,10 +18,7 @@ class Lkw {
   static const altCasing = '#4A535F';
 
   static ThemeData theme() {
-    final scheme = ColorScheme.fromSeed(
-      seedColor: amber,
-      brightness: Brightness.dark,
-    ).copyWith(
+    final scheme = ColorScheme.fromSeed(seedColor: amber, brightness: Brightness.dark).copyWith(
       primary: amber,
       onPrimary: Colors.black,
       secondary: amber,

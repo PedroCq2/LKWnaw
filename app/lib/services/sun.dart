@@ -6,13 +6,15 @@ double solarElevation(double lat, double lon, DateTime time) {
   final dayOfYear = t.difference(DateTime.utc(t.year, 1, 1)).inDays + 1;
   final hour = t.hour + t.minute / 60 + t.second / 3600;
   final g = 2 * math.pi / 365 * (dayOfYear - 1 + (hour - 12) / 24);
-  final eqTime = 229.18 *
+  final eqTime =
+      229.18 *
       (0.000075 +
           0.001868 * math.cos(g) -
           0.032077 * math.sin(g) -
           0.014615 * math.cos(2 * g) -
           0.040849 * math.sin(2 * g));
-  final decl = 0.006918 -
+  final decl =
+      0.006918 -
       0.399912 * math.cos(g) +
       0.070257 * math.sin(g) -
       0.006758 * math.cos(2 * g) +
