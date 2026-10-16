@@ -1,0 +1,23 @@
+# Vlastní Valhalla server s kamionovým routingem (OSM data ČR + DE).
+# Spuštění:  docker compose up -d   → API na http://<IP>:8002
+# První start stahuje a zpracovává mapy (desítky minut, několik GB).
+# V aplikaci pak v Profilu vozidla nastavte "Valhalla server" na http://<IP>:8002
+services:
+  valhalla:
+    image: ghcr.io/valhalla/valhalla-scripted:latest
+    container_name: valhalla
+    restart: unless-stopped
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./custom_files:/custom_files
+    environment:
+      # Více regionů oddělte čárkou (https://download.geofabrik.de/europe.html)
+      - tile_urls=https://download.geofabrik.de/europe/czech-republic-latest.osm.pbf https://download.geofabrik.de/europe/germany-latest.osm.pbf
+      - serve_tiles=True
+      - build_admins=True       # hranice států (pravidla, jízda vpravo…)
+      - build_time_zones=True   # časová omezení průjezdu
+      - build_elevation=False
+      - force_rebuild=False
+      - use_tiles_ignore_pbf=True
+      - server_threads=4
