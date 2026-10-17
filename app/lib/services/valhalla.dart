@@ -424,7 +424,10 @@ class ValhallaClient {
         '${r.shape.first.latitude.toStringAsFixed(3)},${r.shape.first.longitude.toStringAsFixed(3)}';
     return _entryInflight.putIfAbsent(
       key,
-      () => _findTownEntry(r).whenComplete(() => _entryInflight.remove(key)),
+      // Pozor: callback nesmí vrátit tuto future – čekala by sama na sebe.
+      () => _findTownEntry(r).whenComplete(() {
+        _entryInflight.remove(key);
+      }),
     );
   }
 

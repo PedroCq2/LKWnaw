@@ -61,11 +61,15 @@ def build(pbf, out):
           .with_filter(osmium.filter.TagFilter(('boundary', 'administrative'))))
     n = 0
     for o in fp:
-        if not o.is_area() or o.tags.get('admin_level') != '8':
+        if not o.is_area():
             continue
         name = o.tags.get('name')
-        if not name:
+        level = o.tags.get('admin_level')
+        # Obce = úroveň 8; Praha je zároveň kraj (úroveň 4) a jako obec v datech není.
+        if not name or not (level == '8' or (level == '4' and name in ('Praha', 'Hlavní město Praha'))):
             continue
+        if level == '4':
+            name = 'Praha'
         rings = []
         try:
             for outer in o.outer_rings():
