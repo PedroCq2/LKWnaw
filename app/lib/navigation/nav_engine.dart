@@ -46,7 +46,8 @@ class NavEngine {
   static const offRouteMeters = 60.0;
 
   /// [accuracy] = přesnost GPS (m); při horším signálu se práh sjetí zvětší.
-  NavState update(LatLng pos, {double accuracy = 10, DateTime? now}) {
+  /// [course] = směr jízdy z GPS (jen za jízdy) – jede-li vozidlo jinam než trasa, sjetí se pozná hned.
+  NavState update(LatLng pos, {double accuracy = 10, DateTime? now, double? course}) {
     final shape = route.shape;
     // Hledej nejdřív v okně kolem posledního segmentu, pak globálně.
     var best = _search(pos, math.max(0, _lastSegment - 5), math.min(shape.length - 1, _lastSegment + 300));
@@ -57,14 +58,30 @@ class NavEngine {
     final (seg, dist, t, snapped) = best;
     _lastSegment = seg;
     final limit = math.max(offRouteMeters, accuracy * 1.5);
+    final t0 = now ?? DateTime.now();
     if (dist > limit) {
       _offRouteCount++;
-      _offSince ??= now ?? DateTime.now();
+      _offSince ??= t0;
     } else {
       _offRouteCount = 0;
       _offSince = null;
     }
-    _lastNow = now ?? DateTime.now();
+    // Odbočil jinam: 30 m od trasy a jede jiným směrem než trasa (> 45°).
+    var diverging = false;
+    if (course != null && dist > math.max(30.0, accuracy) && seg + 1 < shape.length) {
+      var b = _bearing(shape[seg], shape[seg + 1]);
+      var diff = ((course - b) % 360 + 360) % 360;
+      if (diff > 180) diff = 360 - diff;
+      diverging = diff > 45;
+    }
+    if (diverging) {
+      _divergeCount++;
+      _divergeSince ??= t0;
+    } else {
+      _divergeCount = 0;
+      _divergeSince = null;
+    }
+    _lastNow = t0;
 
     final cum = route.cumulative;
     final segLen = seg + 1 < shape.length ? cum[seg + 1] - cum[seg] : 0.0;
@@ -97,11 +114,32 @@ class NavEngine {
 
   DateTime _lastNow = DateTime.now();
 
-  /// Sjetí z trasy: aspoň 4 polohy po sobě a 6 s mimo trasu (krátký výkyv GPS nestačí).
+  int _divergeCount = 0;
+  DateTime? _divergeSince;
+
+  /// Sjetí z trasy: jiným směrem než trasa 2 polohy / 1,5 s, jinak 3 polohy a 3 s mimo trasu
+  /// (krátký výkyv GPS nestačí).
   bool get isOffRoute =>
-      _offRouteCount >= 4 &&
-      _offSince != null &&
-      _lastNow.difference(_offSince!) >= const Duration(seconds: 6);
+      (_divergeCount >= 2 &&
+          _divergeSince != null &&
+          _lastNow.difference(_divergeSince!) >= const Duration(milliseconds: 1500)) ||
+      (_offRouteCount >= 3 &&
+          _offSince != null &&
+          _lastNow.difference(_offSince!) >= const Duration(seconds: 3));
+
+  /// Po přepočtu: počítat znovu od nuly.
+  void resetOffRoute() {
+    _offRouteCount = _divergeCount = 0;
+    _offSince = _divergeSince = null;
+  }
+
+  static double _bearing(LatLng a, LatLng b) {
+    final la1 = a.latitude * math.pi / 180, la2 = b.latitude * math.pi / 180;
+    final dl = (b.longitude - a.longitude) * math.pi / 180;
+    final y = math.sin(dl) * math.cos(la2);
+    final x = math.cos(la1) * math.sin(la2) - math.sin(la1) * math.cos(la2) * math.cos(dl);
+    return (math.atan2(y, x) * 180 / math.pi + 360) % 360;
+  }
 
   (int, double, double, LatLng) _search(LatLng p, int from, int to) {
     final shape = route.shape;

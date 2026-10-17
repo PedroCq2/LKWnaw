@@ -227,7 +227,11 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     }
 
     if (_engine != null) {
-      final nav = _engine!.update(pos, accuracy: accuracy);
+      final nav = _engine!.update(
+        pos,
+        accuracy: accuracy,
+        course: speed > 8 && heading != null ? heading : null,
+      );
       _nav = nav;
       if (_navigating) {
         _voiceGuidance(nav);
@@ -255,7 +259,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         if (_engine!.isOffRoute &&
             !_routing &&
             speed > 5 &&
-            DateTime.now().difference(_lastReroute) > Duration(seconds: _offline ? 30 : 10)) {
+            DateTime.now().difference(_lastReroute) > Duration(seconds: _offline ? 30 : 4)) {
           _lastReroute = DateTime.now();
           if (!_offline) _say('Přepočítávám trasu.');
           _computeRoute(reroute: true);

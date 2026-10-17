@@ -67,7 +67,8 @@ class OfflineSearch {
     for (var k = 0; k < rings; k++) {
       final n = bd.getInt32(o, Endian.little);
       o += 4;
-      var py = bd.getInt32(o + (n - 1) * 8, Endian.little), px = bd.getInt32(o + (n - 1) * 8 + 4, Endian.little);
+      var py = bd.getInt32(o + (n - 1) * 8, Endian.little),
+          px = bd.getInt32(o + (n - 1) * 8 + 4, Endian.little);
       for (var i = 0; i < n; i++) {
         final cy = bd.getInt32(o + i * 8, Endian.little), cx = bd.getInt32(o + i * 8 + 4, Endian.little);
         if ((cy > y) != (py > y) && x < (px - cx) * (y - cy) / (py - cy) + cx) inside = !inside;

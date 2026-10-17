@@ -126,7 +126,56 @@ class ValhallaClient {
     return out;
   }
 
+  /// Kamion se neotáčí: obsahuje-li trasa „Otočte se“, zkusit ji znovu s vyloučeným místem otočení
+  /// a vzít variantu bez otáčení, pokud není výrazně delší.
   Future<List<TruckRoute>> _request({
+    required LatLng from,
+    required LatLng to,
+    required TruckProfile profile,
+    double? heading,
+    bool delivery = false,
+    List<LatLng> exclude = const [],
+    int alternates = 0,
+    Map<String, dynamic> extra = const {},
+    List<LatLng> via = const [],
+  }) async {
+    final r = await _requestOnce(
+      from: from,
+      to: to,
+      profile: profile,
+      heading: heading,
+      delivery: delivery,
+      exclude: exclude,
+      alternates: alternates,
+      extra: extra,
+      via: via,
+    );
+    final first = r.first;
+    final uturns = [
+      for (var i = 0; i < first.maneuvers.length - 1; i++)
+        if (first.maneuvers[i].type == 12 || first.maneuvers[i].type == 13)
+          first.shape[first.maneuvers[i].beginShapeIndex.clamp(0, first.shape.length - 1)],
+    ];
+    if (uturns.isEmpty) return r;
+    try {
+      final r2 = await _requestOnce(
+        from: from,
+        to: to,
+        profile: profile,
+        heading: heading,
+        delivery: delivery,
+        exclude: [...exclude, ...uturns],
+        alternates: alternates,
+        extra: extra,
+        via: via,
+      );
+      final u2 = r2.first.maneuvers.where((m) => m.type == 12 || m.type == 13).length;
+      if (u2 < uturns.length && r2.first.lengthKm < first.lengthKm * 1.5 + 2) return r2;
+    } catch (_) {}
+    return r;
+  }
+
+  Future<List<TruckRoute>> _requestOnce({
     required LatLng from,
     required LatLng to,
     required TruckProfile profile,
@@ -181,22 +230,18 @@ class ValhallaClient {
         final a = pts[k], b = pts[k + 1];
         final head = k == 0 ? heading : null;
         final alt = legCount == 1 ? alternates : 0;
-        Map<String, dynamic>? leg;
-        try {
-          final ex = parseTrip(
-            (await raw(a, b, const [], exempt: true, head: head))['trip'] as Map<String, dynamic>,
-          );
-          final entry = await _townEntry(ex).timeout(const Duration(seconds: 8));
-          if (entry == null) {
-            // Celá etapa vede obcí vykládky.
-            leg = await raw(a, b, const [], exempt: true, head: head);
-            exemptWhole.add(k);
-          } else {
-            leg = await _reachable(raw, a, entry, head, alt);
-          }
-        } catch (_) {}
-        // Obec nejde zjistit / vjezd není dosažitelný: s plnou hmotností co nejblíž cíli.
-        leg ??= await _reachable(raw, a, b, head, alt) ?? await _closestReachable(raw, a, b, head);
+        // Menší zlo: 1) s plnou hmotností až do cíle (žádná výjimka), 2) s plnou hmotností co nejblíž
+        // cíli a s výjimkou jen nezbytný kousek, 3) teprve pak výjimka od vjezdu do obce vykládky.
+        var leg = await _reachable(raw, a, b, head, alt) ?? await _closestReachable(raw, a, b, head);
+        if (leg == null) {
+          try {
+            final ex = parseTrip(
+              (await raw(a, b, const [], exempt: true, head: head))['trip'] as Map<String, dynamic>,
+            );
+            final entry = await _townEntry(ex).timeout(const Duration(seconds: 8));
+            if (entry != null) leg = await _reachable(raw, a, entry, head, alt);
+          } catch (_) {}
+        }
         if (leg == null) {
           leg = await raw(a, b, const [], exempt: true, head: head);
           exemptWhole.add(k);
@@ -214,10 +259,35 @@ class ValhallaClient {
         if (shape.length < 2) continue;
         try {
           if (d(pts[k], shape.first) > 150) {
-            pre[k] = await raw(pts[k], shape.first, const [], exempt: true, head: k == 0 ? heading : null);
+            // Výjezd ze zóny u startu, pak dál s plnou hmotností – navazující směrem, bez otáčení.
+            final p = await raw(pts[k], shape.first, const [], exempt: true, head: k == 0 ? heading : null);
+            pre[k] = p;
+            final pShape = decodePolyline6(
+              (((p['trip'] as Map)['legs'] as List).last as Map)['shape'] as String,
+            );
+            final lastShape = decodePolyline6((legs.last as Map)['shape'] as String);
+            try {
+              fullLegs[k] = await raw(
+                shape.first,
+                lastShape.last,
+                const [],
+                exempt: false,
+                head: _endHeading(pShape),
+              );
+            } catch (_) {}
           }
-          final end = decodePolyline6((legs.last as Map)['shape'] as String).last;
-          if (d(end, pts[k + 1]) > 150) post[k] = await raw(end, pts[k + 1], const [], exempt: true);
+          final legsNow = ((fullLegs[k]['trip'] as Map)['legs'] as List);
+          final endShape = decodePolyline6((legsNow.last as Map)['shape'] as String);
+          if (d(endShape.last, pts[k + 1]) > 150) {
+            // Dojezd s výjimkou navazuje směrem jízdy – žádné „otočte se“ na spoji.
+            post[k] = await raw(
+              endShape.last,
+              pts[k + 1],
+              const [],
+              exempt: true,
+              head: _endHeading(endShape),
+            );
+          }
         } catch (_) {}
       }
 
@@ -303,6 +373,21 @@ class ValhallaClient {
     return r;
   }
 
+  /// Směr jízdy na konci tvaru trasy (stupně), pro navázání další části bez otáčení.
+  static double? _endHeading(List<LatLng> shape) {
+    if (shape.length < 2) return null;
+    const d = Distance();
+    // Poslední úsek delší než pár metrů (tvar končí často mikroskopickým kouskem).
+    final last = shape.last;
+    for (var j = shape.length - 2; j >= 0; j--) {
+      if (d(shape[j], last) > 15) {
+        final b = d.bearing(shape[j], last);
+        return b < 0 ? b + 360 : b;
+      }
+    }
+    return null;
+  }
+
   /// Spojí dvě trasy za sebou do jedné (bez pokynu „Dorazili jste“ / „Vyjeďte“ na spoji).
   static Map<String, dynamic> _joinTrips(Map<String, dynamic> a, Map<String, dynamic> b) {
     final la = [...(a['legs'] as List)], lb = [...(b['legs'] as List)];
@@ -358,6 +443,9 @@ class ValhallaClient {
   }
 
   /// Na trase s výjimkou najde místo nejblíž cíli, kam kamion s plnou hmotností dojede.
+  /// Zapamatované „nejbližší dosažitelné místo“ u cíle – přepočet za jízdy ho nehledá znovu.
+  static final _closestCache = <String, LatLng>{};
+
   static Future<Map<String, dynamic>?> _closestReachable(
     Future<Map<String, dynamic>> Function(
       LatLng,
@@ -372,6 +460,12 @@ class ValhallaClient {
     LatLng b,
     double? head,
   ) async {
+    final key = '${b.latitude.toStringAsFixed(4)},${b.longitude.toStringAsFixed(4)}';
+    final known = _closestCache[key];
+    if (known != null) {
+      final r = await _reachable(raw, a, known, head, 0);
+      if (r != null) return r;
+    }
     try {
       final ex = parseTrip(
         (await raw(a, b, const [], exempt: true, head: head))['trip'] as Map<String, dynamic>,
@@ -389,6 +483,7 @@ class ValhallaClient {
         if (r != null) {
           best = r;
           okBack = back;
+          _closestCache[key] = at(back);
           break;
         }
         failBack = back;
@@ -399,6 +494,7 @@ class ValhallaClient {
         if (r != null) {
           best = r;
           okBack = mid;
+          _closestCache[key] = at(mid);
         } else {
           failBack = mid;
         }
