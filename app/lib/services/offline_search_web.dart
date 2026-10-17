@@ -17,5 +17,9 @@ class OfflineSearch {
 
   String? nearestTown(Object p) => null;
 
+  bool get hasTownBorders => false;
+
+  String? townAt(Object p) => null;
+
   List<Place> search(String query, {int limit = 12}) => [];
 }

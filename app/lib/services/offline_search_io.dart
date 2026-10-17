@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:math' as math;
 
 import 'package:latlong2/latlong.dart';
@@ -27,9 +28,55 @@ class OfflineSearch {
       final p = path ?? (await file()).path;
       if (!File(p).existsSync()) return;
       _db = sqlite3.open(p, mode: OpenMode.readOnly);
+      _hasBorders = _db!.select("SELECT 1 FROM sqlite_master WHERE name = 'town_rtree'").isNotEmpty;
     } catch (_) {
       _db = null;
     }
+  }
+
+  bool _hasBorders = false;
+
+  /// Rejstřík obsahuje hranice obcí (novější balík).
+  bool get hasTownBorders => _db != null && _hasBorders;
+
+  /// Obec, ve které bod leží – podle hranic obcí z OSM (přesně, bez internetu).
+  String? townAt(LatLng p) {
+    final db = _db;
+    if (db == null || !_hasBorders) return null;
+    try {
+      final rows = db.select(
+        'SELECT t.name, t.rings FROM town_rtree r JOIN town t ON t.id = r.id '
+        'WHERE r.minlat <= ? AND r.maxlat >= ? AND r.minlon <= ? AND r.maxlon >= ?',
+        [p.latitude, p.latitude, p.longitude, p.longitude],
+      );
+      final y = (p.latitude * 1e5).round(), x = (p.longitude * 1e5).round();
+      for (final r in rows) {
+        if (_inside(r['rings'] as Uint8List, y, x)) return r['name'] as String;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Sudo-lichý test přes všechny kruhy (díry/enklávy se odečtou samy).
+  static bool _inside(Uint8List blob, int y, int x) {
+    final bd = ByteData.sublistView(blob);
+    var o = 0;
+    final rings = bd.getInt32(o, Endian.little);
+    o += 4;
+    var inside = false;
+    for (var k = 0; k < rings; k++) {
+      final n = bd.getInt32(o, Endian.little);
+      o += 4;
+      var py = bd.getInt32(o + (n - 1) * 8, Endian.little), px = bd.getInt32(o + (n - 1) * 8 + 4, Endian.little);
+      for (var i = 0; i < n; i++) {
+        final cy = bd.getInt32(o + i * 8, Endian.little), cx = bd.getInt32(o + i * 8 + 4, Endian.little);
+        if ((cy > y) != (py > y) && x < (px - cx) * (y - cy) / (py - cy) + cx) inside = !inside;
+        py = cy;
+        px = cx;
+      }
+      o += n * 8;
+    }
+    return inside;
   }
 
   List<(String, double, double, double)>? _towns; // jméno, lat, lon, váha (město > obec)

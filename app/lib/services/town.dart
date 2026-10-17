@@ -7,8 +7,8 @@ import 'http_headers.dart';
 import 'offline_search.dart';
 
 /// Obec, ve které leží bod (pro zásobování: výjimka platí v obci vykládky).
-/// Online Photon (správná obec i pro části jako Trnovany → Teplice), bez internetu nejbližší
-/// obec z rejstříku v telefonu. Zdroj se zvolí jednou, ať se jména obcí nemíchají.
+/// Přednostně hranice obcí z rejstříku v telefonu, jinak online Photon (Trnovany → Teplice),
+/// bez obojího nejbližší obec z rejstříku. Zdroj se zvolí jednou, ať se jména obcí nemíchají.
 class TownLookup {
   bool? _online;
   final _cache = <String, String?>{};
@@ -17,6 +17,9 @@ class TownLookup {
     final key = '${p.latitude.toStringAsFixed(4)},${p.longitude.toStringAsFixed(4)}';
     if (_cache.containsKey(key)) return _cache[key];
     String? town;
+    // Hranice obcí v rejstříku v telefonu: přesně, okamžitě a bez internetu.
+    final off = OfflineSearch.instance;
+    if (off.hasTownBorders) return _cache[key] = off.townAt(p) ?? '';
     if (_online != false) {
       town = await _photon(p);
       _online ??= town != null;
@@ -34,7 +37,7 @@ class TownLookup {
     }
     _running++;
     try {
-      for (var attempt = 0; attempt < 3; attempt++) {
+      for (var attempt = 0; attempt < 2; attempt++) {
         if (attempt > 0) await Future<void>.delayed(Duration(milliseconds: 400 * attempt));
         final r = await _photonOnce(p);
         if (r != null) return r.isEmpty ? null : r;
@@ -52,7 +55,7 @@ class TownLookup {
         'https://photon.komoot.io/reverse?lat=${p.latitude.toStringAsFixed(5)}'
         '&lon=${p.longitude.toStringAsFixed(5)}&limit=1',
       );
-      final res = await http.get(uri, headers: uaHeaders()).timeout(const Duration(seconds: 6));
+      final res = await http.get(uri, headers: uaHeaders()).timeout(const Duration(seconds: 4));
       if (res.statusCode != 200) return null;
       final f = (jsonDecode(utf8.decode(res.bodyBytes))['features'] as List);
       if (f.isEmpty) return '';

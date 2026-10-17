@@ -31,6 +31,7 @@ jobs:
         run: |
           pip install osmium
           python3 backend/search/build_search_db.py data/cz.osm.pbf search-cz.sqlite
+          python3 backend/search/build_towns.py data/cz.osm.pbf search-cz.sqlite
           gzip -6 -c search-cz.sqlite > search-cz.sqlite.gz
           rm search-cz.sqlite
           ls -la search-cz.sqlite.gz

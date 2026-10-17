@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
@@ -70,6 +71,14 @@ class ValhallaClient {
       // Valhalla počítá alternativy jen pro trasu bez zastávek.
       alternates: via.isEmpty ? 2 : 0,
     );
+    // Zásobování: výpočet je náročnější (obec vykládky) → jen hlavní trasa a její alternativy.
+    if (delivery) {
+      final out = <RouteOption>[];
+      for (final (i, r) in (await main).indexed) {
+        out.add(RouteOption(i == 0 ? 'Nejrychlejší' : 'Alternativa', r));
+      }
+      return out;
+    }
     final noToll = safe(
       _request(
         from: from,
@@ -128,6 +137,7 @@ class ValhallaClient {
     Map<String, dynamic> extra = const {},
     List<LatLng> via = const [],
   }) async {
+    DateTime? deadline; // zásobování: časový limit, ať výpočet nikdy neviset
     Future<Map<String, dynamic>> raw(
       LatLng a,
       LatLng b,
@@ -135,17 +145,21 @@ class ValhallaClient {
       required bool exempt,
       double? head,
       int alt = 0,
-    }) => _routeData(
-      from: a,
-      to: b,
-      via: mid,
-      profile: profile,
-      heading: head,
-      weightExempt: exempt,
-      exclude: exclude,
-      alternates: alt,
-      extra: extra,
-    );
+    }) async {
+      if (deadline != null && DateTime.now().isAfter(deadline)) throw TimeoutException('zásobování');
+      return _routeData(
+        from: a,
+        to: b,
+        via: mid,
+        profile: profile,
+        heading: head,
+        weightExempt: exempt,
+        exclude: exclude,
+        alternates: alt,
+        extra: extra,
+      );
+    }
+
     List<TruckRoute> parseAll(Map<String, dynamic> data) => [
       parseTrip(data['trip'] as Map<String, dynamic>),
       for (final a in (data['alternates'] as List? ?? const []))
@@ -153,111 +167,168 @@ class ValhallaClient {
     ];
     if (!delivery) return parseAll(await raw(from, to, via, exempt: false, head: heading, alt: alternates));
 
-    // Zásobování: výjimka z hmotnostních zákazů („mimo dopravní obsluhu“) platí jen v obci vykládky
-    // (např. Teplice), ne pro tranzit (zóna 12 t v Praze). Každá etapa: s plnou hmotností k vjezdu
-    // do obce cíle, odtud s výjimkou.
-    const d = Distance();
-    final pts = [from, ...via, to];
-    final legCount = pts.length - 1;
-    final fullLegs = <Map<String, dynamic>>[]; // etapy s plnou hmotností (do vjezdu do obce cíle)
-    final exemptWhole = <int>{}; // etapy celé s výjimkou (celé v obci cíle / jinak nelze)
-    List<dynamic> alternatesData = const [];
-    for (var k = 0; k < legCount; k++) {
-      final a = pts[k], b = pts[k + 1];
-      final head = k == 0 ? heading : null;
-      final alt = legCount == 1 ? alternates : 0;
-      Map<String, dynamic>? leg;
-      try {
-        final ex = parseTrip(
-          (await raw(a, b, const [], exempt: true, head: head))['trip'] as Map<String, dynamic>,
-        );
-        final entry = await _townEntry(ex);
-        if (entry == null) {
-          // Celá etapa vede obcí vykládky.
+    Future<List<TruckRoute>> deliveryRoutes() async {
+      // Zásobování: výjimka z hmotnostních zákazů („mimo dopravní obsluhu“) platí jen v obci vykládky
+      // (např. Teplice), ne pro tranzit (zóna 12 t v Praze). Každá etapa: s plnou hmotností k vjezdu
+      // do obce cíle, odtud s výjimkou.
+      const d = Distance();
+      final pts = [from, ...via, to];
+      final legCount = pts.length - 1;
+      final fullLegs = <Map<String, dynamic>>[]; // etapy s plnou hmotností (do vjezdu do obce cíle)
+      final exemptWhole = <int>{}; // etapy celé s výjimkou (celé v obci cíle / jinak nelze)
+      List<dynamic> alternatesData = const [];
+      for (var k = 0; k < legCount; k++) {
+        final a = pts[k], b = pts[k + 1];
+        final head = k == 0 ? heading : null;
+        final alt = legCount == 1 ? alternates : 0;
+        Map<String, dynamic>? leg;
+        try {
+          final ex = parseTrip(
+            (await raw(a, b, const [], exempt: true, head: head))['trip'] as Map<String, dynamic>,
+          );
+          final entry = await _townEntry(ex).timeout(const Duration(seconds: 8));
+          if (entry == null) {
+            // Celá etapa vede obcí vykládky.
+            leg = await raw(a, b, const [], exempt: true, head: head);
+            exemptWhole.add(k);
+          } else {
+            leg = await _reachable(raw, a, entry, head, alt);
+          }
+        } catch (_) {}
+        // Obec nejde zjistit / vjezd není dosažitelný: s plnou hmotností co nejblíž cíli.
+        leg ??= await _reachable(raw, a, b, head, alt) ?? await _closestReachable(raw, a, b, head);
+        if (leg == null) {
           leg = await raw(a, b, const [], exempt: true, head: head);
           exemptWhole.add(k);
-        } else {
-          leg = await _reachable(raw, a, entry, head, alt);
         }
-      } catch (_) {}
-      // Obec nejde zjistit / vjezd není dosažitelný: s plnou hmotností co nejblíž cíli.
-      leg ??= await _reachable(raw, a, b, head, alt) ?? await _closestReachable(raw, a, b, head);
-      if (leg == null) {
-        leg = await raw(a, b, const [], exempt: true, head: head);
-        exemptWhole.add(k);
+        if (legCount == 1) alternatesData = (leg['alternates'] as List?) ?? const [];
+        fullLegs.add(leg);
       }
-      if (legCount == 1) alternatesData = (leg['alternates'] as List?) ?? const [];
-      fullLegs.add(leg);
-    }
 
-    // Výjezd ze zóny u startu (start přichycen jinam) a dojezd od vjezdu do obce k cíli – s výjimkou.
-    final pre = <int, Map<String, dynamic>>{}, post = <int, Map<String, dynamic>>{};
-    for (var k = 0; k < legCount; k++) {
-      if (exemptWhole.contains(k)) continue;
-      final legs = ((fullLegs[k]['trip'] as Map)['legs'] as List);
-      final shape = decodePolyline6((legs.first as Map)['shape'] as String);
-      if (shape.length < 2) continue;
-      try {
-        if (d(pts[k], shape.first) > 150) {
-          pre[k] = await raw(pts[k], shape.first, const [], exempt: true, head: k == 0 ? heading : null);
-        }
-        final end = decodePolyline6((legs.last as Map)['shape'] as String).last;
-        if (d(end, pts[k + 1]) > 150) post[k] = await raw(end, pts[k + 1], const [], exempt: true);
-      } catch (_) {}
-    }
-
-    Map<String, dynamic> stitch(List<Map<String, dynamic>> legTrips) {
-      final out = <Map<String, dynamic>>[];
-      var length = 0.0, time = 0.0, exemptKm = 0.0;
-      var toll = false, highway = false;
-      for (var k = 0; k < legTrips.length; k++) {
-        final parts = <(Map<String, dynamic>, bool)>[
-          if (pre[k] case final p?)
-            (((p['trip'] as Map)['legs'] as List).first as Map<String, dynamic>, true),
-          for (final l in (legTrips[k]['legs'] as List)) (l as Map<String, dynamic>, exemptWhole.contains(k)),
-          if (post[k] case final p?)
-            (((p['trip'] as Map)['legs'] as List).first as Map<String, dynamic>, true),
-        ];
-        for (var i = 0; i < parts.length; i++) {
-          final (leg, exempt) = parts[i];
-          final ms = [...(leg['maneuvers'] as List)];
-          // Napojení částí: bez „Dorazili jste“ / „Vyjeďte“ uprostřed etapy.
-          if (i < parts.length - 1 && ms.length > 1) ms.removeLast();
-          if (i > 0 && ms.length > 1) ms.removeAt(0);
-          out.add({...leg, 'maneuvers': ms});
-          final sm = (leg['summary'] as Map?) ?? const {};
-          final len = (sm['length'] as num?)?.toDouble() ?? 0;
-          length += len;
-          time += (sm['time'] as num?)?.toDouble() ?? 0;
-          if (exempt) exemptKm += len;
-          toll |= sm['has_toll'] == true;
-          highway |= sm['has_highway'] == true;
-        }
+      // Výjezd ze zóny u startu (start přichycen jinam) a dojezd od vjezdu do obce k cíli – s výjimkou.
+      final pre = <int, Map<String, dynamic>>{}, post = <int, Map<String, dynamic>>{};
+      for (var k = 0; k < legCount; k++) {
+        if (exemptWhole.contains(k)) continue;
+        final legs = ((fullLegs[k]['trip'] as Map)['legs'] as List);
+        final shape = decodePolyline6((legs.first as Map)['shape'] as String);
+        if (shape.length < 2) continue;
+        try {
+          if (d(pts[k], shape.first) > 150) {
+            pre[k] = await raw(pts[k], shape.first, const [], exempt: true, head: k == 0 ? heading : null);
+          }
+          final end = decodePolyline6((legs.last as Map)['shape'] as String).last;
+          if (d(end, pts[k + 1]) > 150) post[k] = await raw(end, pts[k + 1], const [], exempt: true);
+        } catch (_) {}
       }
-      return {
-        ...legTrips.first,
-        'legs': out,
-        'summary': {
-          ...?(legTrips.first['summary'] as Map?)?.cast<String, dynamic>(),
-          'length': length,
-          'time': time,
-          'has_toll': toll,
-          'has_highway': highway,
-        },
-        '_exemptKm': exemptKm,
-      };
+
+      Map<String, dynamic> stitch(List<Map<String, dynamic>> legTrips) {
+        final out = <Map<String, dynamic>>[];
+        var length = 0.0, time = 0.0, exemptKm = 0.0;
+        var toll = false, highway = false;
+        for (var k = 0; k < legTrips.length; k++) {
+          final parts = <(Map<String, dynamic>, bool)>[
+            if (pre[k] case final p?)
+              (((p['trip'] as Map)['legs'] as List).first as Map<String, dynamic>, true),
+            for (final l in (legTrips[k]['legs'] as List))
+              (l as Map<String, dynamic>, exemptWhole.contains(k)),
+            if (post[k] case final p?)
+              (((p['trip'] as Map)['legs'] as List).first as Map<String, dynamic>, true),
+          ];
+          for (var i = 0; i < parts.length; i++) {
+            final (leg, exempt) = parts[i];
+            final ms = [...(leg['maneuvers'] as List)];
+            // Napojení částí: bez „Dorazili jste“ / „Vyjeďte“ uprostřed etapy.
+            if (i < parts.length - 1 && ms.length > 1) ms.removeLast();
+            if (i > 0 && ms.length > 1) ms.removeAt(0);
+            out.add({...leg, 'maneuvers': ms});
+            final sm = (leg['summary'] as Map?) ?? const {};
+            final len = (sm['length'] as num?)?.toDouble() ?? 0;
+            length += len;
+            time += (sm['time'] as num?)?.toDouble() ?? 0;
+            if (exempt) exemptKm += len;
+            toll |= sm['has_toll'] == true;
+            highway |= sm['has_highway'] == true;
+          }
+        }
+        return {
+          ...legTrips.first,
+          'legs': out,
+          'summary': {
+            ...?(legTrips.first['summary'] as Map?)?.cast<String, dynamic>(),
+            'length': length,
+            'time': time,
+            'has_toll': toll,
+            'has_highway': highway,
+          },
+          '_exemptKm': exemptKm,
+        };
+      }
+
+      TruckRoute build(List<Map<String, dynamic>> legTrips) {
+        final st = stitch(legTrips);
+        return parseTrip(st)..deliveryKm = (st['_exemptKm'] as num).toDouble();
+      }
+
+      final mainTrips = [for (final l in fullLegs) l['trip'] as Map<String, dynamic>];
+      return [
+        build(mainTrips),
+        for (final a in alternatesData) build([(a as Map)['trip'] as Map<String, dynamic>]),
+      ];
     }
 
-    TruckRoute build(List<Map<String, dynamic>> legTrips) {
-      final st = stitch(legTrips);
-      return parseTrip(st)..deliveryKm = (st['_exemptKm'] as num).toDouble();
+    // Bez nekonečného čekání: když hledání obce / dosažitelných míst trvá moc dlouho,
+    // jednodušší výpočet – plná hmotnost a s výjimkou jen dojezd od přichyceného místa k cíli.
+    deadline = DateTime.now().add(const Duration(seconds: 15));
+    try {
+      return await deliveryRoutes();
+    } on TimeoutException {
+      deadline = null;
+    }
+    const d = Distance();
+    try {
+      final full = await raw(from, to, via, exempt: false, head: heading);
+      final r = parseAll(full);
+      final end = r.first.shape.last;
+      if (via.isNotEmpty || d(end, to) < 150) return r;
+      final postTrip = (await raw(end, to, const [], exempt: true))['trip'] as Map<String, dynamic>;
+      final postKm = ((postTrip['summary'] as Map)['length'] as num).toDouble();
+      if (postKm < 15) {
+        return [parseTrip(_joinTrips(full['trip'] as Map<String, dynamic>, postTrip))..deliveryKm = postKm];
+      }
+    } catch (_) {}
+    final r = parseAll(await raw(from, to, via, exempt: true, head: heading));
+    for (final x in r) {
+      x.deliveryKm = x.lengthKm;
+    }
+    return r;
+  }
+
+  /// Spojí dvě trasy za sebou do jedné (bez pokynu „Dorazili jste“ / „Vyjeďte“ na spoji).
+  static Map<String, dynamic> _joinTrips(Map<String, dynamic> a, Map<String, dynamic> b) {
+    final la = [...(a['legs'] as List)], lb = [...(b['legs'] as List)];
+    Map<String, dynamic> trim(Object leg, {bool last = false, bool first = false}) {
+      final m = Map<String, dynamic>.from(leg as Map);
+      final ms = [...(m['maneuvers'] as List)];
+      if (last && ms.length > 1) ms.removeLast();
+      if (first && ms.length > 1) ms.removeAt(0);
+      return {...m, 'maneuvers': ms};
     }
 
-    final mainTrips = [for (final l in fullLegs) l['trip'] as Map<String, dynamic>];
-    return [
-      build(mainTrips),
-      for (final a in alternatesData) build([(a as Map)['trip'] as Map<String, dynamic>]),
-    ];
+    la[la.length - 1] = trim(la.last, last: true);
+    lb[0] = trim(lb.first, first: true);
+    final sa = (a['summary'] as Map).cast<String, dynamic>(),
+        sb = (b['summary'] as Map).cast<String, dynamic>();
+    return {
+      ...a,
+      'legs': [...la, ...lb],
+      'summary': {
+        ...sa,
+        'length': (sa['length'] as num) + (sb['length'] as num),
+        'time': (sa['time'] as num) + (sb['time'] as num),
+        'has_toll': sa['has_toll'] == true || sb['has_toll'] == true,
+        'has_highway': sa['has_highway'] == true || sb['has_highway'] == true,
+      },
+    };
   }
 
   /// Trasa s plnou hmotností z [a] do [b], jen pokud opravdu dojede k [b] (ne k přichycenému bodu jinde).
@@ -379,7 +450,7 @@ class ValhallaClient {
     final backs = [for (var b = 400.0; b < cum.last; b *= 2) b];
     final res = await Future.wait([towns.at(dest), towns.at(start), for (final b in backs) towns.at(at(b))]);
     final town = res[0];
-    if (town == null) throw StateError('obec cíle neznámá');
+    if (town == null || town.isEmpty) throw StateError('obec cíle neznámá');
     double inside = 0, outside = cum.last;
     var found = false;
     for (var i = 0; i < backs.length; i++) {

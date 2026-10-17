@@ -959,7 +959,21 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
           ? [
               RouteOption(
                 'Trasa',
-                await client.route(
+                await client
+                    .route(
+                      from: from,
+                      to: to,
+                      profile: _settings.profile,
+                      heading: heading,
+                      delivery: _settings.delivery,
+                      exclude: _excluded,
+                      via: [for (final st in _stops) st.$1],
+                    )
+                    .timeout(const Duration(seconds: 45)),
+              ),
+            ]
+          : await client
+                .routeOptions(
                   from: from,
                   to: to,
                   profile: _settings.profile,
@@ -967,18 +981,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                   delivery: _settings.delivery,
                   exclude: _excluded,
                   via: [for (final st in _stops) st.$1],
-                ),
-              ),
-            ]
-          : await client.routeOptions(
-              from: from,
-              to: to,
-              profile: _settings.profile,
-              heading: heading,
-              delivery: _settings.delivery,
-              exclude: _excluded,
-              via: [for (final st in _stops) st.$1],
-            );
+                )
+                .timeout(const Duration(seconds: 45));
       if (!mounted || opts.isEmpty) return;
       _offline = false;
       _options = opts;
@@ -996,6 +1000,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       } else {
         _toast(e.message);
       }
+    } on TimeoutException {
+      _toast('Výpočet trasy trvá moc dlouho – zkuste to znovu (nebo vypněte zásobování).');
     } catch (e) {
       _toast('Chyba výpočtu trasy: $e');
     } finally {
