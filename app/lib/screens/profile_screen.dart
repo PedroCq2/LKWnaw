@@ -168,8 +168,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
             SwitchListTile(
               title: const Text('Zásobování (dopravní obsluha)'),
               subtitle: const Text(
-                'Povolí vjezd do zón se zákazem nad X t (např. k obchodu). '
-                'Výška, šířka, délka, náprava a mosty se hlídají dál.',
+                'Povolí vjezd do zóny se zákazem nad X t jen v místě vykládky (např. k obchodu), '
+                'ne tranzit přes zónu. Výška, šířka, délka, náprava a mosty se hlídají dál.',
               ),
               value: _delivery,
               onChanged: (v) => setState(() => _delivery = v),

@@ -160,6 +160,9 @@ class TruckRoute {
   List<EdgeAttr> edges = const [];
   List<HighwayService> services = const []; // služby u dálnice podél trasy
 
+  /// Zásobování: kolik km trasy jede s výjimkou z hmotnostních zákazů (jen dojezd k cíli / výjezd od startu).
+  double deliveryKm = 0;
+
   /// Začátky sjezdů, které vedou na jinou dálnici (OSM `destination:ref` = D…) –
   /// jen tam je dálniční křižovatka a hlásí se „Pokračujte rovně“.
   List<(LatLng, String)> interchangeLinks = const [];

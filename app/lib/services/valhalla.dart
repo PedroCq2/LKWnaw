@@ -127,6 +127,177 @@ class ValhallaClient {
     Map<String, dynamic> extra = const {},
     List<LatLng> via = const [],
   }) async {
+    Future<Map<String, dynamic>> raw(
+      LatLng a,
+      LatLng b,
+      List<LatLng> mid, {
+      required bool exempt,
+      double? head,
+      int alt = 0,
+    }) => _routeData(
+      from: a,
+      to: b,
+      via: mid,
+      profile: profile,
+      heading: head,
+      weightExempt: exempt,
+      exclude: exclude,
+      alternates: alt,
+      extra: extra,
+    );
+    List<TruckRoute> parseAll(Map<String, dynamic> data) => [
+      parseTrip(data['trip'] as Map<String, dynamic>),
+      for (final a in (data['alternates'] as List? ?? const []))
+        parseTrip((a as Map)['trip'] as Map<String, dynamic>),
+    ];
+    if (!delivery) return parseAll(await raw(from, to, via, exempt: false, head: heading, alt: alternates));
+
+    // Zásobování: výjimka z hmotnostních zákazů („mimo dopravní obsluhu“) platí jen v oblasti cíle,
+    // ne pro tranzit (např. zóna 12 t v Praze). Proto trasa s plnou hmotností – Valhalla cíl uvnitř
+    // zóny přichytí na nejbližší dosažitelné místo – a jen dojezd odtud do cíle (a výjezd ze zóny
+    // u startu) s výjimkou.
+    const d = Distance();
+    Map<String, dynamic>? full;
+    try {
+      full = await raw(from, to, via, exempt: false, head: heading, alt: alternates);
+    } catch (_) {}
+    // S plnou hmotností do cíle nic nevede (cíl uvnitř zóny): najít na trase s výjimkou poslední místo,
+    // kam kamion smí – výjimka pak platí jen odtud do cíle.
+    if (full == null && via.isEmpty) {
+      try {
+        final a = parseTrip(
+          (await raw(from, to, const [], exempt: true, head: heading))['trip'] as Map<String, dynamic>,
+        );
+        final cum = a.cumulative;
+        LatLng at(double back) {
+          final target = cum.last - back;
+          final i = cum.indexWhere((c) => c >= target);
+          return a.shape[i < 0 ? 0 : i];
+        }
+
+        Future<Map<String, dynamic>?> reach(double back) async {
+          final m = at(back);
+          try {
+            final r = await raw(from, m, const [], exempt: false, head: heading);
+            final legs = ((r['trip'] as Map)['legs'] as List);
+            final end = decodePolyline6((legs.last as Map)['shape'] as String).last;
+            return d(end, m) < 150 ? r : null;
+          } catch (_) {
+            return null;
+          }
+        }
+
+        double? okBack, failBack = 0;
+        for (var back = 500.0; back < cum.last * 0.95; back *= 2) {
+          final r = await reach(back);
+          if (r != null) {
+            full = r;
+            okBack = back;
+            break;
+          }
+          failBack = back;
+        }
+        // Zpřesnit: co nejblíž cíli.
+        for (var i = 0; okBack != null && failBack != null && i < 3; i++) {
+          final mid = (okBack + failBack) / 2;
+          final r = await reach(mid);
+          if (r != null) {
+            full = r;
+            okBack = mid;
+          } else {
+            failBack = mid;
+          }
+        }
+      } catch (_) {}
+    }
+    if (full == null) {
+      final r = parseAll(await raw(from, to, via, exempt: true, head: heading, alt: alternates));
+      for (final x in r) {
+        x.deliveryKm = x.lengthKm;
+      }
+      return r;
+    }
+    final pts = [from, ...via, to];
+    final legs = ((full['trip'] as Map)['legs'] as List).cast<Map<String, dynamic>>();
+    final pre = <int, Map<String, dynamic>>{}, post = <int, Map<String, dynamic>>{};
+    for (var k = 0; k < legs.length && k + 1 < pts.length; k++) {
+      final shape = decodePolyline6(legs[k]['shape'] as String);
+      if (shape.length < 2) continue;
+      try {
+        if (d(pts[k], shape.first) > 150) {
+          final r = await raw(pts[k], shape.first, const [], exempt: true, head: k == 0 ? heading : null);
+          pre[k] = r;
+        }
+        if (d(shape.last, pts[k + 1]) > 150) {
+          post[k] = await raw(shape.last, pts[k + 1], const [], exempt: true);
+        }
+      } catch (_) {}
+    }
+    if (pre.isEmpty && post.isEmpty) return parseAll(full);
+    Map<String, dynamic> stitch(Map<String, dynamic> trip) {
+      final out = <Map<String, dynamic>>[];
+      var length = 0.0, time = 0.0, exemptKm = 0.0;
+      var toll = trip['summary']?['has_toll'] == true, highway = trip['summary']?['has_highway'] == true;
+      final tl = (trip['legs'] as List).cast<Map<String, dynamic>>();
+      for (var k = 0; k < tl.length; k++) {
+        final parts = <(Map<String, dynamic>, bool)>[
+          if (pre[k] case final p?)
+            (((p['trip'] as Map)['legs'] as List).first as Map<String, dynamic>, true),
+          (tl[k], false),
+          if (post[k] case final p?)
+            (((p['trip'] as Map)['legs'] as List).first as Map<String, dynamic>, true),
+        ];
+        for (var i = 0; i < parts.length; i++) {
+          final (leg, exempt) = parts[i];
+          final ms = [...(leg['maneuvers'] as List)];
+          // Napojení částí: bez „Dorazili jste“ / „Vyjeďte“ uprostřed trasy.
+          if (i < parts.length - 1 && ms.length > 1) ms.removeLast();
+          if (i > 0 && ms.length > 1) ms.removeAt(0);
+          out.add({...leg, 'maneuvers': ms});
+          final sm = (leg['summary'] as Map?) ?? const {};
+          final len = (sm['length'] as num?)?.toDouble() ?? 0;
+          length += len;
+          time += (sm['time'] as num?)?.toDouble() ?? 0;
+          if (exempt) exemptKm += len;
+          toll |= sm['has_toll'] == true;
+          highway |= sm['has_highway'] == true;
+        }
+      }
+      return {
+        ...trip,
+        'legs': out,
+        'summary': {
+          ...?(trip['summary'] as Map?)?.cast<String, dynamic>(),
+          'length': length,
+          'time': time,
+          'has_toll': toll,
+          'has_highway': highway,
+        },
+        '_exemptKm': exemptKm,
+      };
+    }
+
+    final trips = [
+      full['trip'] as Map<String, dynamic>,
+      for (final a in (full['alternates'] as List? ?? const [])) (a as Map)['trip'] as Map<String, dynamic>,
+    ];
+    return [
+      for (final t in trips)
+        if (stitch(t) case final st) parseTrip(st)..deliveryKm = (st['_exemptKm'] as num).toDouble(),
+    ];
+  }
+
+  Future<Map<String, dynamic>> _routeData({
+    required LatLng from,
+    required LatLng to,
+    required TruckProfile profile,
+    double? heading,
+    bool weightExempt = false,
+    List<LatLng> exclude = const [],
+    int alternates = 0,
+    Map<String, dynamic> extra = const {},
+    List<LatLng> via = const [],
+  }) async {
     final origin = <String, dynamic>{'lat': from.latitude, 'lon': from.longitude};
     if (heading != null && heading >= 0) {
       origin['heading'] = heading.round();
@@ -140,7 +311,7 @@ class ValhallaClient {
       ],
       'costing': 'truck',
       'costing_options': {
-        'truck': {...profile.toValhallaCosting(delivery: delivery), ...extra},
+        'truck': {...profile.toValhallaCosting(delivery: weightExempt), ...extra},
       },
       if (alternates > 0) 'alternates': alternates,
       if (exclude.isNotEmpty)
@@ -151,12 +322,7 @@ class ValhallaClient {
       'units': 'kilometers',
       'directions_options': {'units': 'kilometers', 'language': 'cs-CZ'},
     };
-    final data = await _call('route', body);
-    return [
-      parseTrip(data['trip'] as Map<String, dynamic>),
-      for (final a in (data['alternates'] as List? ?? const []))
-        parseTrip((a as Map)['trip'] as Map<String, dynamic>),
-    ];
+    return _call('route', body);
   }
 
   /// Dotaz na Valhallu: v telefonu (stažený balík ČR), jinak na server.
