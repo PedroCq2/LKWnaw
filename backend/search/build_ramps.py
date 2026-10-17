@@ -83,8 +83,11 @@ class H(osmium.SimpleHandler):
     def __init__(self):
         super().__init__()
         self.docks = defaultdict(list)    # cell -> [(lat, lon, kind)]
-        self.parking = defaultdict(list)  # cell -> [(lat, lon)]
-        self.service = defaultdict(list)  # cell -> [(lat, lon, cat)]  cat 0 běžná, 1 zásobování
+        self.parking = defaultdict(list)  # cell -> [(lat, lon)]   (body i těžiště ploch)
+        self.park_rings = defaultdict(list)  # cell -> [ring]
+        self.service = defaultdict(list)  # cell -> [(lat, lon, cat)]  cat 0 běžná, 1 zásobování, 2 soukromá
+        self.ends = defaultdict(list)     # cell -> [(lat, lon, node_id, cat)] konce obslužných cest
+        self.end_count = defaultdict(int)  # node_id -> kolik obslužných cest v něm začíná/končí/prochází
         self.buildings = []               # (ring)
 
     def node(self, n):
@@ -113,6 +116,9 @@ class H(osmium.SimpleHandler):
         if park:
             c = centroid(pts)
             self.parking[cell(*c)].append(c)
+            if len(pts) >= 4 and pts[0] == pts[-1]:
+                for cc in {cell(*p) for p in pts}:
+                    self.park_rings[cc].append(pts)
         elif hw == 'service':
             sv = t.get('service')
             if sv in ('parking_aisle', 'drive-through', 'emergency_access'):
@@ -120,8 +126,15 @@ class H(osmium.SimpleHandler):
             cat = 1 if (sv in ('delivery', 'loading') or t.get('access') == 'delivery'
                         or t.get('motor_vehicle') == 'delivery'
                         or t.get('hgv') in ('delivery', 'destination', 'designated')) else 0
+            if cat == 0 and t.get('access') in ('private', 'no', 'customers'):
+                cat = 2
             for p in pts:
                 self.service[cell(*p)].append((p[0], p[1], cat))
+            ids = [n.ref for n in w.nodes]
+            for nid in ids:
+                self.end_count[nid] += 1
+            for i in (0, len(ids) - 1):
+                self.ends[cell(*pts[i])].append((pts[i][0], pts[i][1], ids[i], cat))
         elif b and len(pts) >= 4 and pts[0] == pts[-1]:
             a = area_m2(pts)
             if a >= 1500 or (a >= 800 and b in BIG_KINDS):
@@ -150,24 +163,42 @@ def pick(h, ring):
         p = min(deliv, key=lambda p: dist_ring(ring, p[0], p[1]))
         return p[0], p[1], 3, 1
     # 3) Odhad: obslužná cesta za budovou (od nejbližšího parkoviště).
-    serv = [p for p in serv if dist_ring(ring, p[0], p[1]) < 45]
-    parks = sorted(around(h.parking, *c), key=lambda p: dist(p, c))
-    if not serv or not parks or dist(parks[0], c) > 250:
-        return None
-    k = math.cos(math.radians(c[0]))
-    vx, vy = (c[1] - parks[0][1]) * k, c[0] - parks[0][0]
-    n = math.hypot(vx, vy)
-    if n == 0:
-        return None
-    vx, vy = vx / n, vy / n
+    # 3) Odhad. Rampa nebývá na parkovišti: body na parkovišti / u něj se vyloučí.
+    rings = list({id(r): r for r in around(h.park_rings, *c)}.values())
+    parks = list(around(h.parking, *c))
+
+    def park_dist(p):
+        best = min((dist_ring(r, p[0], p[1]) for r in rings), default=1e9)
+        if parks:
+            best = min(best, min(dist(q, p) for q in parks) - 25)  # parkoviště jen jako bod: ~25 m
+        return best
+
     best, bp = -1e18, None
+    # a) slepé obslužné cesty končící u zdi budovy (typická rampa / zásobovací dvůr)
+    for e in around(h.ends, *c):
+        if h.end_count[e[2]] != 1:
+            continue
+        dr = dist_ring(ring, e[0], e[1])
+        if dr > 30:
+            continue
+        pd = park_dist(e)
+        if pd < 12:
+            continue
+        score = 60 + (25 if e[3] else 0) + min(pd, 80) - dr
+        if score > best:
+            best, bp = score, e
+    # b) obslužná cesta podél budovy, co nejdál od parkoviště
     for p in serv:
-        px, py = (p[1] - c[1]) * k, p[0] - c[0]
-        behind = (px * vx + py * vy) * 111000
-        score = behind - dist_ring(ring, p[0], p[1]) * 0.5
+        dr = dist_ring(ring, p[0], p[1])
+        if dr > 25:
+            continue
+        pd = park_dist(p)
+        if pd < 15:
+            continue
+        score = (15 if p[2] else 0) + min(pd, 80) - dr
         if score > best:
             best, bp = score, p
-    if bp is None or best <= 5:
+    if bp is None or best < 25:
         return None
     return bp[0], bp[1], 4, 0
 
