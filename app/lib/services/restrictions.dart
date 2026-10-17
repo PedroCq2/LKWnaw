@@ -149,7 +149,19 @@ List<RouteWarning> _fromTags(Map<String, dynamic> tags, double at, LatLng p, Tru
     var violates = truckValue > v + 1e-6;
     // Zásobování: zóny se zákazem nad X t jsou pro dopravní obsluhu průjezdné, mosty ne.
     if (delivery && type == WarningType.weight && !bridge) violates = false;
-    out.add(RouteWarning(type: type, value: v, atMeters: at, point: p, violates: violates, onBridge: bridge));
+    final margin = type == WarningType.weight || type == WarningType.axleLoad ? 1.0 : 0.3;
+    final tight = !violates && v - truckValue < margin;
+    out.add(
+      RouteWarning(
+        type: type,
+        value: v,
+        atMeters: at,
+        point: p,
+        violates: violates,
+        tight: tight,
+        onBridge: bridge,
+      ),
+    );
   }
 
   add('maxheight', WarningType.height, parseMeters, t.height);

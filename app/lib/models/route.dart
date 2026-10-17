@@ -245,6 +245,12 @@ class RouteWarning {
   final double atMeters; // vzdálenost od začátku trasy
   final LatLng point;
   final bool violates; // vozidlo limit překračuje
+  final bool tight; // vozidlo projede, ale s malou rezervou (výška/šířka < 30 cm, hmotnost < 1 t)
+
+  /// Stojí za zobrazení řidiči: radar, zákaz předjíždění, překročený nebo těsný limit.
+  /// (Např. „4,8 m“ po celé D8 přes tunely kamion 4 m nijak neomezuje – neukazovat.)
+  bool get relevant =>
+      violates || tight || type == WarningType.speedCamera || type == WarningType.noOvertakingHgv;
   final bool onBridge; // omezení je na mostě (fyzická nosnost)
 
   /// Doplňující text (např. časové omezení „6–22 h“).
@@ -257,6 +263,7 @@ class RouteWarning {
     required this.atMeters,
     required this.point,
     required this.violates,
+    this.tight = false,
     this.onBridge = false,
   });
 

@@ -699,7 +699,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         'warn',
         _points([
           for (final w in r?.warnings ?? const <RouteWarning>[])
-            if (w.type != WarningType.noOvertakingHgv)
+            if (w.type != WarningType.noOvertakingHgv && w.relevant)
               (
                 w.point,
                 {
@@ -1682,6 +1682,80 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     );
   }
 
+  /// Nabídka (hamburger): na mapě zůstane jen okénko služeb, nabídka a „moje poloha“.
+  void _openMenu() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Lkw.panel,
+      isScrollControlled: true,
+      builder: (ctx) {
+        Widget item(IconData icon, String title, VoidCallback onTap, {String? subtitle}) => ListTile(
+          leading: Icon(icon, color: Lkw.amber),
+          title: Text(title, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
+          subtitle: subtitle == null ? null : Text(subtitle),
+          onTap: () {
+            Navigator.pop(ctx);
+            onTap();
+          },
+        );
+        return SafeArea(
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(height: 8),
+                if (!_navigating)
+                  item(Icons.route, 'Plán trasy', _openPlanner, subtitle: 'Start, zastávky, cíl'),
+                if (!_navigating)
+                  item(
+                    Icons.document_scanner,
+                    'Adresy z fotek',
+                    _openScan,
+                    subtitle: 'Dodací list, štítky balíků',
+                  ),
+                if (!_navigating) item(Icons.local_shipping, 'Profil vozidla a nastavení', _openProfile),
+                item(Icons.local_parking, 'Truckparky, servisy, nafta', _choosePoi),
+                item(
+                  _settings.voice ? Icons.volume_up : Icons.volume_off,
+                  _settings.voice ? 'Hlas: zapnutý' : 'Hlas: vypnutý',
+                  () {
+                    setState(() => _settings.voice = !_settings.voice);
+                    if (!_settings.voice) Voice.instance.stop();
+                    _settings.save();
+                  },
+                ),
+                item(
+                  switch (_settings.mapLayer) {
+                    MapLayer.map => Icons.layers_outlined,
+                    MapLayer.aerial => Icons.satellite_alt,
+                    MapLayer.hybrid => Icons.layers,
+                  },
+                  'Podklad mapy',
+                  _chooseLayer,
+                  subtitle: switch (_settings.mapLayer) {
+                    MapLayer.map => 'Mapa',
+                    MapLayer.aerial => 'Letecká',
+                    MapLayer.hybrid => 'Hybridní',
+                  },
+                ),
+                item(
+                  _settings.view3d ? Icons.view_in_ar : Icons.map_outlined,
+                  _settings.view3d ? 'Pohled: 3D' : 'Pohled: 2D',
+                  () {
+                    setState(() => _settings.view3d = !_settings.view3d);
+                    _settings.save();
+                    _applyCamera();
+                  },
+                ),
+                const SizedBox(height: 8),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Future<void> _chooseLayer() async {
     final v = await showModalBottomSheet<MapLayer>(
       context: context,
@@ -2002,52 +2076,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     children: [
                       if (_nextService case (final svc, final ahead))
                         ServiceTile(service: svc, aheadM: ahead, onTap: () => _showService(svc)),
-                      if (!_navigating)
-                        RoundButton(icon: Icons.route, tooltip: 'Plán trasy', onPressed: _openPlanner),
-                      if (!_navigating)
-                        RoundButton(
-                          icon: Icons.document_scanner,
-                          tooltip: 'Adresy z fotek (dodací list, štítky)',
-                          onPressed: _openScan,
-                        ),
-                      if (!_navigating)
-                        RoundButton(
-                          icon: Icons.local_shipping,
-                          tooltip: 'Profil vozidla',
-                          onPressed: _openProfile,
-                        ),
-                      RoundButton(
-                        icon: Icons.local_parking,
-                        tooltip: 'Truckparky, servisy, nafta',
-                        onPressed: _choosePoi,
-                      ),
-                      RoundButton(
-                        icon: _settings.voice ? Icons.volume_up : Icons.volume_off,
-                        tooltip: 'Hlas',
-                        onPressed: () {
-                          setState(() => _settings.voice = !_settings.voice);
-                          if (!_settings.voice) Voice.instance.stop();
-                          _settings.save();
-                        },
-                      ),
-                      RoundButton(
-                        icon: switch (_settings.mapLayer) {
-                          MapLayer.map => Icons.layers_outlined,
-                          MapLayer.aerial => Icons.satellite_alt,
-                          MapLayer.hybrid => Icons.layers,
-                        },
-                        tooltip: 'Mapa / letecká / hybridní',
-                        onPressed: _chooseLayer,
-                      ),
-                      RoundButton(
-                        icon: _settings.view3d ? Icons.view_in_ar : Icons.map_outlined,
-                        tooltip: '2D / 3D',
-                        onPressed: () {
-                          setState(() => _settings.view3d = !_settings.view3d);
-                          _settings.save();
-                          _applyCamera();
-                        },
-                      ),
+                      RoundButton(icon: Icons.menu, tooltip: 'Nabídka', onPressed: _openMenu),
                       if (!_follow)
                         RoundButton(
                           icon: Icons.my_location,
@@ -2170,6 +2199,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     if (route == null || nav == null) return const SizedBox.shrink();
     final ahead = route.warnings
         .where((w) {
+          if (!w.relevant) return false;
           final d = w.atMeters - nav.traveled;
           return d > -5 && d < (w.type == WarningType.speedCamera ? 1500 : 3000);
         })
