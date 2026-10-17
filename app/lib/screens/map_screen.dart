@@ -993,6 +993,14 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       _extrasLoaded.clear();
       if (!reroute) _dlProgress = null;
       await _selectRoute(0, fit: !reroute && !_navigating);
+      final miss = opts.first.route.unreachableM;
+      if (miss > 60 && !reroute) {
+        final msg =
+            'Cíl je pro vaše vozidlo nedostupný (omezení výšky, šířky nebo délky na příjezdu). '
+            'Navedu vás co nejblíž – zbývá ${formatDistance(miss)}.';
+        _toast(msg);
+        if (_navigating) _say(msg);
+      }
     } on RoutingException catch (e) {
       if (e.network) {
         // Bez signálu: trasa zůstává, jen stav. Hlásit jednou, ne při každém pokusu.

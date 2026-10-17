@@ -163,6 +163,10 @@ class TruckRoute {
   /// Zásobování: kolik km trasy jede s výjimkou z hmotnostních zákazů (jen dojezd k cíli / výjezd od startu).
   double deliveryKm = 0;
 
+  /// Cíl je pro vozidlo nedostupný (výška/šířka/délka na příjezdu): trasa končí co nejblíž,
+  /// tolik metrů (vzdušně) od cíle. 0 = trasa vede až do cíle.
+  double unreachableM = 0;
+
   /// Začátky sjezdů, které vedou na jinou dálnici (OSM `destination:ref` = D…) –
   /// jen tam je dálniční křižovatka a hlásí se „Pokračujte rovně“.
   List<(LatLng, String)> interchangeLinks = const [];

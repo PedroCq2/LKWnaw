@@ -139,17 +139,26 @@ class ValhallaClient {
     Map<String, dynamic> extra = const {},
     List<LatLng> via = const [],
   }) async {
-    final r = await _requestOnce(
-      from: from,
-      to: to,
-      profile: profile,
-      heading: heading,
-      delivery: delivery,
-      exclude: exclude,
-      alternates: alternates,
-      extra: extra,
-      via: via,
-    );
+    List<TruckRoute> r;
+    try {
+      r = await _requestOnce(
+        from: from,
+        to: to,
+        profile: profile,
+        heading: heading,
+        delivery: delivery,
+        exclude: exclude,
+        alternates: alternates,
+        extra: extra,
+        via: via,
+      );
+    } on RoutingException catch (e) {
+      // Cíl je pro kamion fyzicky nedostupný (výška, šířka, délka na příjezdu): navést co nejblíž.
+      if (e.network || via.isNotEmpty) rethrow;
+      final near = await _nearestReachable(from, to, profile, heading, delivery, exclude, extra);
+      if (near == null) rethrow;
+      r = [near];
+    }
     final first = r.first;
     final uturns = [
       for (var i = 0; i < first.maneuvers.length - 1; i++)
@@ -173,6 +182,87 @@ class ValhallaClient {
       if (u2 < uturns.length && r2.first.lengthKm < first.lengthKm * 1.5 + 2) return r2;
     } catch (_) {}
     return r;
+  }
+
+  /// Trasa co nejblíž k cíli, kam vozidlo projede: trasa pro malé auto do cíle, a na ní poslední bod,
+  /// kam dojede kamion. [TruckRoute.unreachableM] = kolik zbývá vzdušně do cíle.
+  Future<TruckRoute?> _nearestReachable(
+    LatLng from,
+    LatLng to,
+    TruckProfile profile,
+    double? heading,
+    bool delivery,
+    List<LatLng> exclude,
+    Map<String, dynamic> extra,
+  ) async {
+    try {
+      final small = TruckProfile(height: 2.5, width: 2.0, length: 7, weight: 3.5, axleLoad: 2, axleCount: 2);
+      final ref = parseTrip(
+        (await _routeData(
+              from: from,
+              to: to,
+              profile: small,
+              heading: heading,
+              exclude: exclude,
+              extra: extra,
+            ))['trip']
+            as Map<String, dynamic>,
+      );
+      final cum = ref.cumulative;
+      LatLng at(double back) {
+        final i = cum.indexWhere((c) => c >= cum.last - back);
+        return ref.shape[i < 0 ? 0 : i];
+      }
+
+      Future<TruckRoute?> probe(double back) async {
+        final m = at(back);
+        try {
+          final t = parseTrip(
+            (await _routeData(
+                  from: from,
+                  to: m,
+                  profile: profile,
+                  heading: heading,
+                  weightExempt: delivery,
+                  exclude: exclude,
+                  extra: extra,
+                ))['trip']
+                as Map<String, dynamic>,
+          );
+          return const Distance()(t.shape.last, m) < 150 ? t : null;
+        } catch (_) {
+          return null;
+        }
+      }
+
+      TruckRoute? best;
+      double? okBack, failBack = 0;
+      for (var back = 150.0; back < cum.last * 0.95; back *= 2) {
+        final t = await probe(back);
+        if (t != null) {
+          best = t;
+          okBack = back;
+          break;
+        }
+        failBack = back;
+      }
+      for (var i = 0; okBack != null && failBack != null && i < 3; i++) {
+        final mid = (okBack + failBack) / 2;
+        final t = await probe(mid);
+        if (t != null) {
+          best = t;
+          okBack = mid;
+        } else {
+          failBack = mid;
+        }
+      }
+      if (best == null) return null;
+      best.unreachableM = const Distance()(best.shape.last, to);
+      if (delivery) best.deliveryKm = 0;
+      return best;
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<List<TruckRoute>> _requestOnce({
