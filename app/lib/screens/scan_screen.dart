@@ -113,6 +113,55 @@ class _ScanScreenState extends State<ScanScreen> {
     );
   }
 
+  /// Text od dispečera: adresy z vloženého textu (každý řádek / adresa zvlášť).
+  Future<void> _pasteText() async {
+    final clip = (await Clipboard.getData(Clipboard.kTextPlain))?.text ?? '';
+    if (!mounted) return;
+    final c = TextEditingController(text: clip);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Vložit adresy'),
+        content: TextField(
+          controller: c,
+          maxLines: 10,
+          minLines: 5,
+          decoration: const InputDecoration(
+            hintText:
+                'Např.\nKaufland, Týnecká 65, 779 00 Olomouc\nLidl Šternberk\nModletice 91, 251 01 Říčany',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Zrušit')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Najít adresy')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final lines = [
+      for (final l in c.text.split(RegExp(r'[\n;]')))
+        if (l.trim().length > 2) l.trim(),
+    ];
+    var list = parseAddresses(lines);
+    // Bez PSČ (např. „Lidl Šternberk“): každý řádek jako hledaný název.
+    final covered = {for (final a in list) a.street?.toLowerCase()};
+    for (final l in lines) {
+      if (RegExp(r'\b[1-7]\d{2} ?\d{2}\b').hasMatch(l)) continue;
+      if (covered.any((s) => s != null && l.toLowerCase().contains(s))) continue;
+      list = [...list, ParsedAddress(street: l)];
+    }
+    var found = 0;
+    for (final a in list) {
+      if (_items.any((i) => i.addr.query.toLowerCase() == a.query.toLowerCase())) continue;
+      final item = _Item(a);
+      setState(() => _items.add(item));
+      found++;
+      _geocode(item);
+    }
+    if (found == 0) _toast('V textu jsem nenašel žádnou adresu.');
+  }
+
   Future<void> _geocode(_Item it) async {
     setState(() {
       it.searching = true;
@@ -269,6 +318,13 @@ class _ScanScreenState extends State<ScanScreen> {
                 ),
               ),
             ],
+          ),
+          const SizedBox(height: 10),
+          OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
+            onPressed: _reading ? null : _pasteText,
+            icon: const Icon(Icons.content_paste),
+            label: const Text('Vložit text (SMS, e-mail, zpráva od dispečera)'),
           ),
           if (_reading)
             const Padding(

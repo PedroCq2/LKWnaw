@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../models/truck_profile.dart';
+import '../services/problem_reports.dart';
 import '../services/settings.dart';
 import '../services/voice.dart';
 import 'offline_section.dart';
@@ -259,6 +261,43 @@ class _ProfileScreenState extends State<ProfileScreen> {
             FilledButton.icon(onPressed: _save, icon: const Icon(Icons.save), label: const Text('Uložit')),
             const SizedBox(height: 24),
             const Divider(),
+            FutureBuilder<List<Map<String, dynamic>>>(
+              future: ProblemReports.load(),
+              builder: (ctx, snap) {
+                final n = snap.data?.length ?? 0;
+                return ListTile(
+                  leading: const Icon(Icons.report_problem_outlined),
+                  title: Text('Hlášení „navigovala špatně“ ($n)'),
+                  subtitle: const Text('Zkopírujte a pošlete – podle nich se navigace opraví'),
+                  trailing: n == 0
+                      ? null
+                      : Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              tooltip: 'Zkopírovat',
+                              icon: const Icon(Icons.copy),
+                              onPressed: () async {
+                                await Clipboard.setData(ClipboardData(text: await ProblemReports.export()));
+                                if (ctx.mounted) {
+                                  ScaffoldMessenger.of(ctx)
+                                      .showSnackBar(const SnackBar(content: Text('Zkopírováno.')));
+                                }
+                              },
+                            ),
+                            IconButton(
+                              tooltip: 'Smazat',
+                              icon: const Icon(Icons.delete_outline),
+                              onPressed: () async {
+                                await ProblemReports.clear();
+                                setState(() {});
+                              },
+                            ),
+                          ],
+                        ),
+                );
+              },
+            ),
             const ListTile(
               leading: Icon(Icons.info_outline),
               title: Text('O aplikaci LKWnav'),

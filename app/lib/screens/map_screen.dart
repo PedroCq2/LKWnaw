@@ -9,6 +9,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:maplibre_gl/maplibre_gl.dart' as ml;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:speech_to_text/speech_to_text.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../models/route.dart';
@@ -19,6 +20,8 @@ import '../services/restrictions.dart';
 import '../services/lanes.dart';
 import '../services/highway_services.dart';
 import '../services/map_style.dart';
+import '../services/problem_reports.dart';
+import '../services/voice_commands.dart';
 import '../services/offline_search.dart';
 import '../services/ramp_finder.dart';
 import 'scan_screen.dart';
@@ -107,6 +110,12 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   bool _pickGate = false; // čeká se na dlouhé podržení u vjezdu pro kamiony
   Ramp? _destRamp; // nalezená rampa u cíle (kamion jede k ní, ne na parkoviště)
   bool _noteSpoken = false;
+  bool _approach = false; // přiblížení před cílem (letecký pohled) už proběhlo
+  MapLayer? _layerOverride; // dočasný podklad (před cílem hybridní)
+  final _stt = SpeechToText();
+  bool _sttReady = false;
+  bool _listening = false;
+  String _heard = '';
   final List<(LatLng, String)> _stops = []; // zastávky po cestě (průjezdní body)
   LatLng? _planStart; // začátek naplánované trasy (null = moje poloha)
   String? _planStartName;
@@ -119,11 +128,12 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
 
   Future<void> _loadStyle() async {
     final night = _night;
-    final layer = _settings.mapLayer;
+    final layer = _layerOverride ?? _settings.mapLayer;
     if (_styleNight == night && _styleLayer == layer && _styleJson != null) return;
     _styleNight = night;
     _styleLayer = layer;
     final json = await lkwStyle(night: night, layer: layer);
+    _styleReady = false; // nový vzhled: do mapy psát až po jeho načtení
     if (mounted) setState(() => _styleJson = json);
   }
 
@@ -191,7 +201,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       settings = AndroidSettings(
         accuracy: LocationAccuracy.bestForNavigation,
         distanceFilter: 0,
-        intervalDuration: const Duration(seconds: 1),
+        intervalDuration: const Duration(milliseconds: 500),
         foregroundNotificationConfig: const ForegroundNotificationConfig(
           notificationTitle: 'LKWnav',
           notificationText: 'Kamionová navigace běží',
@@ -253,6 +263,17 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
           _noteSpoken = true;
           _say('Poznámka k cíli: $note');
         }
+        // Před cílem: hybridní pohled (vidět vjezd, rampu, dvůr) a připomenutí, kam přesně.
+        if (!_approach && nav.remaining < 500 && nav.remaining > 30) {
+          _approach = true;
+          if ((_settings.mapLayer) == MapLayer.map) {
+            _layerOverride = MapLayer.hybrid;
+            _loadStyle();
+          }
+          final ramp = _destRamp;
+          if (ramp != null) _say('Cíl: ${ramp.how.replaceAll(' (odhad)', '')}.');
+          if (_destSaved?.gate != null) _say('Jedete k uloženému vjezdu.');
+        }
         if (nav.arrived && !_arrivedSpoken) {
           _arrivedSpoken = true;
           _clearTrip();
@@ -300,14 +321,24 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     var heading = _heading;
     final nav = _nav;
     final route = _route;
+    // Předpověď: šipka míří tam, kde kamion bude na konci animace (≈ do další polohy z GPS),
+    // ne kde byl před vteřinou – mapa tak nejede pozadu.
+    final lastFix = _lastFix;
+    final gapSec = lastFix == null
+        ? 1.0
+        : (DateTime.now().difference(lastFix).inMilliseconds / 1000).clamp(0.3, 1.5);
+    final mps = _speedKmh / 3.6;
+    final lead = mps > 2 ? mps * gapSec : 0.0;
     if (_navigating && nav != null && route != null && nav.distanceFromRoute < NavEngine.offRouteMeters) {
-      // Na trase: přichycená poloha a směr podle trasy (bez GPS šumu).
-      target = nav.snapped;
-      final seg = nav.segmentIndex;
+      // Na trase: přichycená poloha a směr podle trasy (bez GPS šumu), posunutá o předpověď po trase.
+      final (p, seg) = _alongRoute(route, nav.traveled + lead, nav.segmentIndex);
+      target = p;
       if (seg + 1 < route.shape.length) {
         heading = const Distance().bearing(route.shape[seg], route.shape[seg + 1]);
         if (heading < 0) heading += 360;
       }
+    } else if (lead > 0 && _speedKmh > 8) {
+      target = const Distance().offset(pos, lead, _heading);
     }
     var zoom = _toZoom;
     if (_driveView) {
@@ -339,6 +370,22 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     final gapMs = last == null ? 1000 : now.difference(last).inMilliseconds;
     _anim.duration = Duration(milliseconds: gapMs.clamp(300, 1500));
     _anim.forward(from: 0);
+  }
+
+  /// Bod na trase [m] metrů od začátku (hledá od segmentu [from]).
+  (LatLng, int) _alongRoute(TruckRoute r, double m, int from) {
+    final cum = r.cumulative;
+    var i = from.clamp(0, r.shape.length - 2);
+    while (i < r.shape.length - 2 && cum[i + 1] < m) {
+      i++;
+    }
+    final a = r.shape[i], b = r.shape[i + 1];
+    final len = cum[i + 1] - cum[i];
+    final t = len <= 0 ? 0.0 : ((m - cum[i]) / len).clamp(0.0, 1.0);
+    return (
+      LatLng(a.latitude + (b.latitude - a.latitude) * t, a.longitude + (b.longitude - a.longitude) * t),
+      i,
+    );
   }
 
   void _onAnimTick() {
@@ -394,6 +441,9 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     final m = _map;
     if (m == null) return;
     _styleReady = false;
+    // Rozpracované zápisy do starého vzhledu mapy už nedoběhnou – neblokovat jimi nové.
+    _meBusy = false;
+    _lineBusy = false;
     const empty = {'type': 'FeatureCollection', 'features': []};
     try {
       _lineRoute = null;
@@ -1347,6 +1397,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   }
 
   Future<void> _startNavigation() async {
+    _approach = false;
     // Plán začínal jinde: jedeme odsud → přepočítat z aktuální polohy (zastávky zůstanou).
     if (_planStart != null) {
       final far = _pos != null && const Distance()(_pos!, _planStart!) > 300;
@@ -1405,6 +1456,11 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
 
   Future<void> _stopNavigation() async {
     WakelockPlus.disable();
+    _approach = false;
+    if (_layerOverride != null) {
+      _layerOverride = null;
+      _loadStyle();
+    }
     _clearTrip();
     _sim?.stop();
     _sim = null;
@@ -1801,6 +1857,208 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     );
   }
 
+  // ------------------------------------------------------------ hlasová asistentka
+
+  Future<void> _listen() async {
+    if (_listening) {
+      await _stt.stop();
+      setState(() => _listening = false);
+      return;
+    }
+    try {
+      _sttReady =
+          _sttReady ||
+          await _stt.initialize(
+            onStatus: (st) {
+              if ((st == 'done' || st == 'notListening') && mounted) setState(() => _listening = false);
+            },
+          );
+    } catch (_) {
+      _sttReady = false;
+    }
+    if (!_sttReady) {
+      _toast('Rozpoznávání řeči není dostupné (povolte mikrofon / nainstalujte Google hlasové zadávání).');
+      return;
+    }
+    Voice.instance.stop();
+    setState(() {
+      _listening = true;
+      _heard = '';
+    });
+    await _stt.listen(
+      listenOptions: SpeechListenOptions(
+        listenMode: ListenMode.confirmation,
+        partialResults: true,
+        localeId: 'cs_CZ',
+        pauseFor: const Duration(seconds: 2),
+        listenFor: const Duration(seconds: 10),
+      ),
+      onResult: (r) {
+        if (!mounted) return;
+        setState(() => _heard = r.recognizedWords);
+        if (r.finalResult) {
+          setState(() => _listening = false);
+          _handleVoice(r.recognizedWords);
+        }
+      },
+    );
+  }
+
+  Future<void> _answer(String text) async {
+    _toast(text);
+    await Voice.instance.say(text, force: true);
+  }
+
+  Future<void> _handleVoice(String text) async {
+    if (text.trim().isEmpty) return;
+    final c = parseCommand(text);
+    switch (c.action) {
+      case VoiceAction.navigate:
+      case VoiceAction.addStop:
+        final q = c.arg!;
+        List<Place> found;
+        try {
+          found = await searchPlaces(q, near: _pos);
+        } catch (_) {
+          found = [];
+        }
+        if (found.isEmpty) {
+          await _answer('Nenašla jsem $q.');
+          return;
+        }
+        final p = found.first;
+        if (c.action == VoiceAction.addStop && _dest != null) {
+          setState(() => _stops.add((p.point, p.name)));
+          await _answer('Přidávám zastávku ${p.name}.');
+          await _syncLayers();
+          await _computeRoute(reroute: _navigating);
+        } else {
+          await _answer('Hledám trasu na ${p.name}${p.address != null ? ', ${p.address}' : ''}.');
+          _setDestination(p.point, p.name);
+        }
+      case VoiceAction.start:
+        if (_route != null && !_navigating) {
+          await _startNavigation();
+        } else {
+          await _answer(
+            _navigating ? 'Navigace už běží.' : 'Nejdřív řekněte cíl, třeba: naviguj na Kaufland Olomouc.',
+          );
+        }
+      case VoiceAction.findParking:
+        await _findPois(PoiKind.parking);
+      case VoiceAction.findFuel:
+        await _findPois(PoiKind.fuel);
+      case VoiceAction.findService:
+        await _findPois(PoiKind.service);
+      case VoiceAction.remaining:
+        final r = _route;
+        if (r == null) {
+          await _answer('Nemám žádnou trasu.');
+          return;
+        }
+        final remM = _nav?.remaining ?? r.lengthKm * 1000;
+        final sec = r.remainingSec(remM, _nav?.segmentIndex ?? 0);
+        final eta = DateTime.now().add(Duration(seconds: sec.round()));
+        final km = (remM / 1000).round();
+        await _answer(
+          'Do cíle zbývá ${km < 1 ? '${(remM / 100).round() * 100} metrů' : '$km kilometrů'}, '
+          'asi ${formatDuration(Duration(seconds: sec.round()))}. Příjezd v ${eta.hour}:${eta.minute.toString().padLeft(2, '0')}.',
+        );
+      case VoiceAction.voiceOff:
+        setState(() => _settings.voice = false);
+        _settings.save();
+        _toast('Hlas vypnutý.');
+      case VoiceAction.voiceOn:
+        setState(() => _settings.voice = true);
+        _settings.save();
+        await _answer('Hlas zapnutý.');
+      case VoiceAction.reroute:
+        await _answer('Přepočítávám trasu.');
+        await _computeRoute(reroute: _navigating);
+      case VoiceAction.stop:
+        if (_navigating) {
+          await _stopNavigation();
+          await _answer('Navigace ukončena.');
+        }
+      case VoiceAction.aerial:
+        setState(() => _settings.mapLayer = MapLayer.hybrid);
+        _settings.save();
+        _loadStyle();
+      case VoiceAction.normalMap:
+        setState(() => _settings.mapLayer = MapLayer.map);
+        _settings.save();
+        _loadStyle();
+      case VoiceAction.report:
+        await _reportProblem(note: text);
+      case VoiceAction.help:
+        await _answer(
+          'Můžete říct: naviguj na Kaufland Olomouc, přidej zastávku, najdi parkoviště, kolik zbývá, '
+          'přepočítej, zruš navigaci, nebo tady navigovala špatně.',
+        );
+      case VoiceAction.unknown:
+        await _answer('Nerozuměla jsem: $text. Řekněte třeba: naviguj na Kaufland Olomouc.');
+    }
+  }
+
+  // ------------------------------------------------------------ hlášení problému
+
+  /// „Tady navigovala špatně“: uloží polohu, profil vozidla a okolní úsek trasy pro pozdější rozbor.
+  Future<void> _reportProblem({String? note}) async {
+    var text = note;
+    if (text == null) {
+      final c = TextEditingController();
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Tady navigovala špatně'),
+          content: TextField(
+            controller: c,
+            maxLines: 3,
+            decoration: const InputDecoration(
+              hintText: 'Co bylo špatně? (nepovinné) – např. zákaz vjezdu, úzká ulice',
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Zrušit')),
+            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Uložit')),
+          ],
+        ),
+      );
+      if (ok != true) return;
+      text = c.text.trim();
+    }
+    final r = _route, nav = _nav;
+    List<List<double>>? around;
+    String? maneuver;
+    if (r != null && nav != null) {
+      final cum = r.cumulative;
+      around = [
+        for (var i = 0; i < r.shape.length; i++)
+          if ((cum[i] - nav.traveled).abs() < 400)
+            [
+              double.parse(r.shape[i].latitude.toStringAsFixed(6)),
+              double.parse(r.shape[i].longitude.toStringAsFixed(6)),
+            ],
+      ];
+      if (nav.nextManeuverIndex >= 0) maneuver = r.maneuvers[nav.nextManeuverIndex].instruction;
+    }
+    await ProblemReports.add({
+      'time': DateTime.now().toIso8601String(),
+      'note': text,
+      if (_pos != null) 'pos': [_pos!.latitude, _pos!.longitude],
+      'heading': _heading.round(),
+      'speedKmh': _speedKmh.round(),
+      'profile': _settings.profile.toJson(),
+      'delivery': _settings.delivery,
+      'dest': _destName,
+      if (_dest != null) 'destPos': [_dest!.latitude, _dest!.longitude],
+      'routeKm': r?.lengthKm,
+      'nextManeuver': maneuver,
+      'routeAround': around,
+    });
+    await _answer('Uloženo. Hlášení najdete v Nastavení.');
+  }
+
   /// Nabídka (hamburger): na mapě zůstane jen okénko služeb, nabídka a „moje poloha“.
   void _openMenu() {
     showModalBottomSheet(
@@ -1830,10 +2088,23 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     Icons.document_scanner,
                     'Adresy z fotek',
                     _openScan,
-                    subtitle: 'Dodací list, štítky balíků',
+                    subtitle: 'Dodací list, štítky, text od dispečera',
                   ),
                 if (!_navigating) item(Icons.local_shipping, 'Profil vozidla a nastavení', _openProfile),
                 item(Icons.local_parking, 'Truckparky, servisy, nafta', _choosePoi),
+                if (_navigating)
+                  item(
+                    Icons.report_problem,
+                    'Tady navigovala špatně',
+                    _reportProblem,
+                    subtitle: 'Uloží místo a trasu k rozboru',
+                  ),
+                item(
+                  Icons.mic,
+                  'Hlasové příkazy',
+                  () => _handleVoice('co umíš'),
+                  subtitle: 'Mikrofon vpravo na mapě',
+                ),
                 item(
                   _settings.voice ? Icons.volume_up : Icons.volume_off,
                   _settings.voice ? 'Hlas: zapnutý' : 'Hlas: vypnutý',
@@ -2109,7 +2380,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   Widget build(BuildContext context) {
     final route = _route;
     final nav = _nav;
-    if (_styleNight != _night || _styleLayer != _settings.mapLayer) _loadStyle();
+    if (_styleNight != _night || _styleLayer != (_layerOverride ?? _settings.mapLayer)) _loadStyle();
     final limitRaw = nav != null ? route?.speedLimitAt(nav.segmentIndex) : null;
     final limit = limitRaw == null ? null : math.min(limitRaw, _settings.profile.maxSpeed);
     final bottomPad = MediaQuery.of(context).padding.bottom;
@@ -2195,6 +2466,12 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     children: [
                       if (_nextService case (final svc, final ahead))
                         ServiceTile(service: svc, aheadM: ahead, onTap: () => _showService(svc)),
+                      RoundButton(
+                        icon: _listening ? Icons.mic : Icons.mic_none,
+                        tooltip: 'Hlasový příkaz',
+                        color: _listening ? Lkw.amber : null,
+                        onPressed: _listen,
+                      ),
                       RoundButton(icon: Icons.menu, tooltip: 'Nabídka', onPressed: _openMenu),
                       if (!_follow)
                         RoundButton(
@@ -2206,6 +2483,28 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     ],
                   ),
                 ),
+                if (_listening)
+                  Positioned(
+                    left: 16,
+                    right: 90,
+                    bottom: panelH + 90 + bottomPad,
+                    child: Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(color: Lkw.panel, borderRadius: BorderRadius.circular(16)),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.mic, color: Lkw.amber),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              _heard.isEmpty ? 'Poslouchám… (např. „naviguj na Kaufland Olomouc“)' : _heard,
+                              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
                 if (_navigating && (limit != null || _speedKmh > 0))
                   Positioned(
                     left: 12,
