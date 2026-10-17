@@ -11,6 +11,8 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import android.util.Rational
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleRegistry
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -56,6 +58,21 @@ class MainActivity : FlutterActivity() {
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         pip?.invokeMethod("pip", isInPictureInPictureMode)
+        if (isInPictureInPictureMode) keepMapRunning()
+    }
+
+    // V okénku je aktivita „pozastavená“ a mapa (MapLibre) by přestala kreslit – okénko by stálo.
+    // Mapa sleduje životní cyklus aktivity, proto jí po pozastavení hned znovu ohlásíme „běží“.
+    override fun onPause() {
+        super.onPause()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isInPictureInPictureMode) keepMapRunning()
+    }
+
+    private fun keepMapRunning() {
+        try {
+            (lifecycle as? LifecycleRegistry)?.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
+        } catch (e: Throwable) {
+        }
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {

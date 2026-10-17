@@ -85,6 +85,8 @@ bool _isName(String s) {
   final t = _clean(s);
   if (t.length < 2 || t.length > 60 || _phoneOrId.hasMatch(t) || _findPc(t) != null) return false;
   if (RegExp(r'\d{3,}').hasMatch(t)) return false;
+  // Popisek formuláře („Datum dodání:“, „Pož. Dodání: 00:00“) není jméno.
+  if (t.contains(':') || RegExp(r'\d{1,2}\.\s?\d{1,2}\.').hasMatch(t)) return false;
   return RegExp(r'\p{L}{2,}', unicode: true).hasMatch(t) && !_senderKw.hasMatch(t);
 }
 

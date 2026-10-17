@@ -7,6 +7,7 @@ import 'package:latlong2/latlong.dart';
 import '../services/address_parser.dart';
 import '../services/geocoding.dart';
 import '../services/label_scanner.dart';
+import '../services/offline_search.dart' show fold;
 import '../services/plans.dart';
 import '../services/settings.dart';
 import '../services/stop_order.dart';
@@ -17,6 +18,7 @@ class _Item {
   Place? place;
   bool searching = true;
   bool use = true;
+  bool doubtful = false; // nalezené místo nesedí s PSČ / obcí z fotky
   _Item(this.addr);
 }
 
@@ -37,6 +39,7 @@ class _ScanScreenState extends State<ScanScreen> {
   bool _reading = false;
   bool _roundTrip = false;
   bool _ordering = false;
+  List<String> _lastRows = []; // co se přečetlo z poslední fotky
 
   @override
   void dispose() {
@@ -75,6 +78,7 @@ class _ScanScreenState extends State<ScanScreen> {
     } finally {
       if (mounted) setState(() => _reading = false);
     }
+    if (mounted) setState(() => _lastRows = read);
     if (found == 0 && mounted) _showRead(read, error);
   }
 
@@ -125,14 +129,35 @@ class _ScanScreenState extends State<ScanScreen> {
       }
     } catch (_) {}
     if (!mounted) return;
+    // Sedí nalezené místo s PSČ / obcí z fotky? Jinak upozornit.
+    final where = fold('${best?.name ?? ''} ${best?.address ?? ''}').replaceAll(' ', '');
+    final pc = it.addr.postcode, city = it.addr.city;
+    final ok =
+        best == null ||
+        (pc != null && where.contains(pc)) ||
+        (city != null && where.contains(fold(city.split(' ').first)));
     setState(() {
       it.place = best;
       it.searching = false;
+      it.doubtful = best != null && !ok && (pc != null || city != null);
       if (best == null) it.use = false;
     });
   }
 
-  Future<void> _edit(_Item it) async {
+  /// Ruční výběr řádku z přečteného textu (s PSČ z dalšího řádku, pokud tam je).
+  Future<void> _addFromRow(int i) async {
+    var text = _lastRows[i];
+    final pc = RegExp(r'\b[1-7]\d{2} ?\d{2}\b');
+    if (!pc.hasMatch(text) && i + 1 < _lastRows.length && pc.hasMatch(_lastRows[i + 1])) {
+      text = '$text, ${_lastRows[i + 1]}';
+    }
+    final parsed = parseAddresses([text]).firstOrNull ?? ParsedAddress(street: text.trim());
+    final it = _Item(parsed);
+    setState(() => _items.add(it));
+    await _edit(it, isNew: true);
+  }
+
+  Future<void> _edit(_Item it, {bool isNew = false}) async {
     final c = TextEditingController(text: it.addr.query);
     final name = TextEditingController(text: it.addr.name ?? '');
     final ok = await showDialog<bool>(
@@ -158,7 +183,10 @@ class _ScanScreenState extends State<ScanScreen> {
         ],
       ),
     );
-    if (ok != true) return;
+    if (ok != true) {
+      if (isNew) setState(() => _items.remove(it));
+      return;
+    }
     final parsed = parseAddresses([c.text]).firstOrNull ?? ParsedAddress(street: c.text.trim());
     parsed.name = name.text.trim().isEmpty ? null : name.text.trim();
     setState(() {
@@ -271,9 +299,12 @@ class _ScanScreenState extends State<ScanScreen> {
                     else if (it.place == null)
                       'nenalezeno – klepněte a opravte'
                     else
-                      '✓ ${it.place!.name}${it.place!.address != null ? ', ${it.place!.address}' : ''}',
+                      '${it.doubtful ? '⚠ zkontrolujte: ' : '✓ '}${it.place!.name}'
+                          '${it.place!.address != null ? ', ${it.place!.address}' : ''}',
                   ].join('\n'),
-                  style: TextStyle(color: !it.searching && it.place == null ? Lkw.danger : null),
+                  style: TextStyle(
+                    color: !it.searching && it.place == null ? Lkw.danger : (it.doubtful ? Lkw.amber : null),
+                  ),
                 ),
                 isThreeLine: it.addr.name != null,
                 onTap: () => _edit(it),
@@ -281,6 +312,32 @@ class _ScanScreenState extends State<ScanScreen> {
                   icon: const Icon(Icons.delete_outline),
                   onPressed: () => setState(() => _items.remove(it)),
                 ),
+              ),
+            ),
+          if (_lastRows.isNotEmpty)
+            Card(
+              color: Lkw.panel,
+              child: ExpansionTile(
+                leading: const Icon(Icons.text_snippet_outlined),
+                title: Text('Přečtený text z fotky (${_lastRows.length} řádků)'),
+                subtitle: const Text('Chybí adresa? Klepněte na její řádek a přidám ji.'),
+                children: [
+                  for (var i = 0; i < _lastRows.length; i++)
+                    ListTile(
+                      dense: true,
+                      title: Text(_lastRows[i]),
+                      trailing: const Icon(Icons.add_location_alt_outlined, size: 20),
+                      onTap: () => _addFromRow(i),
+                    ),
+                  TextButton.icon(
+                    onPressed: () {
+                      Clipboard.setData(ClipboardData(text: _lastRows.join('\n')));
+                      _toast('Zkopírováno.');
+                    },
+                    icon: const Icon(Icons.copy),
+                    label: const Text('Zkopírovat text'),
+                  ),
+                ],
               ),
             ),
           if (_items.isNotEmpty)

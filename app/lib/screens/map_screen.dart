@@ -230,7 +230,6 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       final nav = _engine!.update(pos, accuracy: accuracy);
       _nav = nav;
       if (_navigating) {
-        _trimRouteLine();
         _voiceGuidance(nav);
         _warningVoice(nav);
         // Projetá zastávka: odebrat (při přepočtu se už nepoužije).
@@ -390,7 +389,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     _styleReady = false;
     const empty = {'type': 'FeatureCollection', 'features': []};
     try {
-      for (final id in ['alts', 'route', 'warn', 'parking', 'dest', 'me']) {
+      _lineRoute = null;
+      for (final id in ['alts', 'route', 'routehead', 'warn', 'parking', 'dest', 'me']) {
         await m.addGeoJsonSource(id, empty);
       }
       await m.addLineLayer(
@@ -406,6 +406,28 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       await m.addLineLayer(
         'route',
         'route-line',
+        const ml.LineLayerProperties(
+          lineColor: Lkw.routeLine,
+          lineWidth: 9,
+          lineJoin: 'round',
+          lineCap: 'round',
+        ),
+      );
+      // Náběh od šipky k hlavní čáře (stejný vzhled).
+      await m.addLineLayer(
+        'routehead',
+        'head-casing',
+        const ml.LineLayerProperties(
+          lineColor: Lkw.routeCasing,
+          lineWidth: 14,
+          lineJoin: 'round',
+          lineCap: 'round',
+        ),
+        belowLayerId: 'route-line',
+      );
+      await m.addLineLayer(
+        'routehead',
+        'head-line',
         const ml.LineLayerProperties(
           lineColor: Lkw.routeLine,
           lineWidth: 9,
@@ -524,7 +546,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         'me-arrow',
         const ml.SymbolLayerProperties(
           iconImage: 'truck-arrow',
-          iconSize: 0.55,
+          iconSize: 0.7,
           iconRotate: ['get', 'h'],
           iconRotationAlignment: 'map',
           iconPitchAlignment: 'map',
@@ -553,48 +575,96 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     ],
   };
 
-  /// Za jízdy jen zbývající část trasy – projetý úsek za šipkou zmizí
-  /// (necháme ~25 m za vozidlem, ať čára nezačíná před animovanou šipkou).
+  // Projetá část trasy mizí plynule přímo pod šipkou: dlouhá „hlavní“ čára začíná ~400 m před vozidlem
+  // a mění se jen občas; krátký „náběh“ od šipky k ní se kreslí s každým snímkem animace.
+  TruckRoute? _lineRoute;
+  int _mainFrom = 0; // index bodu tvaru, kde začíná hlavní čára
+  int _dispSeg = 0; // segment trasy pod animovanou šipkou
+  bool _lineBusy = false;
+
+  bool get _trimming => _navigating && _engine?.route == _route && _route != null;
+
   List<List<double>> _remainingLine(TruckRoute r) {
-    final nav = _nav;
-    if (!_navigating || nav == null || _engine?.route != r) return r.shape.map(_xy).toList();
-    final i = nav.segmentIndex.clamp(0, r.shape.length - 2);
-    final a = r.shape[i], b = nav.snapped;
-    const d = Distance();
-    final seg = d(a, b);
-    final start = seg <= 25
-        ? a
-        : LatLng(
-            b.latitude + (a.latitude - b.latitude) * 25 / seg,
-            b.longitude + (a.longitude - b.longitude) * 25 / seg,
-          );
-    return [_xy(start), _xy(b), for (var k = i + 1; k < r.shape.length; k++) _xy(r.shape[k])];
+    if (!_trimming || _lineRoute != r) return r.shape.map(_xy).toList();
+    return [for (var k = math.max(0, _mainFrom); k < r.shape.length; k++) _xy(r.shape[k])];
   }
 
-  int _trimSeg = -1;
-  DateTime _trimAt = DateTime(0);
+  /// Segment trasy nejblíž bodu [p] (hledá kousek kolem posledního).
+  int _locateSeg(TruckRoute r, LatLng p) {
+    final n = r.shape.length;
+    var best = _dispSeg.clamp(0, n - 2), bestD = double.infinity;
+    final k = math.cos(p.latitude * math.pi / 180);
+    for (var i = math.max(0, _dispSeg - 3); i < math.min(n - 1, _dispSeg + 80); i++) {
+      final a = r.shape[i], b = r.shape[i + 1];
+      final bx = (b.longitude - a.longitude) * k, by = b.latitude - a.latitude;
+      final px = (p.longitude - a.longitude) * k, py = p.latitude - a.latitude;
+      final l2 = bx * bx + by * by;
+      final t = l2 == 0 ? 0.0 : ((px * bx + py * by) / l2).clamp(0.0, 1.0);
+      final dx = px - bx * t, dy = py - by * t;
+      final d = dx * dx + dy * dy;
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+    return best;
+  }
 
-  /// Zkrátí čáru trasy po projetí bodu tvaru nebo aspoň jednou za 2 s.
-  Future<void> _trimRouteLine() async {
-    final m = _map, r = _route, nav = _nav;
-    if (m == null || r == null || nav == null || !_styleReady) return;
-    final now = DateTime.now();
-    if (nav.segmentIndex == _trimSeg && now.difference(_trimAt).inMilliseconds < 2000) return;
-    _trimSeg = nav.segmentIndex;
-    _trimAt = now;
+  /// Volá se s každým snímkem animace šipky.
+  Future<void> _updateRouteHead(LatLng pos) async {
+    final m = _map, r = _route;
+    if (m == null || r == null || !_styleReady || _lineBusy) return;
+    if (!_trimming) {
+      if (_lineRoute != null) {
+        _lineRoute = null;
+        _lineBusy = true;
+        try {
+          await m.setGeoJsonSource('routehead', _line(const []));
+        } catch (_) {
+        } finally {
+          _lineBusy = false;
+        }
+      }
+      return;
+    }
+    if (_lineRoute != r) {
+      _lineRoute = r;
+      _dispSeg = _nav?.segmentIndex ?? 0;
+      _mainFrom = -1;
+    }
+    _lineBusy = true;
     try {
-      await m.setGeoJsonSource('route', {
-        'type': 'FeatureCollection',
-        'features': [
-          {
-            'type': 'Feature',
-            'properties': <String, dynamic>{},
-            'geometry': {'type': 'LineString', 'coordinates': _remainingLine(r)},
-          },
-        ],
-      });
-    } catch (_) {}
+      final s = _dispSeg = _locateSeg(r, pos);
+      final cum = r.cumulative;
+      if (_mainFrom <= s || cum[_mainFrom] - cum[s] < 150) {
+        var j = s + 1;
+        while (j < r.shape.length - 1 && cum[j] - cum[s] < 400) {
+          j++;
+        }
+        _mainFrom = j;
+        await m.setGeoJsonSource('route', _line(_remainingLine(r)));
+      }
+      await m.setGeoJsonSource(
+        'routehead',
+        _line([_xy(pos), for (var k = s + 1; k <= _mainFrom && k < r.shape.length; k++) _xy(r.shape[k])]),
+      );
+    } catch (_) {
+    } finally {
+      _lineBusy = false;
+    }
   }
+
+  static Map<String, dynamic> _line(List<List<double>> coords) => {
+    'type': 'FeatureCollection',
+    'features': [
+      if (coords.length >= 2)
+        {
+          'type': 'Feature',
+          'properties': <String, dynamic>{},
+          'geometry': {'type': 'LineString', 'coordinates': coords},
+        },
+    ],
+  };
 
   Future<void> _syncLayers() async {
     final m = _map;
@@ -669,6 +739,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   Future<void> _updateMeLayer() async {
     final m = _map;
     final p = _dispPos ?? _pos;
+    if (p != null) _updateRouteHead(p);
     if (m == null || !_styleReady || _meBusy) return;
     _meBusy = true;
     try {
@@ -726,8 +797,10 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     final d = nav.distanceToNextManeuver;
     final key = m.beginShapeIndex;
     final mps = _speedKmh / 3.6;
-    final now = math.max(50.0, mps * 4); // „teď“: ~4 s před manévrem, nejméně 50 m
     final roundaboutExit = m.type == 27;
+    // „Teď“: ~4 s před manévrem, nejméně 50 m. Výjezd z kruháče až těsně u něj –
+    // 50 m před ním je v kruhovém objezdu ještě předchozí výjezd.
+    final now = roundaboutExit ? math.max(8.0, mps * 1.2) : math.max(50.0, mps * 4);
 
     // Po manévru: dlouhý úsek bez pokynu → „Pokračujte rovně (po D1) 12 kilometrů.“
     if (i > 0 && d > 3000 && !e.preSpoken.contains(key) && e.continueSpoken.add(key)) {
