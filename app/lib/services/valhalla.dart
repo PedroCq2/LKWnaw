@@ -6,6 +6,7 @@ import 'package:latlong2/latlong.dart';
 
 import 'http_headers.dart';
 import 'offline_routing.dart';
+import 'town.dart';
 
 import '../models/route.dart';
 import '../models/truck_profile.dart';
@@ -152,105 +153,75 @@ class ValhallaClient {
     ];
     if (!delivery) return parseAll(await raw(from, to, via, exempt: false, head: heading, alt: alternates));
 
-    // Zásobování: výjimka z hmotnostních zákazů („mimo dopravní obsluhu“) platí jen v oblasti cíle,
-    // ne pro tranzit (např. zóna 12 t v Praze). Proto trasa s plnou hmotností – Valhalla cíl uvnitř
-    // zóny přichytí na nejbližší dosažitelné místo – a jen dojezd odtud do cíle (a výjezd ze zóny
-    // u startu) s výjimkou.
+    // Zásobování: výjimka z hmotnostních zákazů („mimo dopravní obsluhu“) platí jen v obci vykládky
+    // (např. Teplice), ne pro tranzit (zóna 12 t v Praze). Každá etapa: s plnou hmotností k vjezdu
+    // do obce cíle, odtud s výjimkou.
     const d = Distance();
-    Map<String, dynamic>? full;
-    try {
-      full = await raw(from, to, via, exempt: false, head: heading, alt: alternates);
-    } catch (_) {}
-    // S plnou hmotností do cíle nic nevede (cíl uvnitř zóny): najít na trase s výjimkou poslední místo,
-    // kam kamion smí – výjimka pak platí jen odtud do cíle.
-    if (full == null && via.isEmpty) {
+    final pts = [from, ...via, to];
+    final legCount = pts.length - 1;
+    final fullLegs = <Map<String, dynamic>>[]; // etapy s plnou hmotností (do vjezdu do obce cíle)
+    final exemptWhole = <int>{}; // etapy celé s výjimkou (celé v obci cíle / jinak nelze)
+    List<dynamic> alternatesData = const [];
+    for (var k = 0; k < legCount; k++) {
+      final a = pts[k], b = pts[k + 1];
+      final head = k == 0 ? heading : null;
+      final alt = legCount == 1 ? alternates : 0;
+      Map<String, dynamic>? leg;
       try {
-        final a = parseTrip(
-          (await raw(from, to, const [], exempt: true, head: heading))['trip'] as Map<String, dynamic>,
+        final ex = parseTrip(
+          (await raw(a, b, const [], exempt: true, head: head))['trip'] as Map<String, dynamic>,
         );
-        final cum = a.cumulative;
-        LatLng at(double back) {
-          final target = cum.last - back;
-          final i = cum.indexWhere((c) => c >= target);
-          return a.shape[i < 0 ? 0 : i];
-        }
-
-        Future<Map<String, dynamic>?> reach(double back) async {
-          final m = at(back);
-          try {
-            final r = await raw(from, m, const [], exempt: false, head: heading);
-            final legs = ((r['trip'] as Map)['legs'] as List);
-            final end = decodePolyline6((legs.last as Map)['shape'] as String).last;
-            return d(end, m) < 150 ? r : null;
-          } catch (_) {
-            return null;
-          }
-        }
-
-        double? okBack, failBack = 0;
-        for (var back = 500.0; back < cum.last * 0.95; back *= 2) {
-          final r = await reach(back);
-          if (r != null) {
-            full = r;
-            okBack = back;
-            break;
-          }
-          failBack = back;
-        }
-        // Zpřesnit: co nejblíž cíli.
-        for (var i = 0; okBack != null && failBack != null && i < 3; i++) {
-          final mid = (okBack + failBack) / 2;
-          final r = await reach(mid);
-          if (r != null) {
-            full = r;
-            okBack = mid;
-          } else {
-            failBack = mid;
-          }
+        final entry = await _townEntry(ex);
+        if (entry == null) {
+          // Celá etapa vede obcí vykládky.
+          leg = await raw(a, b, const [], exempt: true, head: head);
+          exemptWhole.add(k);
+        } else {
+          leg = await _reachable(raw, a, entry, head, alt);
         }
       } catch (_) {}
-    }
-    if (full == null) {
-      final r = parseAll(await raw(from, to, via, exempt: true, head: heading, alt: alternates));
-      for (final x in r) {
-        x.deliveryKm = x.lengthKm;
+      // Obec nejde zjistit / vjezd není dosažitelný: s plnou hmotností co nejblíž cíli.
+      leg ??= await _reachable(raw, a, b, head, alt) ?? await _closestReachable(raw, a, b, head);
+      if (leg == null) {
+        leg = await raw(a, b, const [], exempt: true, head: head);
+        exemptWhole.add(k);
       }
-      return r;
+      if (legCount == 1) alternatesData = (leg['alternates'] as List?) ?? const [];
+      fullLegs.add(leg);
     }
-    final pts = [from, ...via, to];
-    final legs = ((full['trip'] as Map)['legs'] as List).cast<Map<String, dynamic>>();
+
+    // Výjezd ze zóny u startu (start přichycen jinam) a dojezd od vjezdu do obce k cíli – s výjimkou.
     final pre = <int, Map<String, dynamic>>{}, post = <int, Map<String, dynamic>>{};
-    for (var k = 0; k < legs.length && k + 1 < pts.length; k++) {
-      final shape = decodePolyline6(legs[k]['shape'] as String);
+    for (var k = 0; k < legCount; k++) {
+      if (exemptWhole.contains(k)) continue;
+      final legs = ((fullLegs[k]['trip'] as Map)['legs'] as List);
+      final shape = decodePolyline6((legs.first as Map)['shape'] as String);
       if (shape.length < 2) continue;
       try {
         if (d(pts[k], shape.first) > 150) {
-          final r = await raw(pts[k], shape.first, const [], exempt: true, head: k == 0 ? heading : null);
-          pre[k] = r;
+          pre[k] = await raw(pts[k], shape.first, const [], exempt: true, head: k == 0 ? heading : null);
         }
-        if (d(shape.last, pts[k + 1]) > 150) {
-          post[k] = await raw(shape.last, pts[k + 1], const [], exempt: true);
-        }
+        final end = decodePolyline6((legs.last as Map)['shape'] as String).last;
+        if (d(end, pts[k + 1]) > 150) post[k] = await raw(end, pts[k + 1], const [], exempt: true);
       } catch (_) {}
     }
-    if (pre.isEmpty && post.isEmpty) return parseAll(full);
-    Map<String, dynamic> stitch(Map<String, dynamic> trip) {
+
+    Map<String, dynamic> stitch(List<Map<String, dynamic>> legTrips) {
       final out = <Map<String, dynamic>>[];
       var length = 0.0, time = 0.0, exemptKm = 0.0;
-      var toll = trip['summary']?['has_toll'] == true, highway = trip['summary']?['has_highway'] == true;
-      final tl = (trip['legs'] as List).cast<Map<String, dynamic>>();
-      for (var k = 0; k < tl.length; k++) {
+      var toll = false, highway = false;
+      for (var k = 0; k < legTrips.length; k++) {
         final parts = <(Map<String, dynamic>, bool)>[
           if (pre[k] case final p?)
             (((p['trip'] as Map)['legs'] as List).first as Map<String, dynamic>, true),
-          (tl[k], false),
+          for (final l in (legTrips[k]['legs'] as List)) (l as Map<String, dynamic>, exemptWhole.contains(k)),
           if (post[k] case final p?)
             (((p['trip'] as Map)['legs'] as List).first as Map<String, dynamic>, true),
         ];
         for (var i = 0; i < parts.length; i++) {
           final (leg, exempt) = parts[i];
           final ms = [...(leg['maneuvers'] as List)];
-          // Napojení částí: bez „Dorazili jste“ / „Vyjeďte“ uprostřed trasy.
+          // Napojení částí: bez „Dorazili jste“ / „Vyjeďte“ uprostřed etapy.
           if (i < parts.length - 1 && ms.length > 1) ms.removeLast();
           if (i > 0 && ms.length > 1) ms.removeAt(0);
           out.add({...leg, 'maneuvers': ms});
@@ -264,10 +235,10 @@ class ValhallaClient {
         }
       }
       return {
-        ...trip,
+        ...legTrips.first,
         'legs': out,
         'summary': {
-          ...?(trip['summary'] as Map?)?.cast<String, dynamic>(),
+          ...?(legTrips.first['summary'] as Map?)?.cast<String, dynamic>(),
           'length': length,
           'time': time,
           'has_toll': toll,
@@ -277,14 +248,164 @@ class ValhallaClient {
       };
     }
 
-    final trips = [
-      full['trip'] as Map<String, dynamic>,
-      for (final a in (full['alternates'] as List? ?? const [])) (a as Map)['trip'] as Map<String, dynamic>,
-    ];
+    TruckRoute build(List<Map<String, dynamic>> legTrips) {
+      final st = stitch(legTrips);
+      return parseTrip(st)..deliveryKm = (st['_exemptKm'] as num).toDouble();
+    }
+
+    final mainTrips = [for (final l in fullLegs) l['trip'] as Map<String, dynamic>];
     return [
-      for (final t in trips)
-        if (stitch(t) case final st) parseTrip(st)..deliveryKm = (st['_exemptKm'] as num).toDouble(),
+      build(mainTrips),
+      for (final a in alternatesData) build([(a as Map)['trip'] as Map<String, dynamic>]),
     ];
+  }
+
+  /// Trasa s plnou hmotností z [a] do [b], jen pokud opravdu dojede k [b] (ne k přichycenému bodu jinde).
+  static Future<Map<String, dynamic>?> _reachable(
+    Future<Map<String, dynamic>> Function(
+      LatLng,
+      LatLng,
+      List<LatLng>, {
+      required bool exempt,
+      double? head,
+      int alt,
+    })
+    raw,
+    LatLng a,
+    LatLng b,
+    double? head,
+    int alt,
+  ) async {
+    try {
+      final r = await raw(a, b, const [], exempt: false, head: head, alt: alt);
+      final legs = ((r['trip'] as Map)['legs'] as List);
+      final end = decodePolyline6((legs.last as Map)['shape'] as String).last;
+      return const Distance()(end, b) < 150 ? r : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Na trase s výjimkou najde místo nejblíž cíli, kam kamion s plnou hmotností dojede.
+  static Future<Map<String, dynamic>?> _closestReachable(
+    Future<Map<String, dynamic>> Function(
+      LatLng,
+      LatLng,
+      List<LatLng>, {
+      required bool exempt,
+      double? head,
+      int alt,
+    })
+    raw,
+    LatLng a,
+    LatLng b,
+    double? head,
+  ) async {
+    try {
+      final ex = parseTrip(
+        (await raw(a, b, const [], exempt: true, head: head))['trip'] as Map<String, dynamic>,
+      );
+      final cum = ex.cumulative;
+      LatLng at(double back) {
+        final i = cum.indexWhere((c) => c >= cum.last - back);
+        return ex.shape[i < 0 ? 0 : i];
+      }
+
+      Map<String, dynamic>? best;
+      double? okBack, failBack = 0;
+      for (var back = 500.0; back < cum.last * 0.95; back *= 2) {
+        final r = await _reachable(raw, a, at(back), head, 0);
+        if (r != null) {
+          best = r;
+          okBack = back;
+          break;
+        }
+        failBack = back;
+      }
+      for (var i = 0; okBack != null && failBack != null && i < 3; i++) {
+        final mid = (okBack + failBack) / 2;
+        final r = await _reachable(raw, a, at(mid), head, 0);
+        if (r != null) {
+          best = r;
+          okBack = mid;
+        } else {
+          failBack = mid;
+        }
+      }
+      return best;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Zapamatovaný vjezd do obce cíle (klíč = cíl) – přepočet během jízdy ho nehledá znovu.
+  static final _entryCache = <String, (String, LatLng?)>{};
+
+  /// Bod na trase [r], kde trasa vjíždí do obce cíle (null = celá trasa vede obcí cíle).
+  /// Hází výjimku, když obec nejde zjistit.
+  static final _entryInflight = <String, Future<LatLng?>>{};
+
+  static Future<LatLng?> _townEntry(TruckRoute r) {
+    final dest = r.shape.last;
+    // Varianty trasy (nejrychlejší / bez mýta / nejkratší) se počítají souběžně → hledat jednou.
+    final key =
+        '${dest.latitude.toStringAsFixed(4)},${dest.longitude.toStringAsFixed(4)}|'
+        '${r.shape.first.latitude.toStringAsFixed(3)},${r.shape.first.longitude.toStringAsFixed(3)}';
+    return _entryInflight.putIfAbsent(
+      key,
+      () => _findTownEntry(r).whenComplete(() => _entryInflight.remove(key)),
+    );
+  }
+
+  static Future<LatLng?> _findTownEntry(TruckRoute r) async {
+    const d = Distance();
+    final dest = r.shape.last, start = r.shape.first;
+    final key = '${dest.latitude.toStringAsFixed(4)},${dest.longitude.toStringAsFixed(4)}';
+    final towns = TownLookup();
+    final cached = _entryCache[key];
+    if (cached != null) {
+      // Už jsme v obci cíle → celá zbývající cesta s výjimkou; jinak dřív nalezený vjezd.
+      final (town, entry) = cached;
+      if (entry == null || await towns.at(start) == town) return null;
+      if (d(start, dest) > d(entry, dest)) return entry;
+    }
+    final cum = r.cumulative;
+    LatLng at(double back) {
+      final i = cum.indexWhere((c) => c >= cum.last - back);
+      return r.shape[i < 0 ? 0 : i];
+    }
+
+    // Obec cíle a obce bodů 0,4 / 0,8 / 1,6 … km před cílem – vše najednou.
+    final backs = [for (var b = 400.0; b < cum.last; b *= 2) b];
+    final res = await Future.wait([towns.at(dest), towns.at(start), for (final b in backs) towns.at(at(b))]);
+    final town = res[0];
+    if (town == null) throw StateError('obec cíle neznámá');
+    double inside = 0, outside = cum.last;
+    var found = false;
+    for (var i = 0; i < backs.length; i++) {
+      if (res[i + 2] != town) {
+        outside = backs[i];
+        found = true;
+        break;
+      }
+      inside = backs[i];
+    }
+    if (!found && res[1] == town) {
+      _entryCache[key] = (town, null);
+      return null;
+    }
+    // Zpřesnit hranici obce (~150 m).
+    for (var i = 0; i < 5 && outside - inside > 150; i++) {
+      final mid = (inside + outside) / 2;
+      if (await towns.at(at(mid)) == town) {
+        inside = mid;
+      } else {
+        outside = mid;
+      }
+    }
+    final entry = at(inside);
+    _entryCache[key] = (town, entry);
+    return entry;
   }
 
   Future<Map<String, dynamic>> _routeData({

@@ -2361,7 +2361,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                             )
                           else
                             Text(
-                              '${_settings.delivery ? (route.deliveryKm > 0.05 && route.deliveryKm < route.lengthKm * 0.9 ? 'ZÁSOBOVÁNÍ (výjimka ${route.deliveryKm.toStringAsFixed(1).replaceAll('.', ',')} km u cíle) · ' : 'ZÁSOBOVÁNÍ · ') : ''}${_settings.profile.summary}',
+                              '${_settings.delivery ? (route.deliveryKm > 0.05 && route.deliveryKm < route.lengthKm * 0.9 ? 'ZÁSOBOVÁNÍ v obci cíle (${route.deliveryKm.toStringAsFixed(1).replaceAll('.', ',')} km) · ' : 'ZÁSOBOVÁNÍ · ') : ''}${_settings.profile.summary}',
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(

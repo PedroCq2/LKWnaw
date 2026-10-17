@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:latlong2/latlong.dart';
 import 'package:path_provider/path_provider.dart';
@@ -31,7 +32,43 @@ class OfflineSearch {
     }
   }
 
+  List<(String, double, double, double)>? _towns; // jméno, lat, lon, váha (město > obec)
+
+  /// Nejbližší obec/město k bodu (bez internetu). Město „přitahuje“ silněji než vesnice,
+  /// aby např. Trnovany (část Teplic) patřily Teplicím, ne sousední vesnici.
+  String? nearestTown(LatLng p) {
+    final db = _db;
+    if (db == null) return null;
+    try {
+      _towns ??= [
+        for (final r in db.select("SELECT name, kind, lat, lon FROM poi WHERE kind IN ('Město', 'Obec')"))
+          (
+            r['name'] as String,
+            (r['lat'] as num).toDouble(),
+            (r['lon'] as num).toDouble(),
+            r['kind'] == 'Město' ? 3.0 : 1.0,
+          ),
+      ];
+    } catch (_) {
+      return null;
+    }
+    String? best;
+    var bestD = double.infinity;
+    final k = math.cos(p.latitude * math.pi / 180);
+    for (final (name, lat, lon, w) in _towns!) {
+      final dy = lat - p.latitude, dx = (lon - p.longitude) * k;
+      if (dy.abs() > 0.2 || dx.abs() > 0.2) continue;
+      final dd = math.sqrt(dx * dx + dy * dy) / w;
+      if (dd < bestD) {
+        bestD = dd;
+        best = name;
+      }
+    }
+    return best;
+  }
+
   void close() {
+    _towns = null;
     try {
       _db?.close();
     } catch (_) {}

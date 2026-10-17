@@ -15,5 +15,7 @@ class OfflineSearch {
 
   void close() {}
 
+  String? nearestTown(Object p) => null;
+
   List<Place> search(String query, {int limit = 12}) => [];
 }
