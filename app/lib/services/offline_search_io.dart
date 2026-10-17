@@ -29,12 +29,50 @@ class OfflineSearch {
       if (!File(p).existsSync()) return;
       _db = sqlite3.open(p, mode: OpenMode.readOnly);
       _hasBorders = _db!.select("SELECT 1 FROM sqlite_master WHERE name = 'town_rtree'").isNotEmpty;
+      _hasRamps = _db!.select("SELECT 1 FROM sqlite_master WHERE name = 'ramp_rtree'").isNotEmpty;
     } catch (_) {
       _db = null;
     }
   }
 
   bool _hasBorders = false;
+  bool _hasRamps = false;
+
+  /// Předpočítaná rampa u velké budovy (obchod, sklad, hala) v místě [p]:
+  /// (bod, druh 1 rampa / 2 služební vchod / 3 zásobovací cesta / 4 odhad zezadu).
+  (LatLng, int)? rampAt(LatLng p) {
+    final db = _db;
+    if (db == null || !_hasRamps) return null;
+    try {
+      const pad = 0.0008; // ~60–90 m
+      final rows = db.select(
+        'SELECT r.lat, r.lon, r.how, t.minlat, t.maxlat, t.minlon, t.maxlon FROM ramp_rtree t '
+        'JOIN ramp r ON r.id = t.id WHERE t.minlat <= ? AND t.maxlat >= ? AND t.minlon <= ? AND t.maxlon >= ?',
+        [p.latitude + pad, p.latitude - pad, p.longitude + pad, p.longitude - pad],
+      );
+      (LatLng, int)? best;
+      var bestScore = double.infinity;
+      for (final r in rows) {
+        final minlat = r['minlat'] as double, maxlat = r['maxlat'] as double;
+        final minlon = r['minlon'] as double, maxlon = r['maxlon'] as double;
+        final inBox =
+            p.latitude >= minlat && p.latitude <= maxlat && p.longitude >= minlon && p.longitude <= maxlon;
+        // Budova, ve které cíl leží (nejmenší obálka), jinak nejbližší.
+        final cy = (minlat + maxlat) / 2, cx = (minlon + maxlon) / 2;
+        final dy = p.latitude - cy, dx = (p.longitude - cx) * math.cos(p.latitude * math.pi / 180);
+        final score = inBox ? (maxlat - minlat) * (maxlon - minlon) * 1e-3 : 1 + math.sqrt(dx * dx + dy * dy);
+        if (score < bestScore) {
+          bestScore = score;
+          best = (LatLng(r['lat'] as double, r['lon'] as double), r['how'] as int);
+        }
+      }
+      return best;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  bool get hasRamps => _db != null && _hasRamps;
 
   /// Rejstřík obsahuje hranice obcí (novější balík).
   bool get hasTownBorders => _db != null && _hasBorders;

@@ -19,6 +19,8 @@ import '../services/restrictions.dart';
 import '../services/lanes.dart';
 import '../services/highway_services.dart';
 import '../services/map_style.dart';
+import '../services/offline_search.dart';
+import '../services/ramp_finder.dart';
 import 'scan_screen.dart';
 import '../services/pip.dart';
 import '../services/offline_maps.dart';
@@ -103,6 +105,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   SavedPlace? _destSaved; // cíl je uložené místo (vjezd + poznámka)
   LatLng? _destAddr; // adresa cíle (bez vjezdu)
   bool _pickGate = false; // čeká se na dlouhé podržení u vjezdu pro kamiony
+  Ramp? _destRamp; // nalezená rampa u cíle (kamion jede k ní, ne na parkoviště)
   bool _noteSpoken = false;
   final List<(LatLng, String)> _stops = []; // zastávky po cestě (průjezdní body)
   LatLng? _planStart; // začátek naplánované trasy (null = moje poloha)
@@ -730,6 +733,9 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         'dest',
         _points([
           if (_dest != null) (_dest!, {'stop': false}),
+          // Obchod / adresa, když se jede k rampě jinam.
+          if (_destAddr != null && _dest != null && const Distance()(_destAddr!, _dest!) > 25)
+            (_destAddr!, {'stop': true}),
           for (final st in _stops) (st.$1, {'stop': true}),
         ]),
       );
@@ -1421,8 +1427,9 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     _applyCamera();
   }
 
-  void _setDestination(LatLng p, String name, {SavedPlace? saved, bool compute = true}) {
+  void _setDestination(LatLng p, String name, {SavedPlace? saved, bool compute = true, bool ramp = true}) {
     FocusScope.of(context).unfocus();
+    _destRamp = null;
     _excluded.clear();
     _stops.clear();
     _planStart = null;
@@ -1439,7 +1446,90 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       _noteSpoken = false;
     });
     _syncLayers();
-    if (compute) _computeRoute(reroute: _navigating);
+    // Bez uloženého vjezdu: najít rampu (zásobování bývá zezadu, ne z parkoviště před obchodem).
+    if (ramp && _destSaved?.gate == null) {
+      _findRampThen(p, compute);
+    } else if (compute) {
+      _computeRoute(reroute: _navigating);
+    }
+  }
+
+  Future<void> _findRampThen(LatLng addr, bool compute) async {
+    if (compute) setState(() => _routing = true);
+    Ramp? r;
+    try {
+      r = await rampFor(addr);
+    } catch (_) {}
+    if (!mounted) return;
+    if (r != null && _destAddr == addr && const Distance()(r.point, addr) > 25) {
+      setState(() {
+        _destRamp = r;
+        _dest = r!.point;
+      });
+      await _syncLayers();
+    }
+    if (compute) {
+      setState(() => _routing = false);
+      await _computeRoute(reroute: _navigating);
+    }
+  }
+
+  /// Volba cíle: k rampě / k adrese / označit rampu ručně / uložit rampu.
+  Future<void> _rampMenu() async {
+    final r = _destRamp;
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Lkw.panel,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              title: Text(r == null ? 'Kam přesně jedete?' : r.how),
+              subtitle: Text(
+                r == null
+                    ? 'Rampu jsem u cíle nenašel.'
+                    : r.sure
+                    ? 'Podle mapových dat.'
+                    : 'Odhad: obslužná cesta za budovou, na opačné straně než parkoviště.',
+              ),
+            ),
+            if (r != null)
+              ListTile(
+                leading: const Icon(Icons.save, color: Lkw.amber),
+                title: const Text('Sedí – uložit rampu k tomuto místu'),
+                onTap: () => Navigator.pop(ctx, 'save'),
+              ),
+            ListTile(
+              leading: const Icon(Icons.touch_app, color: Lkw.amber),
+              title: const Text('Označit rampu na mapě'),
+              subtitle: const Text('Dlouze podržte prst u rampy – uloží se natrvalo'),
+              onTap: () => Navigator.pop(ctx, 'pick'),
+            ),
+            if (r != null)
+              ListTile(
+                leading: const Icon(Icons.storefront),
+                title: const Text('Navigovat k adrese / obchodu'),
+                onTap: () => Navigator.pop(ctx, 'addr'),
+              ),
+          ],
+        ),
+      ),
+    );
+    switch (choice) {
+      case 'save':
+        await _setGate(r!.point);
+      case 'pick':
+        setState(() => _pickGate = true);
+        _fitDestination();
+      case 'addr':
+        setState(() {
+          _destRamp = null;
+          _dest = _destAddr;
+        });
+        await _syncLayers();
+        await _computeRoute(reroute: _navigating);
+    }
   }
 
   /// Otevře plánování trasy (začátek, zastávky, cíl) a trasu podle plánu spočítá.
@@ -1473,10 +1563,26 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       ),
     );
     if (plan == null || !mounted) return;
-    _setDestination(plan.dest.point, plan.dest.name, compute: false);
+    _setDestination(plan.dest.point, plan.dest.name, compute: false, ramp: false);
+    // Zastávky a cíl: k rampám (uložený vjezd, jinak předpočítaná rampa z rejstříku).
+    Future<LatLng> toRamp(LatLng p) async {
+      final sp = _saved.near(p);
+      if (sp?.gate != null) return sp!.gate!;
+      final r = OfflineSearch.instance.hasRamps ? await rampFor(p) : null;
+      return r != null && const Distance()(r.point, p) > 25 ? r.point : p;
+    }
+
+    final stops = [for (final s in plan.stops) (await toRamp(s.point), s.name)];
+    final destRamp = OfflineSearch.instance.hasRamps && _destSaved?.gate == null
+        ? await rampFor(plan.dest.point)
+        : null;
     setState(() {
+      if (destRamp != null && const Distance()(destRamp.point, plan.dest.point) > 25) {
+        _destRamp = destRamp;
+        _dest = destRamp.point;
+      }
       _stops.clear();
-      _stops.addAll([for (final s in plan.stops) (s.point, s.name)]);
+      _stops.addAll(stops);
       _planStart = plan.start?.point;
       _planStartName = plan.start?.name;
     });
@@ -1563,7 +1669,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       }
       if (choice != 'dest') return;
     }
-    _setDestination(p, '${p.latitude.toStringAsFixed(5)}, ${p.longitude.toStringAsFixed(5)}');
+    _setDestination(p, '${p.latitude.toStringAsFixed(5)}, ${p.longitude.toStringAsFixed(5)}', ramp: false);
   }
 
   /// Uloží vjezd pro kamiony k aktuálnímu cíli a naviguje k němu.
@@ -1579,6 +1685,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         );
     sp.gate = gate;
     setState(() {
+      _destRamp = null;
       _pickGate = false;
       _destSaved = sp;
       _dest = gate;
@@ -2457,6 +2564,34 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       style: const TextStyle(color: Lkw.muted, fontSize: 13),
+                                    ),
+                                  if (_destRamp != null || (_destSaved?.gate == null && !_navigating))
+                                    InkWell(
+                                      onTap: _rampMenu,
+                                      child: Padding(
+                                        padding: const EdgeInsets.only(top: 2),
+                                        child: Text(
+                                          _destRamp != null
+                                              ? '🚚 ${_destRamp!.how} – klepněte pro změnu'
+                                              : '🚚 Rampa nenalezena – klepněte a označte ji',
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            color: _destRamp != null ? Lkw.amber : Lkw.muted,
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  if (_destSaved?.gate != null)
+                                    const Text(
+                                      '🚚 Uložený vjezd / rampa',
+                                      style: TextStyle(
+                                        color: Lkw.amber,
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w700,
+                                      ),
                                     ),
                                   if (_destSaved?.note != null)
                                     Text(

@@ -21,5 +21,9 @@ class OfflineSearch {
 
   String? townAt(Object p) => null;
 
+  bool get hasRamps => false;
+
+  (Object, int)? rampAt(Object p) => null;
+
   List<Place> search(String query, {int limit = 12}) => [];
 }
