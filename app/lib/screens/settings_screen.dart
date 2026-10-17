@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../services/problem_reports.dart';
 import '../services/settings.dart';
+import '../services/sign_store.dart';
 import '../services/voice.dart';
 import 'offline_section.dart';
 
@@ -198,6 +200,63 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               icon: const Icon(Icons.delete_outline),
                               onPressed: () async {
                                 await ProblemReports.clear();
+                                setState(() {});
+                              },
+                            ),
+                          ],
+                        ),
+                );
+              },
+            ),
+            FutureBuilder<(int, int, int)>(
+              future: SignStore.instance.stats(),
+              builder: (ctx, snap) {
+                final (n, k, bytes) = snap.data ?? (0, 0, 0);
+                return ListTile(
+                  leading: const Icon(Icons.videocam_outlined),
+                  title: Text('Značky z kamery ($n)'),
+                  subtitle: Text(
+                    'Všechny značky a tabule s polohou a výřezem – vlastní databáze značek. '
+                    'Rozpoznáno: $k · ${(bytes / 1048576).toStringAsFixed(1)} MB. Zapnete v nabídce „Kamera“.',
+                  ),
+                  isThreeLine: true,
+                  trailing: n == 0
+                      ? null
+                      : Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              tooltip: 'Odeslat (zip)',
+                              icon: const Icon(Icons.share),
+                              onPressed: () async {
+                                final path = await SignStore.instance.exportZip();
+                                await SharePlus.instance.share(
+                                  ShareParams(files: [XFile(path)], subject: 'LKWnav – značky z kamery'),
+                                );
+                              },
+                            ),
+                            IconButton(
+                              tooltip: 'Smazat',
+                              icon: const Icon(Icons.delete_outline),
+                              onPressed: () async {
+                                final ok = await showDialog<bool>(
+                                  context: ctx,
+                                  builder: (d) => AlertDialog(
+                                    title: const Text('Smazat všechny značky z kamery?'),
+                                    actions: [
+                                      TextButton(
+                                        onPressed: () => Navigator.pop(d, false),
+                                        child: const Text('Ne'),
+                                      ),
+                                      FilledButton(
+                                        onPressed: () => Navigator.pop(d, true),
+                                        child: const Text('Smazat'),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                                if (ok != true) return;
+                                await SignStore.instance.clear();
                                 setState(() {});
                               },
                             ),

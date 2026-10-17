@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:camera/camera.dart' show CameraPreview;
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:maplibre_gl/maplibre_gl.dart' as ml;
@@ -24,6 +25,8 @@ import '../services/problem_reports.dart';
 import '../services/voice_commands.dart';
 import '../services/offline_search.dart';
 import '../services/ramp_finder.dart';
+import '../services/sign_camera.dart';
+import '../services/sign_parse.dart';
 import 'scan_screen.dart';
 import '../services/pip.dart';
 import '../services/offline_maps.dart';
@@ -59,6 +62,10 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   // Poslední GPS (nebo simulovaný) fix.
   LatLng? _pos;
   double _heading = 0;
+  // Kamera čte značky (rychlost, výška, hmotnost, délka) a ukládá je s polohou.
+  SignCamera? _cam;
+  StreamSubscription<SignRead>? _camSub;
+  (SignRead, DateTime)? _camSign;
   double _speedKmh = 0;
   bool _follow = true;
   // Volná jízda bez trasy: po rozjetí mapa ve směru jízdy (jako při navigaci).
@@ -162,6 +169,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   void dispose() {
     Pip.instance.active.removeListener(_onPip);
     _posSub?.cancel();
+    _camSub?.cancel();
+    _cam?.dispose();
     _sim?.stop();
     _searchDebounce?.cancel();
     _nightTimer?.cancel();
@@ -2337,6 +2346,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                           on: _settings.mapLayer != MapLayer.map,
                         ),
                         quick(Icons.mic, 'Povely', () => go(() => _handleVoice('co umíš'))),
+                        quick(Icons.videocam, 'Kamera', () => go(_toggleCamera), on: _cam != null),
                       ],
                     ),
                   ),
@@ -2384,6 +2394,146 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
             ),
           );
         },
+      ),
+    );
+  }
+
+  Future<void> _toggleCamera() async {
+    if (_cam != null) {
+      await _camSub?.cancel();
+      final c = _cam;
+      setState(() {
+        _cam = null;
+        _camSign = null;
+      });
+      await c?.dispose();
+      return;
+    }
+    final c = SignCamera(() {
+      final p = _pos;
+      if (p == null) return null;
+      return (
+        lat: p.latitude,
+        lon: p.longitude,
+        acc: null,
+        heading: _speedKmh > 5 ? _heading : null,
+        speedKmh: _speedKmh,
+      );
+    });
+    try {
+      await c.start();
+    } catch (e) {
+      await c.dispose();
+      _toast('Kameru se nepodařilo zapnout (povolte přístup ke kameře).');
+      return;
+    }
+    if (!mounted) {
+      await c.dispose();
+      return;
+    }
+    _camSub = c.signs.listen(_onCamSign);
+    setState(() => _cam = c);
+    _toast('Kamera ukládá značky a tabule. Telefon dejte objektivem na silnici.');
+  }
+
+  Future<void> _onCamSign(SignRead r) async {
+    if (!mounted) return;
+    setState(() => _camSign = (r, DateTime.now()));
+    Future.delayed(const Duration(seconds: 15), () {
+      if (mounted && _camSign?.$1 == r) setState(() => _camSign = null);
+    });
+    final pr = _settings.profile;
+    final over = switch (r.kind) {
+      SignKind.height => pr.height > r.value,
+      SignKind.weight => pr.weight > r.value,
+      SignKind.length => pr.length > r.value,
+      SignKind.axle => pr.axleLoad > r.value,
+      SignKind.speed => false,
+    };
+    if (over) {
+      _say(
+        'Pozor, kamera vidí značku ${r.kind.label.toLowerCase()} ${r.text.replaceAll(' m', ' metru').replaceAll(' t', ' tun')}.',
+      );
+    }
+  }
+
+  /// Okénko kamery s poslední rozpoznanou značkou.
+  Widget _cameraView() {
+    final c = _cam?.controller;
+    final sign = _camSign?.$1;
+    return GestureDetector(
+      onTap: _toggleCamera,
+      child: Container(
+        width: 96,
+        height: 128,
+        clipBehavior: Clip.antiAlias,
+        decoration: BoxDecoration(
+          color: Colors.black,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: Lkw.panelHi, width: 2),
+          boxShadow: const [BoxShadow(blurRadius: 6, color: Colors.black38)],
+        ),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            if (c != null && c.value.isInitialized)
+              FittedBox(
+                fit: BoxFit.cover,
+                child: SizedBox(
+                  width: c.value.previewSize?.height ?? 96,
+                  height: c.value.previewSize?.width ?? 128,
+                  child: CameraPreview(c),
+                ),
+              ),
+            if (sign != null)
+              Center(
+                child: Container(
+                  width: 70,
+                  height: 70,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    shape: BoxShape.circle,
+                    border: Border.all(color: const Color(0xFFD7262E), width: 8),
+                  ),
+                  child: FittedBox(
+                    child: Padding(
+                      padding: const EdgeInsets.all(4),
+                      child: Text(
+                        sign.text,
+                        style: const TextStyle(
+                          color: Colors.black,
+                          fontWeight: FontWeight.w900,
+                          fontSize: 22,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            Positioned(
+              left: 4,
+              top: 4,
+              child: Row(
+                children: [
+                  const Icon(Icons.fiber_manual_record, color: Color(0xFFD7262E), size: 12),
+                  if (_cam case final cam?)
+                    ValueListenableBuilder<int>(
+                      valueListenable: cam.saved,
+                      builder: (_, n, _) => Text(
+                        ' $n',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -2769,6 +2919,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                       tolerance: _settings.speedTolerance,
                     ),
                   ),
+                if (_cam != null && !pip)
+                  Positioned(left: 12, bottom: panelH + 136 + bottomPad, child: _cameraView()),
                 if (_offline)
                   Positioned(
                     left: 0,
