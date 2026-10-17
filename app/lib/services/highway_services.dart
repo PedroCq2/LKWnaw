@@ -22,6 +22,7 @@ class _Hit {
   String get kind {
     final h = tags['highway'], a = tags['amenity'], t = tags['tourism'];
     if (h == 'services' || h == 'rest_area') return h as String;
+    if (h == 'motorway_junction') return 'junction';
     if (a == 'fuel') return 'fuel';
     if (a == 'parking') return _hgv(tags) ? 'hgv_parking' : 'parking';
     if (t == 'hotel' || t == 'motel') return 'hotel';
@@ -143,6 +144,7 @@ Future<List<HighwayService>> findHighwayServices(
       'nwr["highway"~"^(services|rest_area)\$"]$a;'
       'nwr["amenity"~"^(fuel|parking|restaurant|fast_food|cafe|toilets|shower)\$"]$a;'
       'nwr["tourism"~"^(hotel|motel)\$"]$a;'
+      'node["highway"="motorway_junction"]["ref"]$a;'
       ');out center tags 400;',
     );
     _collect(els ?? const [], c, runs, seen, hits);
@@ -162,7 +164,14 @@ void _collect(
 ) {
   for (final e in els) {
     final t = Map<String, dynamic>.from((e['tags'] as Map?) ?? const {});
+    // Soukromé (odtahové, firemní) parkoviště a pumpy nejsou pro řidiče.
+    if (const {'private', 'no'}.contains(t['access'])) continue;
+    if (t['amenity'] == 'parking' &&
+        RegExp(r'\bbus\b|autobus', caseSensitive: false).hasMatch('${t['name'] ?? ''}')) {
+      continue;
+    }
     final svc =
+        (t['highway'] == 'motorway_junction' && t['ref'] != null) ||
         t['highway'] == 'services' ||
         t['highway'] == 'rest_area' ||
         _svcAmenity.contains(t['amenity']) ||
@@ -246,8 +255,9 @@ List<HighwayService> _buildServices(List<_Hit> hits, {String? Function(double at
     }
   }
   for (final h in hits.where((h) => !anchor(h))) {
+    if (h.kind == 'junction') continue;
     for (final g in groups) {
-      if ((h.at - g.first.at).abs() < 700 && g.any((x) => dist(x.p, h.p) < 450)) {
+      if ((h.at - g.first.at).abs() < 700 && g.any((x) => dist(x.p, h.p) < 300)) {
         g.add(h);
         break;
       }
@@ -255,7 +265,16 @@ List<HighwayService> _buildServices(List<_Hit> hits, {String? Function(double at
   }
   final out = <HighwayService>[];
   for (final g in groups) {
-    final main = g.firstWhere((h) => h.kind == 'services' || h.kind == 'rest_area', orElse: () => g.first);
+    // Jméno odpočívky; jinak pumpa, parkoviště pro kamiony (jméno běžného parkoviště bývá cizí firma).
+    _Hit? named(bool Function(_Hit h) f) =>
+        g.where((h) => f(h) && '${h.tags['name'] ?? h.tags['brand'] ?? ''}'.trim().isNotEmpty).firstOrNull;
+    final main =
+        named((h) => h.kind == 'services' || h.kind == 'rest_area') ??
+        g.where((h) => h.kind == 'services' || h.kind == 'rest_area').firstOrNull ??
+        named((h) => h.kind == 'fuel') ??
+        g.where((h) => h.kind == 'fuel').firstOrNull ??
+        named((h) => h.kind == 'hgv_parking') ??
+        g.first;
     final kinds = g.map((h) => h.kind).toSet();
     final am = <ServiceAmenity>{};
     final brands = <String>[];
@@ -269,6 +288,12 @@ List<HighwayService> _buildServices(List<_Hit> hits, {String? Function(double at
         case 'fuel':
           am.add(ServiceAmenity.fuel);
           if (t['opening_hours'] == '24/7' && !notes.contains('nonstop')) notes.add('nonstop');
+          if (t['fuel:HGV_diesel'] == 'yes' && !notes.contains('stojan pro kamiony')) {
+            notes.add('stojan pro kamiony');
+          }
+          if (t['fuel:HGV_diesel'] == 'no' && !notes.contains('bez stojanu pro kamiony')) {
+            notes.add('bez stojanu pro kamiony');
+          }
         case 'restaurant' || 'fast_food' || 'cafe':
           am.add(ServiceAmenity.food);
         case 'toilets':
@@ -305,13 +330,27 @@ List<HighwayService> _buildServices(List<_Hit> hits, {String? Function(double at
         : kinds.contains('hgv_parking')
         ? 'Parkoviště pro kamiony'
         : 'Parkoviště';
-    final mainName = (main.tags['name'] as String?)?.trim();
+    // Pumpa / parkoviště mimo odpočívku u exitu: obvykle je nutné sjet z dálnice.
+    final atG = g.map((h) => h.at).reduce(math.min);
+    if (!kinds.contains('services') && !kinds.contains('rest_area')) {
+      final j = hits
+          .where((h) => h.kind == 'junction' && (h.at - atG).abs() < 1000)
+          .fold<_Hit?>(null, (b, h) => b == null || (h.at - atG).abs() < (b.at - atG).abs() ? h : b);
+      // Obyčejné parkoviště u exitu je ve městě / u obchodu, ne pro kamion.
+      if (j != null && !fuel && !kinds.contains('hgv_parking')) continue;
+      if (j != null) notes.insert(0, 'sjezd ${j.tags['ref']} – mimo dálnici');
+    }
+    final mainName =
+        ((main.kind == 'fuel' ? main.tags['name'] ?? main.tags['brand'] : main.tags['name']) as String?)
+            ?.trim();
     out.add(
       HighwayService(
-        name: mainName != null && mainName.isNotEmpty ? mainName : (brands.isNotEmpty ? brands.first : type),
+        name: mainName != null && mainName.isNotEmpty
+            ? mainName
+            : (brands.isNotEmpty && (fuel || kinds.contains('hgv_parking')) ? brands.first : type),
         type: type,
         point: main.p,
-        atM: g.map((h) => h.at).reduce(math.min),
+        atM: atG,
         offM: main.off,
         amenities: am,
         brands: brands.take(5).toList(),

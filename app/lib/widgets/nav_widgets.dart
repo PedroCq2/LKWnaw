@@ -717,10 +717,13 @@ class StripItem {
   final double aheadM;
   final IconData icon;
   final Color color;
-  const StripItem(this.aheadM, this.icon, this.color);
+  final String? label; // pod ikonou: km a značka pumpy
+  final VoidCallback? onTap;
+  const StripItem(this.aheadM, this.icon, this.color, {this.label, this.onTap});
 }
 
 /// Pruh „co mě čeká“: dalších až 50 km trasy se zastávkami, službami, radary a omezeními.
+/// Pod službami je vzdálenost a značka; klepnutí otevře detail.
 class RouteStrip extends StatelessWidget {
   final double remainingM;
   final List<StripItem> items;
@@ -733,10 +736,20 @@ class RouteStrip extends StatelessWidget {
       ..sort((a, b) => b.aheadM.compareTo(a.aheadM)); // bližší navrch
     final km = (window / 1000).round();
     return SizedBox(
-      height: 30,
+      height: 50,
       child: LayoutBuilder(
         builder: (ctx, box) {
-          final w = box.maxWidth - 20;
+          final w = box.maxWidth - 28;
+          double x(StripItem it) => 4 + w * (it.aheadM / window);
+          // Popisky jen tam, kde se nepřekrývají (přednost mají bližší).
+          final labeled = <StripItem>{};
+          var lastX = -1e9;
+          for (final it in shown.reversed) {
+            if (it.label == null) continue;
+            if (x(it) - lastX < 62) continue;
+            labeled.add(it);
+            lastX = x(it);
+          }
           return Stack(
             clipBehavior: Clip.none,
             children: [
@@ -760,12 +773,32 @@ class RouteStrip extends StatelessWidget {
               ),
               for (final it in shown)
                 Positioned(
-                  left: 4 + w * (it.aheadM / window),
+                  left: x(it),
                   top: 2,
-                  child: Container(
-                    padding: const EdgeInsets.all(2),
-                    decoration: BoxDecoration(color: Lkw.panel, borderRadius: BorderRadius.circular(6)),
-                    child: Icon(it.icon, size: 20, color: it.color),
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: it.onTap,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(2),
+                          decoration: BoxDecoration(color: Lkw.panel, borderRadius: BorderRadius.circular(6)),
+                          child: Icon(it.icon, size: 22, color: it.color),
+                        ),
+                        if (labeled.contains(it))
+                          Text(
+                            it.label!,
+                            maxLines: 1,
+                            style: const TextStyle(
+                              fontSize: 11,
+                              height: 1.2,
+                              fontWeight: FontWeight.w700,
+                              color: Lkw.text,
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
                 ),
               Positioned(

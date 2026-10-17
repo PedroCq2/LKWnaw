@@ -1,11 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../models/truck_profile.dart';
-import '../services/problem_reports.dart';
 import '../services/settings.dart';
-import '../services/voice.dart';
-import 'offline_section.dart';
 
 class ProfileScreen extends StatefulWidget {
   final AppSettings settings;
@@ -18,39 +14,6 @@ class ProfileScreen extends StatefulWidget {
 class _ProfileScreenState extends State<ProfileScreen> {
   final _form = GlobalKey<FormState>();
   late TruckProfile p = TruckProfile.fromJson(widget.settings.profile.toJson());
-  late final _url = TextEditingController(text: widget.settings.valhallaUrl);
-  late bool _voice = widget.settings.voice;
-  late String? _voiceName = widget.settings.voiceName;
-  late double _rate = widget.settings.speechRate;
-  List<Map<String, String>> _voices = [];
-
-  @override
-  void initState() {
-    super.initState();
-    Voice.instance.czechVoices().then((v) {
-      if (mounted) setState(() => _voices = v);
-    });
-  }
-
-  /// Čitelný název hlasu: „cs-cz-x-jfs-local“ → „Hlas 1 (bez internetu)“.
-  String _voiceLabel(Map<String, String> v, int i) {
-    final net = v['network_required'] == 'true' || (v['name'] ?? '').contains('network');
-    return 'Hlas ${i + 1}${net ? ' (online)' : ' (bez internetu)'}';
-  }
-
-  Future<void> _testVoice() async {
-    widget.settings
-      ..voiceName = _voiceName
-      ..speechRate = _rate;
-    await Voice.instance.applySettings();
-    await Voice.instance.say('Za 800 metrů sjeďte na výjezdu 230 na D46 směr Olomouc. E 442.', force: true);
-  }
-
-  late bool _simulate = widget.settings.simulate;
-  late int _speedTol = widget.settings.speedTolerance;
-  late bool _speedSound = widget.settings.speedSound;
-  late bool _bigText = widget.settings.bigText;
-  late int _mapStyle = widget.settings.mapStyle;
   late bool _delivery = widget.settings.delivery;
 
   Widget _num(
@@ -82,18 +45,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
     _form.currentState!.save();
     widget.settings
       ..profile = p
-      ..valhallaUrl = _url.text.trim().isEmpty ? defaultValhallaUrl : _url.text.trim()
-      ..voice = _voice
-      ..voiceName = _voiceName
-      ..speechRate = _rate
-      ..simulate = _simulate
-      ..speedTolerance = _speedTol
-      ..speedSound = _speedSound
-      ..bigText = _bigText
-      ..mapStyle = _mapStyle
       ..delivery = _delivery;
     await widget.settings.save();
-    await Voice.instance.applySettings();
     if (mounted) Navigator.pop(context, true);
   }
 
@@ -101,7 +54,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Profil vozidla'),
+        title: const Text('Vozidlo a trasa'),
         actions: [IconButton(icon: const Icon(Icons.check), onPressed: _save)],
       ),
       body: Form(
@@ -199,156 +152,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
               onChanged: (v) => setState(() => p.avoidUnpaved = v),
             ),
             const Divider(),
-            ListTile(
-              title: const Text('Varování před překročením rychlosti'),
-              subtitle: Text(
-                _speedTol == 0
-                    ? 'Hned po překročení limitu'
-                    : 'Když jedete o víc než $_speedTol km/h nad limit',
-              ),
-            ),
-            Slider(
-              value: _speedTol.toDouble(),
-              min: 0,
-              max: 30,
-              divisions: 30,
-              label: '+$_speedTol km/h',
-              onChanged: (v) => setState(() => _speedTol = v.round()),
-            ),
-            SwitchListTile(
-              title: const Text('Hlasité varování „Pozor, rychlost“'),
-              value: _speedSound,
-              onChanged: (v) => setState(() => _speedSound = v),
-            ),
-            SwitchListTile(
-              title: const Text('Větší texty pokynů'),
-              subtitle: const Text('Horní okénko s pokynem větším písmem'),
-              value: _bigText,
-              onChanged: (v) => setState(() => _bigText = v),
-            ),
-            SwitchListTile(
-              title: const Text('Hlasové pokyny'),
-              value: _voice,
-              onChanged: (v) => setState(() => _voice = v),
-            ),
-            if (_voice) ...[
-              ListTile(
-                title: const Text('Hlas'),
-                subtitle: _voices.isEmpty
-                    ? const Text(
-                        'V telefonu není český hlas – nainstalujte ho v Nastavení → Převod textu na řeč.',
-                      )
-                    : null,
-                trailing: _voices.isEmpty
-                    ? null
-                    : DropdownButton<String?>(
-                        value: _voices.any((v) => v['name'] == _voiceName) ? _voiceName : null,
-                        items: [
-                          const DropdownMenuItem(value: null, child: Text('Automaticky')),
-                          for (final (i, v) in _voices.indexed)
-                            DropdownMenuItem(value: v['name'], child: Text(_voiceLabel(v, i))),
-                        ],
-                        onChanged: (v) => setState(() => _voiceName = v),
-                      ),
-              ),
-              ListTile(
-                title: Text('Rychlost řeči: ${(_rate * 200).round()} %'),
-                subtitle: Slider(
-                  value: _rate,
-                  min: 0.3,
-                  max: 0.8,
-                  divisions: 10,
-                  onChanged: (v) => setState(() => _rate = v),
-                ),
-                trailing: IconButton(
-                  icon: const Icon(Icons.play_circle, size: 36),
-                  tooltip: 'Vyzkoušet hlas',
-                  onPressed: _testVoice,
-                ),
-              ),
-            ],
-            SwitchListTile(
-              title: const Text('Simulace jízdy (demo)'),
-              subtitle: const Text('Po stisku Start jede kamion po trase sám – pro vyzkoušení'),
-              value: _simulate,
-              onChanged: (v) => setState(() => _simulate = v),
-            ),
-            ListTile(
-              title: const Text('Vzhled mapy'),
-              trailing: SegmentedButton<int>(
-                segments: const [
-                  ButtonSegment(value: 0, label: Text('Auto')),
-                  ButtonSegment(value: 1, label: Text('Den')),
-                  ButtonSegment(value: 2, label: Text('Noc')),
-                ],
-                selected: {_mapStyle},
-                onSelectionChanged: (v) => setState(() => _mapStyle = v.first),
-              ),
-            ),
-            const Divider(),
-            OfflineRoutingSection(settings: widget.settings),
-            const Divider(),
-            TextField(
-              controller: _url,
-              keyboardType: TextInputType.url,
-              decoration: const InputDecoration(
-                labelText: 'Valhalla server',
-                helperText: 'Vlastní server viz backend/docker-compose.yml',
-                border: OutlineInputBorder(),
-              ),
-            ),
             const SizedBox(height: 24),
             FilledButton.icon(onPressed: _save, icon: const Icon(Icons.save), label: const Text('Uložit')),
             const SizedBox(height: 24),
             const Divider(),
-            FutureBuilder<List<Map<String, dynamic>>>(
-              future: ProblemReports.load(),
-              builder: (ctx, snap) {
-                final n = snap.data?.length ?? 0;
-                return ListTile(
-                  leading: const Icon(Icons.report_problem_outlined),
-                  title: Text('Hlášení „navigovala špatně“ ($n)'),
-                  subtitle: const Text('Zkopírujte a pošlete – podle nich se navigace opraví'),
-                  trailing: n == 0
-                      ? null
-                      : Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton(
-                              tooltip: 'Zkopírovat',
-                              icon: const Icon(Icons.copy),
-                              onPressed: () async {
-                                await Clipboard.setData(ClipboardData(text: await ProblemReports.export()));
-                                if (ctx.mounted) {
-                                  ScaffoldMessenger.of(ctx)
-                                      .showSnackBar(const SnackBar(content: Text('Zkopírováno.')));
-                                }
-                              },
-                            ),
-                            IconButton(
-                              tooltip: 'Smazat',
-                              icon: const Icon(Icons.delete_outline),
-                              onPressed: () async {
-                                await ProblemReports.clear();
-                                setState(() {});
-                              },
-                            ),
-                          ],
-                        ),
-                );
-              },
-            ),
-            const ListTile(
-              leading: Icon(Icons.info_outline),
-              title: Text('O aplikaci LKWnav'),
-              subtitle: Text(
-                'Mapová data © přispěvatelé OpenStreetMap (ODbL)\n'
-                'Vektorové mapy: OpenFreeMap / OpenMapTiles\n'
-                'Letecké snímky: Ortofoto ČR © ČÚZK (CC BY 4.0)\n'
-                'Výpočet tras: Valhalla, vyhledávání: Nominatim, POI a omezení: Overpass API',
-              ),
-              isThreeLine: true,
-            ),
           ],
         ),
       ),

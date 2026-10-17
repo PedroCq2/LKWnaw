@@ -36,6 +36,7 @@ import '../theme.dart';
 import '../widgets/nav_widgets.dart';
 import 'planner_screen.dart';
 import 'profile_screen.dart';
+import 'settings_screen.dart';
 
 ml.LatLng _ml(LatLng p) => ml.LatLng(p.latitude, p.longitude);
 List<double> _xy(LatLng p) => [p.longitude, p.latitude];
@@ -1367,11 +1368,27 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                       leading: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          for (final a in [ServiceAmenity.fuel, ServiceAmenity.parking, ServiceAmenity.food])
+                          for (final a in [
+                            ServiceAmenity.fuel,
+                            ServiceAmenity.parking,
+                            ServiceAmenity.food,
+                            ServiceAmenity.wc,
+                            ServiceAmenity.shower,
+                          ])
                             if (x.amenities.contains(a)) Icon(amenityIcon(a), size: 18, color: Lkw.muted),
                         ],
                       ),
                       title: Text(x.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                      subtitle: Text(
+                        [
+                          x.type,
+                          ...x.brands.where((b) => b != x.name).take(2),
+                          ...x.notes.take(2),
+                        ].join(' · '),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(color: Lkw.muted, fontSize: 13),
+                      ),
                       trailing: Text(
                         formatDistance(math.max(0.0, x.atM - (_nav?.traveled ?? 0))),
                         style: const TextStyle(fontWeight: FontWeight.w700),
@@ -2212,96 +2229,168 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   }
 
   /// Nabídka (hamburger): na mapě zůstane jen okénko služeb, nabídka a „moje poloha“.
+  /// Nabídka: rychlé přepínače nahoře, pod nimi skupiny Trasa / Na cestě / Nastavení.
   void _openMenu() {
     showModalBottomSheet(
       context: context,
       backgroundColor: Lkw.panel,
       isScrollControlled: true,
-      builder: (ctx) {
-        Widget item(IconData icon, String title, VoidCallback onTap, {String? subtitle}) => ListTile(
-          leading: Icon(icon, color: Lkw.amber),
-          title: Text(title, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
-          subtitle: subtitle == null ? null : Text(subtitle),
-          onTap: () {
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) {
+          void go(VoidCallback f) {
             Navigator.pop(ctx);
-            onTap();
-          },
-        );
-        return SafeArea(
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const SizedBox(height: 8),
-                if (!_navigating)
-                  item(Icons.route, 'Plán trasy', _openPlanner, subtitle: 'Start, zastávky, cíl'),
-                if (!_navigating)
-                  item(
-                    Icons.document_scanner,
-                    'Adresy z fotek',
-                    _openScan,
-                    subtitle: 'Dodací list, štítky, text od dispečera',
-                  ),
-                if (!_navigating) item(Icons.local_shipping, 'Profil vozidla a nastavení', _openProfile),
-                item(Icons.local_parking, 'Truckparky, servisy, nafta', _choosePoi),
-                if (_navigating)
-                  item(
-                    Icons.report_problem,
-                    'Tady navigovala špatně',
-                    _reportProblem,
-                    subtitle: 'Uloží místo a trasu k rozboru',
-                  ),
-                item(
-                  Icons.campaign,
-                  'Nahlásit',
-                  _quickReport,
-                  subtitle: 'Nehoda, policie, kontrola, radar, uzavírka, chyba mapy',
-                ),
-                item(
-                  Icons.mic,
-                  'Hlasové příkazy',
-                  () => _handleVoice('co umíš'),
-                  subtitle: 'Mikrofon vpravo na mapě',
-                ),
-                item(
-                  _settings.voice ? Icons.volume_up : Icons.volume_off,
-                  _settings.voice ? 'Hlas: zapnutý' : 'Hlas: vypnutý',
-                  () {
-                    setState(() => _settings.voice = !_settings.voice);
-                    if (!_settings.voice) Voice.instance.stop();
-                    _settings.save();
-                  },
-                ),
-                item(
-                  switch (_settings.mapLayer) {
-                    MapLayer.map => Icons.layers_outlined,
-                    MapLayer.aerial => Icons.satellite_alt,
-                    MapLayer.hybrid => Icons.layers,
-                  },
-                  'Podklad mapy',
-                  _chooseLayer,
-                  subtitle: switch (_settings.mapLayer) {
-                    MapLayer.map => 'Mapa',
-                    MapLayer.aerial => 'Letecká',
-                    MapLayer.hybrid => 'Hybridní',
-                  },
-                ),
-                item(
-                  _settings.view3d ? Icons.view_in_ar : Icons.map_outlined,
-                  _settings.view3d ? 'Pohled: 3D' : 'Pohled: 2D',
-                  () {
-                    setState(() => _settings.view3d = !_settings.view3d);
-                    _settings.save();
-                    _applyCamera();
-                  },
-                ),
-                const SizedBox(height: 8),
-              ],
+            f();
+          }
+
+          Widget head(String t) => Padding(
+            padding: const EdgeInsets.fromLTRB(20, 14, 20, 2),
+            child: Text(
+              t,
+              style: const TextStyle(color: Lkw.muted, fontWeight: FontWeight.w800, letterSpacing: 1),
             ),
-          ),
-        );
-      },
+          );
+          Widget item(IconData icon, String title, VoidCallback onTap, {String? subtitle}) => ListTile(
+            leading: Icon(icon, color: Lkw.amber),
+            title: Text(title, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
+            subtitle: subtitle == null ? null : Text(subtitle, style: const TextStyle(color: Lkw.muted)),
+            onTap: () => go(onTap),
+          );
+          Widget quick(IconData icon, String label, VoidCallback onTap, {bool on = false}) => Expanded(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Material(
+                color: on ? Lkw.amber : Lkw.panelHi,
+                borderRadius: BorderRadius.circular(14),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(14),
+                  onTap: onTap,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    child: Column(
+                      children: [
+                        Icon(icon, size: 28, color: on ? Lkw.graphite : Lkw.text),
+                        const SizedBox(height: 4),
+                        Text(
+                          label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                            color: on ? Lkw.graphite : Lkw.text,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+          return SafeArea(
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Center(
+                    child: Container(
+                      width: 40,
+                      height: 4,
+                      margin: const EdgeInsets.only(top: 8, bottom: 12),
+                      decoration: BoxDecoration(color: Lkw.muted, borderRadius: BorderRadius.circular(2)),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: Row(
+                      children: [
+                        quick(_settings.voice ? Icons.volume_up : Icons.volume_off, 'Hlas', () {
+                          setState(() => _settings.voice = !_settings.voice);
+                          if (!_settings.voice) Voice.instance.stop();
+                          _settings.save();
+                          setSheet(() {});
+                        }, on: _settings.voice),
+                        quick(
+                          _settings.view3d ? Icons.view_in_ar : Icons.map_outlined,
+                          _settings.view3d ? '3D' : '2D',
+                          () {
+                            setState(() => _settings.view3d = !_settings.view3d);
+                            _settings.save();
+                            _applyCamera();
+                            setSheet(() {});
+                          },
+                          on: _settings.view3d,
+                        ),
+                        quick(
+                          switch (_settings.mapLayer) {
+                            MapLayer.map => Icons.layers_outlined,
+                            MapLayer.aerial => Icons.satellite_alt,
+                            MapLayer.hybrid => Icons.layers,
+                          },
+                          switch (_settings.mapLayer) {
+                            MapLayer.map => 'Mapa',
+                            MapLayer.aerial => 'Letecká',
+                            MapLayer.hybrid => 'Hybridní',
+                          },
+                          () => go(_chooseLayer),
+                          on: _settings.mapLayer != MapLayer.map,
+                        ),
+                        quick(Icons.mic, 'Povely', () => go(() => _handleVoice('co umíš'))),
+                      ],
+                    ),
+                  ),
+                  if (!_navigating) ...[
+                    head('TRASA'),
+                    item(Icons.route, 'Plán trasy', _openPlanner, subtitle: 'Start, zastávky, cíl'),
+                    item(
+                      Icons.document_scanner,
+                      'Adresy z fotek',
+                      _openScan,
+                      subtitle: 'Dodací list, štítky, text od dispečera',
+                    ),
+                  ],
+                  head('NA CESTĚ'),
+                  item(Icons.local_parking, 'Truckparky, servisy, nafta', _choosePoi),
+                  item(
+                    Icons.campaign,
+                    'Nahlásit',
+                    _quickReport,
+                    subtitle: 'Nehoda, policie, kontrola, radar, uzavírka, chyba mapy',
+                  ),
+                  if (_navigating)
+                    item(
+                      Icons.report_problem,
+                      'Tady navigovala špatně',
+                      _reportProblem,
+                      subtitle: 'Uloží místo a trasu k rozboru',
+                    ),
+                  head('NASTAVENÍ'),
+                  item(
+                    Icons.local_shipping,
+                    'Vozidlo a trasa',
+                    _openProfile,
+                    subtitle: '${_settings.profile.summary}${_settings.delivery ? ' · zásobování' : ''}',
+                  ),
+                  item(
+                    Icons.settings,
+                    'Nastavení aplikace',
+                    _openSettings,
+                    subtitle: 'Rychlost, hlas, zobrazení, data v telefonu',
+                  ),
+                  const SizedBox(height: 8),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
     );
+  }
+
+  Future<void> _openSettings() async {
+    await Navigator.push(context, MaterialPageRoute(builder: (_) => SettingsScreen(settings: _settings)));
+    if (mounted) setState(() {});
   }
 
   Future<void> _chooseLayer() async {
@@ -2543,7 +2632,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     final limit = limitRaw == null ? null : math.min(limitRaw, _settings.profile.maxSpeed);
     final bottomPad = MediaQuery.of(context).padding.bottom;
     final pip = Pip.instance.active.value;
-    final panelH = pip || route == null ? 0.0 : (_navigating ? 134.0 : 270.0);
+    final panelH = pip || route == null ? 0.0 : (_navigating ? 154.0 : 290.0);
 
     return Scaffold(
       resizeToAvoidBottomInset: false,
@@ -2935,6 +3024,11 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   }
 
   /// Co je před námi na pruhu průběhu: zastávky, služby, radary, omezení (vzdálenost po trase).
+  String _shortBrand(String b) {
+    final w = b.split(RegExp(r'[\s\-–]+')).first;
+    return w.length > 7 ? w.substring(0, 7) : w;
+  }
+
   List<StripItem> _stripItems(TruckRoute r, NavState? nav) {
     final at = nav?.traveled ?? 0;
     final cum = r.cumulative;
@@ -2946,11 +3040,16 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     }
     for (final s in r.services) {
       if (s.atM < at) continue;
+      final fuel = s.amenities.contains(ServiceAmenity.fuel);
+      final d = s.atM - at;
+      final brand = fuel && s.brands.isNotEmpty ? ' ${_shortBrand(s.brands.first)}' : '';
       out.add(
         StripItem(
-          s.atM - at,
-          s.amenities.contains(ServiceAmenity.fuel) ? Icons.local_gas_station : Icons.local_parking,
-          s.amenities.contains(ServiceAmenity.fuel) ? Lkw.amber : const Color(0xFF2F6FDE),
+          d,
+          fuel ? Icons.local_gas_station : Icons.local_parking,
+          fuel ? Lkw.amber : const Color(0xFF2F6FDE),
+          label: '${d < 1000 ? '${(d / 100).round() * 100} m' : '${(d / 1000).round()} km'}$brand',
+          onTap: () => _showService(s),
         ),
       );
     }
