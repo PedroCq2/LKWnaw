@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart';
 
@@ -54,10 +55,13 @@ class _ScanScreenState extends State<ScanScreen> {
     if (files.isEmpty) return;
     setState(() => _reading = true);
     var found = 0;
+    final read = <String>[];
+    String? error;
     try {
       _scanner ??= LabelScanner();
       for (final f in files) {
-        final list = await _scanner!.addressesFromPhoto(f.path);
+        final (list, rows) = await _scanner!.addressesFromPhoto(f.path);
+        read.addAll(rows);
         for (final a in list) {
           if (_items.any((i) => i.addr.query.toLowerCase() == a.query.toLowerCase())) continue;
           final item = _Item(a);
@@ -67,11 +71,42 @@ class _ScanScreenState extends State<ScanScreen> {
         }
       }
     } catch (e) {
-      _toast('Text z fotky se nepodařilo přečíst.');
+      error = '$e';
     } finally {
       if (mounted) setState(() => _reading = false);
     }
-    if (found == 0) _toast('Na fotce jsem nenašel adresu (ulice, PSČ, obec). Zkuste ostřejší fotku.');
+    if (found == 0 && mounted) _showRead(read, error);
+  }
+
+  /// Adresa nenalezena: ukázat, co jsem z fotky přečetl (a případnou chybu), ať jde poslat k doladění.
+  void _showRead(List<String> rows, String? error) {
+    final text = [if (error != null) 'Chyba: $error', ...rows].join('\n');
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(error != null ? 'Text z fotky se nepodařilo přečíst' : 'Adresu jsem na fotce nenašel'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: SelectableText(
+              rows.isEmpty && error == null ? 'Na fotce jsem nepřečetl žádný text.' : text,
+              style: const TextStyle(fontSize: 13),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: text));
+              Navigator.pop(ctx);
+              _toast('Zkopírováno – můžete to poslat vývojáři.');
+            },
+            child: const Text('Zkopírovat text'),
+          ),
+          FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK')),
+        ],
+      ),
+    );
   }
 
   Future<void> _geocode(_Item it) async {

@@ -9,9 +9,11 @@ import 'address_parser.dart';
 class LabelScanner {
   final _recognizer = TextRecognizer(script: TextRecognitionScript.latin);
 
-  Future<List<ParsedAddress>> addressesFromPhoto(String path) async {
+  /// Adresy a přečtené řádky (pro kontrolu, když se adresa nenajde).
+  Future<(List<ParsedAddress>, List<String>)> addressesFromPhoto(String path) async {
     final text = await _recognizer.processImage(InputImage.fromFilePath(path));
-    return parseAddresses(documentRows(text));
+    final rows = documentRows(text);
+    return (parseAddresses(rows), rows);
   }
 
   void close() => _recognizer.close();
@@ -26,16 +28,27 @@ class _Piece {
 /// Složí rozpoznané řádky do řádků dokumentu: „Ulice:“ a „Modletice 91“ vedle sebe = jeden řádek.
 /// Dva sloupce (odesílatel vlevo, příjemce vpravo) zůstanou oddělené.
 List<String> documentRows(RecognizedText text) {
-  final pieces = [
+  final lines = [
     for (final b in text.blocks)
-      for (final l in b.lines) _Piece(l.text, l.boundingBox),
+      for (final l in b.lines) l,
   ];
+  if (lines.isEmpty) return const [];
+  double median(List<double> v) => (v..sort())[v.length ~/ 2];
+  final medH = median([for (final l in lines) l.boundingBox.height]);
+  final medA = median([for (final l in lines) l.angle ?? 0]);
+  // Šikmé razítko („KONTROLOVÁNO… 17. 10. 2026“) má obří rámeček a slilo by řádky dokumentu.
+  final pieces = [
+    for (final l in lines)
+      if (((l.angle ?? medA) - medA).abs() < 20 && l.boundingBox.height < medH * 2.2)
+        _Piece(l.text, l.boundingBox),
+  ];
+  if (pieces.isEmpty) return const [];
   pieces.sort((a, b) => a.box.center.dy.compareTo(b.box.center.dy));
   final rows = <List<_Piece>>[];
   for (final p in pieces) {
     final row = rows.isEmpty ? null : rows.last;
     if (row != null) {
-      final ref = row.first.box;
+      final ref = row.last.box;
       final overlap = math.min(ref.bottom, p.box.bottom) - math.max(ref.top, p.box.top);
       if (overlap > math.min(ref.height, p.box.height) * 0.5) {
         row.add(p);

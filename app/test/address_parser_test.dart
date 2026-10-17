@@ -57,4 +57,25 @@ void main() {
     expect(a.map((e) => e.street), ['Husova 5', 'Dukelská 210', 'Nádražní 1a']);
     expect(a[1].city, 'Velký Týnec');
   });
+
+  test('skutečná fotka dodacího listu DC Modletice (razítko přes adresu)', () {
+    final a = parseAddresses([
+      'ven dne: 16.10.2026',
+      'ý náklad povoleného množství (LQ) dle kapitoly 3.4 ADR!',
+      'a 12 Příjemce: DC - Modletice',
+      'vic Č. filiálky: 9200',
+      'Ulice: Modletice 91 123 91',
+      'Místo vykládky: 25101 Říčany u Prahy',
+      'Tel. Číslo: 323 646 400',
+      'Datum dodání: 17.10.2026',
+      'Pož. Dodání: 00:00',
+      '89 Interní pošta',
+      '50 Č. interní TJ 2859211922',
+      'Transportní jednotka: C930202610171463 66',
+    ]);
+    expect(a, hasLength(1));
+    expect(a.single.street, 'Modletice 91');
+    expect(a.single.postcode, '25101');
+    expect(a.single.city, 'Říčany u Prahy');
+  });
 }

@@ -21,10 +21,24 @@ class ParsedAddress {
 }
 
 final _pc = RegExp(r'(?<![\d/])([1-7]\d{2}) ?(\d{2})(?![\d/])');
+// Název ulice/obce a PRVNÍ číslo za ním („Modletice 91 123 91“ → „Modletice 91“, zbytek je šum z razítka).
 final _street = RegExp(
-  r'^(.*\p{L}.*?)[ ,]+(?:č\. ?p\. ?|čp\. ?)?(\d{1,4}[a-zA-Z]?(?:/\d{1,4}[a-zA-Z]?)?)$',
+  r'^(.*?\p{L}[^\d]*?)[ ,]+(?:č\. ?p\. ?|čp\. ?)?(\d{1,4}[a-zA-Z]?(?:/\d{1,4}[a-zA-Z]?)?)(?![\d.:])',
   unicode: true,
 );
+
+/// PSČ v řádku. „91 123 91“ za číslem domu není PSČ (číslo za číslem, bez obce za ním).
+RegExpMatch? _findPc(String s) {
+  for (final m in _pc.allMatches(s)) {
+    final after = s.substring(m.end).trimLeft();
+    final before = s.substring(0, m.start).trimRight();
+    if (RegExp(r'^\p{L}', unicode: true).hasMatch(after)) return m;
+    if (RegExp(r'\d$').hasMatch(before)) continue;
+    if (after.isEmpty || RegExp(r'^[,;]').hasMatch(after)) return m;
+  }
+  return null;
+}
+
 final _labels = RegExp(
   r'^(příjemce|adresát|ulice|adresa|místo (vykládky|dodání|určení|doručení)|dodací adresa|doručovací adresa|'
   r'adresa doručení|doručit na|psč|obec|město|recipient|deliver to|ship to|empfänger|lieferadresse)\b\s*:?\s*',
@@ -43,7 +57,8 @@ final _senderKw = RegExp(
   unicode: true,
 );
 final _phoneOrId = RegExp(
-  r'tel|mob|fax|e-?mail|@|www|ič[oa]?\b|dič|iban|účet|č\. ?ú|objedn|faktur|datum|\+\d',
+  r'tel|mob|fax|e-?mail|@|www|ič[oa]?\b|dič|iban|účet|č\. ?ú|objedn|faktur|datum|\+\d|filiál|číslo|'
+  r'interní|jednotk|hh:mm|dodání|obousměr',
   caseSensitive: false,
   unicode: true,
 );
@@ -54,15 +69,21 @@ String _clean(String s) => s
     .replaceAll(RegExp(r'^[\s,;:.\-–]+|[\s,;:\-–]+$'), '')
     .trim();
 
-bool _isStreet(String s) {
+/// Ulice s číslem z textu, nebo null.
+String? _streetOf(String s) {
   final t = _clean(s);
-  if (t.length < 3 || t.length > 60 || _pc.hasMatch(t) || _phoneOrId.hasMatch(t)) return false;
-  return _street.hasMatch(t);
+  if (t.length < 3 || t.length > 70 || _findPc(t) != null || _phoneOrId.hasMatch(t)) return null;
+  final m = _street.firstMatch(t);
+  if (m == null) return null;
+  final name = m.group(1)!.replaceAll(RegExp(r'[\s,]+$'), '').trim();
+  return name.length < 2 ? null : '$name ${m.group(2)}';
 }
+
+bool _isStreet(String s) => _streetOf(s) != null;
 
 bool _isName(String s) {
   final t = _clean(s);
-  if (t.length < 2 || t.length > 60 || _phoneOrId.hasMatch(t) || _pc.hasMatch(t)) return false;
+  if (t.length < 2 || t.length > 60 || _phoneOrId.hasMatch(t) || _findPc(t) != null) return false;
   if (RegExp(r'\d{3,}').hasMatch(t)) return false;
   return RegExp(r'\p{L}{2,}', unicode: true).hasMatch(t) && !_senderKw.hasMatch(t);
 }
@@ -75,15 +96,19 @@ List<ParsedAddress> parseAddresses(List<String> rawLines) {
   final usedStreet = <int>{};
   for (var r = 0; r < lines.length; r++) {
     final line = lines[r];
-    if (RegExp(r'tel|mob|fax|\+\d|ič|dič|účet|iban', caseSensitive: false).hasMatch(line) &&
-        !_labels.hasMatch(line)) {
+    // Řádek s telefonem / IČ (ne celý dokument – „Tel.“ může být i v sousedním sloupci).
+    if (RegExp(
+      r'^\s*(tel|mob|fax|ič|dič|iban|účet)|\+\d{3}',
+      caseSensitive: false,
+      unicode: true,
+    ).hasMatch(line)) {
       continue;
     }
-    final m = _pc.firstMatch(line);
+    final m = _findPc(line);
     if (m == null) continue;
     final pc = '${m.group(1)}${m.group(2)}';
     final cleaned = _clean(line);
-    final cm = _pc.firstMatch(cleaned);
+    final cm = _findPc(cleaned);
     var before = cm == null ? '' : cleaned.substring(0, cm.start);
     var after = cm == null ? '' : cleaned.substring(cm.end);
     after = after.replaceAll(
@@ -97,7 +122,7 @@ List<ParsedAddress> parseAddresses(List<String> rawLines) {
     // „Týnecká 65, 77900 Olomouc“ – ulice na stejném řádku.
     final parts = before.split(RegExp(r'[,;]')).map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
     if (parts.isNotEmpty && _isStreet(parts.last)) {
-      street = _clean(parts.last);
+      street = _streetOf(parts.last);
       streetRow = r;
       if (parts.length > 1 && _isName(parts[parts.length - 2])) name = _clean(parts[parts.length - 2]);
     }
@@ -105,11 +130,11 @@ List<ParsedAddress> parseAddresses(List<String> rawLines) {
     if (street == null) {
       for (var k = r - 1; k >= 0 && k >= r - 3; k--) {
         if (usedStreet.contains(k)) break;
-        if (_pc.hasMatch(lines[k])) break;
+        if (_findPc(lines[k]) != null) break;
         final segs = lines[k].split(RegExp(r'[,;]')).map((s) => s.trim()).where((s) => s.isNotEmpty);
         final st = segs.lastWhere(_isStreet, orElse: () => '');
         if (st.isNotEmpty) {
-          street = _clean(st);
+          street = _streetOf(st);
           streetRow = k;
           break;
         }
@@ -122,7 +147,7 @@ List<ParsedAddress> parseAddresses(List<String> rawLines) {
     final top = streetRow >= 0 ? streetRow : r;
     if (name == null && top > 0 && top - 1 >= 0) {
       final cand = lines[top - 1];
-      if (_isName(cand) && !_pc.hasMatch(cand) && !_isStreet(cand)) name = _clean(cand);
+      if (_isName(cand) && _findPc(cand) == null && !_isStreet(cand)) name = _clean(cand);
     }
     if (street == null && after.isEmpty) continue;
     // Okolí: u příjemce / místa vykládky +, u odesílatele / dodavatele −.
