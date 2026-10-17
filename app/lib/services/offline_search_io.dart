@@ -60,6 +60,12 @@ class OfflineSearch {
         // Budova, ve které cíl leží (nejmenší obálka), jinak nejbližší.
         final cy = (minlat + maxlat) / 2, cx = (minlon + maxlon) / 2;
         final dy = p.latitude - cy, dx = (p.longitude - cx) * math.cos(p.latitude * math.pi / 180);
+        // Jen budova, ve které cíl leží (nebo do ~30 m od ní) – jinak by to byla rampa souseda.
+        final out = math.max(
+          math.max(minlat - p.latitude, p.latitude - maxlat),
+          math.max(minlon - p.longitude, p.longitude - maxlon) * math.cos(p.latitude * math.pi / 180),
+        );
+        if (!inBox && out > 0.0003) continue;
         final score = inBox ? (maxlat - minlat) * (maxlon - minlon) * 1e-3 : 1 + math.sqrt(dx * dx + dy * dy);
         if (score < bestScore) {
           bestScore = score;

@@ -21,6 +21,11 @@ from collections import defaultdict
 import osmium
 
 CELL = 0.002  # ~150–220 m
+# Bytové domy, školy apod. – k nim se rampa nehledá.
+NOT_DELIVERY = {'apartments', 'residential', 'house', 'detached', 'semidetached_house', 'terrace', 'dormitory',
+                'school', 'university', 'kindergarten', 'hospital', 'church', 'chapel', 'civic', 'public',
+                'government', 'hotel', 'garage', 'garages', 'parking', 'roof', 'carport', 'greenhouse', 'stadium',
+                'sports_hall', 'grandstand', 'train_station', 'transportation'}
 BIG_KINDS = {'retail', 'commercial', 'warehouse', 'industrial', 'supermarket', 'manufacture', 'service',
              'hangar', 'storage_tank', 'factory'}
 
@@ -135,6 +140,8 @@ class H(osmium.SimpleHandler):
                 self.end_count[nid] += 1
             for i in (0, len(ids) - 1):
                 self.ends[cell(*pts[i])].append((pts[i][0], pts[i][1], ids[i], cat))
+        elif b in NOT_DELIVERY:
+            return
         elif b and len(pts) >= 4 and pts[0] == pts[-1]:
             a = area_m2(pts)
             if a >= 1500 or (a >= 800 and b in BIG_KINDS):
