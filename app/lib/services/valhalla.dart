@@ -197,6 +197,29 @@ class ValhallaClient {
     return data;
   }
 
+  /// Doby jízdy kamionem mezi všemi body (s) – pro seřazení zastávek.
+  Future<List<List<double>>> matrix(List<LatLng> pts, TruckProfile profile, {bool delivery = false}) async {
+    final locs = [
+      for (final p in pts) {'lat': p.latitude, 'lon': p.longitude},
+    ];
+    final data = await _call('sources_to_targets', {
+      'sources': locs,
+      'targets': locs,
+      'costing': 'truck',
+      'costing_options': {'truck': profile.toValhallaCosting(delivery: delivery)},
+    });
+    final rows = data['sources_to_targets'] as List;
+    const d = Distance();
+    return [
+      for (var i = 0; i < pts.length; i++)
+        [
+          for (var j = 0; j < pts.length; j++)
+            // Nedosažitelné → velká penalizace podle vzdušné vzdálenosti.
+            ((((rows[i] as List)[j] as Map)['time']) as num?)?.toDouble() ?? d(pts[i], pts[j]) * 10,
+        ],
+    ];
+  }
+
   /// Doplní k trase rychlostní limity a názvy silnic (Valhalla trace_attributes).
   Future<void> loadEdgeAttributes(TruckRoute route, {int maxSpeedKmh = 80}) async {
     // Každá etapa (mezi zastávkami) zvlášť – přes zastávku Valhalla trasu „neprojde“.

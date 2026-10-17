@@ -19,6 +19,7 @@ import '../services/restrictions.dart';
 import '../services/lanes.dart';
 import '../services/highway_services.dart';
 import '../services/map_style.dart';
+import 'scan_screen.dart';
 import '../services/pip.dart';
 import '../services/offline_maps.dart';
 import '../services/plans.dart';
@@ -1351,24 +1352,39 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   }
 
   /// Otevře plánování trasy (začátek, zastávky, cíl) a trasu podle plánu spočítá.
-  Future<void> _openPlanner() async {
-    final current = _dest == null
-        ? null
-        : TripPlan(
-            name: _destName ?? 'Cíl',
-            start: _planStart == null ? null : PlanPoint(_planStartName ?? 'Začátek', _planStart!),
-            stops: [for (final st in _stops) PlanPoint(st.$2, st.$1)],
-            dest: PlanPoint(_destName ?? 'Cíl', _dest!),
-          );
+  /// Adresy z fotek dodacích listů / štítků → seřazené zastávky → plán (lze přeřadit tažením).
+  Future<void> _openScan() async {
     final plan = await Navigator.push<TripPlan>(
       context,
       MaterialPageRoute(
-        builder: (_) => PlannerScreen(saved: _saved, myPosition: _pos, initial: current),
+        builder: (_) => ScanScreen(settings: _settings, start: _pos),
+      ),
+    );
+    if (plan == null || !mounted) return;
+    await _openPlanner(initial: plan);
+  }
+
+  Future<void> _openPlanner({TripPlan? initial}) async {
+    final current =
+        initial ??
+        (_dest == null
+            ? null
+            : TripPlan(
+                name: _destName ?? 'Cíl',
+                start: _planStart == null ? null : PlanPoint(_planStartName ?? 'Začátek', _planStart!),
+                stops: [for (final st in _stops) PlanPoint(st.$2, st.$1)],
+                dest: PlanPoint(_destName ?? 'Cíl', _dest!),
+              ));
+    final plan = await Navigator.push<TripPlan>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => PlannerScreen(saved: _saved, myPosition: _pos, initial: current, settings: _settings),
       ),
     );
     if (plan == null || !mounted) return;
     _setDestination(plan.dest.point, plan.dest.name, compute: false);
     setState(() {
+      _stops.clear();
       _stops.addAll([for (final s in plan.stops) (s.point, s.name)]);
       _planStart = plan.start?.point;
       _planStartName = plan.start?.name;
@@ -1909,6 +1925,12 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                         ServiceTile(service: svc, aheadM: ahead, onTap: () => _showService(svc)),
                       if (!_navigating)
                         RoundButton(icon: Icons.route, tooltip: 'Plán trasy', onPressed: _openPlanner),
+                      if (!_navigating)
+                        RoundButton(
+                          icon: Icons.document_scanner,
+                          tooltip: 'Adresy z fotek (dodací list, štítky)',
+                          onPressed: _openScan,
+                        ),
                       if (!_navigating)
                         RoundButton(
                           icon: Icons.local_shipping,

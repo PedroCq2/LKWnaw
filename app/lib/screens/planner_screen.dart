@@ -6,14 +6,17 @@ import 'package:latlong2/latlong.dart';
 import '../services/geocoding.dart';
 import '../services/plans.dart';
 import '../services/saved_places.dart';
+import '../services/settings.dart';
 import '../theme.dart';
+import 'scan_screen.dart';
 
 /// Plánování trasy: začátek, zastávky (přeřazení tažením), cíl; uložené plány.
 class PlannerScreen extends StatefulWidget {
   final SavedPlaces saved;
   final LatLng? myPosition;
   final TripPlan? initial;
-  const PlannerScreen({super.key, required this.saved, this.myPosition, this.initial});
+  final AppSettings? settings; // pro focení adres (profil vozidla, server tras)
+  const PlannerScreen({super.key, required this.saved, this.myPosition, this.initial, this.settings});
 
   @override
   State<PlannerScreen> createState() => _PlannerScreenState();
@@ -48,6 +51,23 @@ class _PlannerScreenState extends State<PlannerScreen> {
     isScrollControlled: true,
     builder: (_) => _PlaceSearch(title: title, saved: widget.saved, near: widget.myPosition),
   );
+
+  /// Vyfocené adresy: seřazené zastávky nahradí plán (start zůstane), pořadí lze dál měnit tažením.
+  Future<void> _scan() async {
+    final plan = await Navigator.push<TripPlan>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ScanScreen(settings: widget.settings!, start: _start?.point ?? widget.myPosition),
+      ),
+    );
+    if (plan == null || !mounted) return;
+    setState(() {
+      _stops
+        ..clear()
+        ..addAll(plan.stops);
+      _dest = plan.dest;
+    });
+  }
 
   Future<void> _savePlan() async {
     final dest = _dest;
@@ -123,6 +143,8 @@ class _PlannerScreenState extends State<PlannerScreen> {
       appBar: AppBar(
         title: const Text('Plán trasy'),
         actions: [
+          if (widget.settings != null)
+            IconButton(icon: const Icon(Icons.document_scanner), tooltip: 'Adresy z fotek', onPressed: _scan),
           if (_dest != null)
             IconButton(icon: const Icon(Icons.save), tooltip: 'Uložit plán', onPressed: _savePlan),
         ],

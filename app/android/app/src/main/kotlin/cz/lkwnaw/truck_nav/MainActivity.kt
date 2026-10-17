@@ -104,12 +104,16 @@ class MainActivity : FlutterActivity() {
                         main.post { result.success(true) }
                     }
                 }
-                "route", "trace_attributes" -> {
+                "route", "trace_attributes", "sources_to_targets" -> {
                     val json = call.argument<String>("json") ?: ""
                     worker.execute {
                         try {
                             val v = valhalla ?: throw IllegalStateException("balík tras není otevřený")
-                            val out = if (call.method == "route") v.routeRaw(json) else v.traceAttributesRaw(json)
+                            val out = when (call.method) {
+                                "route" -> v.routeRaw(json)
+                                "sources_to_targets" -> v.matrixRaw(json)
+                                else -> v.traceAttributesRaw(json)
+                            }
                             main.post { result.success(out) }
                         } catch (e: Throwable) {
                             main.post { result.error(call.method, e.message, null) }
