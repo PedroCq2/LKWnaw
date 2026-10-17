@@ -27,12 +27,24 @@ jobs:
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test
-      - run: flutter build apk --release
+      - name: Podpisový klíč z tajných proměnných
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload.jks"
+            printf 'storeFile=%s\nstorePassword=%s\nkeyPassword=%s\nkeyAlias=lkwnav\n' \
+              "$RUNNER_TEMP/upload.jks" "$KEYSTORE_PASSWORD" "$KEYSTORE_PASSWORD" > android/key.properties
+          else
+            echo "::warning::Chybí KEYSTORE_BASE64 – APK bude podepsané zkušebním klíčem"
+          fi
+      - run: flutter build apk --release --split-per-abi
       - uses: actions/upload-artifact@v4
         with:
-          name: lkw-navi-apk
-          path: app/build/app/outputs/flutter-apk/app-release.apk
+          name: lkwnav-apk
+          path: app/build/app/outputs/flutter-apk/app-*-release.apk
       - if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: app/build/app/outputs/flutter-apk/app-release.apk
+          files: app/build/app/outputs/flutter-apk/app-*-release.apk
