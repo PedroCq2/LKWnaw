@@ -125,8 +125,29 @@ Rect rawRect(Rect r, int w, int h, int rot) => switch (rot) {
   _ => uprightRect(r, w, h, rot),
 };
 
+/// Ostrost plochy v obraze: rozptyl Laplaceova operátoru na jasu (rozmazané ≈ pod 50).
+double sharpness(Uint8List nv21, int w, int h, int stride, Rect raw) {
+  final l = raw.left.clamp(1, w - 2).toInt(), r = raw.right.clamp(2, w - 1).toInt();
+  final t = raw.top.clamp(1, h - 2).toInt(), b = raw.bottom.clamp(2, h - 1).toInt();
+  final step = math.max(1, (math.max(r - l, b - t) / 96).floor());
+  var n = 0;
+  var sum = 0.0, sum2 = 0.0;
+  for (var y = t; y < b; y += step) {
+    for (var x = l; x < r; x += step) {
+      final i = y * stride + x;
+      final lap = 4 * nv21[i] - nv21[i - 1] - nv21[i + 1] - nv21[i - stride] - nv21[i + stride];
+      sum += lap;
+      sum2 += lap * lap;
+      n++;
+    }
+  }
+  if (n == 0) return 0;
+  final mean = sum / n;
+  return sum2 / n - mean * mean;
+}
+
 /// Výřez ze snímku (s okrajem), nejvýš [maxSide] px, otočený vzpřímeně.
-img.Image cropNv21(Uint8List nv21, int w, int h, int stride, int rot, Rect raw, {int maxSide = 224}) {
+img.Image cropNv21(Uint8List nv21, int w, int h, int stride, int rot, Rect raw, {int maxSide = 320}) {
   final m = math.max(raw.width, raw.height) * 0.2;
   final l = (raw.left - m).clamp(0, w - 1).toInt(), t = (raw.top - m).clamp(0, h - 1).toInt();
   final r = (raw.right + m).clamp(1, w).toInt(), b = (raw.bottom + m).clamp(1, h).toInt();

@@ -21,7 +21,9 @@ class _Track {
   final int firstMs;
   int lastMs;
   int frames = 1;
-  double bestArea = 0;
+  double bestScore = 0; // velikost × ostrost nejlepšího snímku
+  double bestSide = 0;
+  double bestSharp = 0;
   img.Image? crop;
   String shape;
   final texts = <String>{};
@@ -57,13 +59,18 @@ class SignCamera {
     );
     final c = CameraController(
       back,
-      ResolutionPreset.high,
+      ResolutionPreset.veryHigh, // 1080p: značka v dálce má víc bodů
       enableAudio: false,
       imageFormatGroup: ImageFormatGroup.nv21,
     );
     controller = c;
     try {
       await c.initialize();
+      // Kratší expozice = méně rozmazání za jízdy (ve dne je světla dost).
+      try {
+        final min = await c.getMinExposureOffset();
+        await c.setExposureOffset(math.max(min, -1.0));
+      } catch (_) {}
       await c.startImageStream(_onFrame);
     } catch (e) {
       controller = null;
@@ -168,10 +175,18 @@ class SignCamera {
         }
         t.texts.addAll(inside.where((s) => s.isNotEmpty));
         if (f != null) t.fix = f;
-        final area = box.width * box.height;
-        if (area > t.bestArea * 1.15 && moving) {
-          t.bestArea = area;
-          t.crop = cropNv21(bytes, w, h, stride, rot, raw);
+        // Nejlepší snímek: dost velký a ostrý (nejbližší bývá nejrozmazanější).
+        final side = math.min(raw.width, raw.height).toDouble();
+        if (moving && side >= 28 && raw.left > 2 && raw.top > 2 && raw.right < w - 2 && raw.bottom < h - 2) {
+          final sh = sharpness(bytes, w, h, stride, raw);
+          final score = math.min(side, 140.0) * math.min(sh, 600.0);
+          if (score > t.bestScore) {
+            t
+              ..bestScore = score
+              ..bestSide = side
+              ..bestSharp = sh
+              ..crop = cropNv21(bytes, w, h, stride, rot, raw);
+          }
         }
         // Zákazové značky s číslem: hned ohlásit (potvrzení podle zvětšování).
         if (color == 'red') {
@@ -205,8 +220,10 @@ class SignCamera {
     final life = t.lastMs - t.firstMs;
     if (t.frames < (t.texts.isEmpty ? 3 : 2) || t.crop == null) return;
     if (life > 10000) return;
+    // Malé nebo rozmazané = šmouha, ne použitelná značka.
+    if (t.bestSide < 36 || t.bestSharp < 60) return;
     final f = t.fix;
-    final jpeg = await compute((img.Image i) => img.encodeJpg(i, quality: 80), t.crop!);
+    final jpeg = await compute((img.Image i) => img.encodeJpg(i, quality: 90), t.crop!);
     await SignStore.instance.add(
       t: t.lastMs,
       lat: f?.lat,

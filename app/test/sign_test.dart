@@ -96,4 +96,19 @@ void main() {
     final u = uprightRect(r, w, h, 90);
     expect(rawRect(u, w, h, 90), r);
   });
+
+  test('ostrost: hrany vs. rozmazaná plocha', () {
+    const w = 100, h = 100;
+    final sharp = Uint8List(w * h * 3 ~/ 2);
+    final blur = Uint8List(w * h * 3 ~/ 2);
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        sharp[y * w + x] = ((x ~/ 5 + y ~/ 5) % 2) * 255;
+        blur[y * w + x] = 100 + x ~/ 10;
+      }
+    }
+    const r = Rect.fromLTRB(10, 10, 90, 90);
+    expect(sharpness(sharp, w, h, w, r), greaterThan(1000));
+    expect(sharpness(blur, w, h, w, r), lessThan(60));
+  });
 }
