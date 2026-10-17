@@ -387,11 +387,12 @@ class WarningCard extends StatelessWidget {
 class SpeedWidget extends StatelessWidget {
   final int? limit;
   final double speedKmh;
-  const SpeedWidget({super.key, required this.limit, required this.speedKmh});
+  final int tolerance; // červeně až nad limit + tolerance
+  const SpeedWidget({super.key, required this.limit, required this.speedKmh, this.tolerance = 3});
 
   @override
   Widget build(BuildContext context) {
-    final over = limit != null && speedKmh > limit! + 3;
+    final over = limit != null && speedKmh > limit! + tolerance;
     return Container(
       width: 84,
       padding: const EdgeInsets.all(8),

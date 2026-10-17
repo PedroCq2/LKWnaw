@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
@@ -233,8 +234,21 @@ extension PoiKindLabel on PoiKind {
 }
 
 /// POI pro kamiony v okolí bodu z OpenStreetMap (Overpass API).
-Future<List<Place>> findTruckPois(LatLng p, PoiKind kind, {int radiusM = 30000}) =>
-    _findPois(kind, '(around:$radiusM,${p.latitude},${p.longitude})', [p], radiusM ~/ 1000, p);
+Future<List<Place>> findTruckPois(LatLng p, PoiKind kind, {int radiusM = 30000}) => _findPois(
+  kind,
+  '(around:$radiusM,${p.latitude},${p.longitude})',
+  [p],
+  radiusM ~/ 1000,
+  p,
+  [_box(p, radiusM.toDouble())],
+  maxM: radiusM.toDouble(),
+);
+
+/// Obálka kolem bodu (minLat, maxLat, minLon, maxLon).
+(double, double, double, double) _box(LatLng p, double m) {
+  final dLat = m / 110540, dLon = m / (111320 * math.cos(p.latitude * math.pi / 180));
+  return (p.latitude - dLat, p.latitude + dLat, p.longitude - dLon, p.longitude + dLon);
+}
 
 /// POI podél trasy: kolik km/min před vámi a jak daleko od trasy.
 class RoutePoi {
@@ -272,7 +286,21 @@ Future<List<RoutePoi>> findTruckPoisAlongRoute(
   final centers = <LatLng>[
     for (var k = 0; k < samples.length; k += 66) samples[k].$1, // ~ každých 20 km
   ];
-  final places = await _findPois(kind, '(around:1500,$poly)', centers, 6, samples.first.$1);
+  // Obálky po ~6 km úsecích trasy (+1,5 km) pro data v telefonu.
+  final boxes = <(double, double, double, double)>[];
+  for (var k = 0; k < samples.length; k += 20) {
+    final part = samples.sublist(k, math.min(k + 21, samples.length)).map((e) => e.$1);
+    final a = _box(
+      LatLng(part.map((q) => q.latitude).reduce(math.min), part.map((q) => q.longitude).reduce(math.min)),
+      1500,
+    );
+    final b = _box(
+      LatLng(part.map((q) => q.latitude).reduce(math.max), part.map((q) => q.longitude).reduce(math.max)),
+      1500,
+    );
+    boxes.add((a.$1, b.$2, a.$3, b.$4));
+  }
+  final places = await _findPois(kind, '(around:1500,$poly)', centers, 6, samples.first.$1, boxes);
   const dist = Distance();
   final speed = route.timeSec > 0 ? route.lengthKm * 1000 / route.timeSec : 20.0; // m/s
   final out = <RoutePoi>[];
@@ -300,7 +328,11 @@ Future<List<Place>> _findPois(
   List<LatLng> photonCenters,
   int photonRadiusKm,
   LatLng p,
-) async {
+  List<(double, double, double, double)> boxes, {
+  double? maxM,
+}) async {
+  final off = OfflineSearch.instance;
+  if (off.hasOsm) return _localPois(kind, boxes, p, maxM);
   final filters = switch (kind) {
     PoiKind.parking => [
       'nwr["amenity"="parking"]["hgv"~"yes|designated"]$a;',
@@ -326,9 +358,62 @@ Future<List<Place>> _findPois(
   final photon = (await photonF).expand((l) => l).toList();
   if (els == null && photon.isEmpty) throw Exception('servery s mapovými daty neodpovídají');
   const dist = Distance();
+  final places = _placesOf(els ?? const []);
+  // Doplň z Photonu, co Overpass nemá (duplicita = do 120 m od existujícího).
+  for (final ph in photon) {
+    if (places.any((x) => dist(x.point, ph.point) < 120)) continue;
+    places.add(ph);
+  }
+  places.sort((x, y) => dist(p, x.point).compareTo(dist(p, y.point)));
+  return places;
+}
+
+bool _isTruckHgv(Map t) => t['hgv'] == 'yes' || t['hgv'] == 'designated';
+
+/// Stejný výběr jako dotaz na Overpass, ale z dat v telefonu (bez internetu, okamžitě).
+bool _matches(PoiKind kind, Map t, {bool anyFuel = false}) => switch (kind) {
+  PoiKind.parking =>
+    (t['amenity'] == 'parking' && (_isTruckHgv(t) || t['capacity:hgv'] != null)) ||
+        t['highway'] == 'rest_area' ||
+        t['highway'] == 'services',
+  PoiKind.service =>
+    const {'truck_repair', 'truck', 'tyres'}.contains(t['shop']) ||
+        t['craft'] == 'truck_repair' ||
+        (t['shop'] == 'car_repair' && _isTruckHgv(t)),
+  PoiKind.fuel =>
+    t['amenity'] == 'fuel' &&
+        (anyFuel || _isTruckHgv(t) || t['fuel:HGV_diesel'] == 'yes' || t['fuel:adblue'] == 'yes'),
+};
+
+List<Place> _localPois(PoiKind kind, List<(double, double, double, double)> boxes, LatLng p, double? maxM) {
+  const dist = Distance();
+  final els = <dynamic>[];
+  final seen = <String>{};
+  for (final (a, b, c, d) in boxes) {
+    for (final e in OfflineSearch.instance.osmElements(a, b, c, d)) {
+      if (seen.add('${e['type']}${e['id']}')) els.add(e);
+    }
+  }
+  List<Place> pick({bool anyFuel = false}) {
+    final out = _placesOf([
+      for (final e in els)
+        if (_matches(kind, e['tags'] as Map, anyFuel: anyFuel)) e,
+    ]);
+    if (maxM != null) out.removeWhere((x) => dist(p, x.point) > maxM);
+    return out;
+  }
+
+  var places = pick();
+  // Pump s označením pro kamiony je v mapě málo – když chybí, ukaž všechny pumpy.
+  if (kind == PoiKind.fuel && places.length < 3) places = pick(anyFuel: true);
+  places.sort((x, y) => dist(p, x.point).compareTo(dist(p, y.point)));
+  return places;
+}
+
+List<Place> _placesOf(List<dynamic> els) {
   final places = <Place>[];
   final seen = <String>{};
-  for (final e in els ?? const []) {
+  for (final e in els) {
     final lat = (e['lat'] ?? e['center']?['lat']) as num?;
     final lon = (e['lon'] ?? e['center']?['lon']) as num?;
     if (lat == null || lon == null) continue;
@@ -338,12 +423,6 @@ Future<List<Place>> _findPois(
     final name = (t['name'] ?? t['operator'] ?? t['brand']) as String? ?? type;
     places.add(Place(name, LatLng(lat.toDouble(), lon.toDouble()), kind: type, features: _features(t)));
   }
-  // Doplň z Photonu, co Overpass nemá (duplicita = do 120 m od existujícího).
-  for (final ph in photon) {
-    if (places.any((x) => dist(x.point, ph.point) < 120)) continue;
-    places.add(ph);
-  }
-  places.sort((x, y) => dist(p, x.point).compareTo(dist(p, y.point)));
   return places;
 }
 

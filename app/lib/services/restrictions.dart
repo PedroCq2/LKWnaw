@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 
 import 'http_headers.dart';
+import 'offline_search.dart';
 
 import '../models/route.dart';
 import '../models/truck_profile.dart';
@@ -47,7 +48,20 @@ Future<List<RouteWarning>> loadRouteWarnings(
         'node(around:20,$poly)["highway"="speed_camera"];'
         'node(around:12,$poly)["maxheight"];'
         ');out tags geom;';
-    final els = await overpassQuery(q);
+    // Balík dat v telefonu (okamžitě, bez internetu), jinak Overpass.
+    final List<dynamic>? els;
+    if (OfflineSearch.instance.hasOsm) {
+      var a = 90.0, b = -90.0, c = 180.0, d = -180.0;
+      for (final p in part) {
+        a = math.min(a, p.latitude);
+        b = math.max(b, p.latitude);
+        c = math.min(c, p.longitude);
+        d = math.max(d, p.longitude);
+      }
+      els = OfflineSearch.instance.osmElements(a - 0.0005, b + 0.0005, c - 0.0008, d + 0.0008);
+    } else {
+      els = await overpassQuery(q);
+    }
     if (els == null) continue;
     for (final e in els) {
       final id = (e['id'] as num).toInt();

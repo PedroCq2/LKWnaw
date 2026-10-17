@@ -330,7 +330,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         : (DateTime.now().difference(lastFix).inMilliseconds / 1000).clamp(0.3, 1.5);
     final mps = _speedKmh / 3.6;
     final lead = mps > 2 ? mps * gapSec : 0.0;
-    if (_navigating && nav != null && route != null && nav.distanceFromRoute < NavEngine.offRouteMeters) {
+    // Přichytit k trase jen do 25 m – při sjetí jinam je hned vidět skutečná poloha.
+    if (_navigating && nav != null && route != null && nav.distanceFromRoute < 25) {
       // Na trase: přichycená poloha a směr podle trasy (bez GPS šumu), posunutá o předpověď po trase.
       final (p, seg) = _alongRoute(route, nav.traveled + lead, nav.segmentIndex);
       target = p;
@@ -905,32 +906,96 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   }
 
   /// Krátký pokyn do odpočtu: „sjeďte“, „odbočte vpravo“, „na kruhovém objezdu vyjeďte třetím výjezdem“.
+  /// Pokyn do odpočtu: „sjeďte vpravo na D46 směr Olomouc a poté se držte vlevo“.
   String _shortInstruction(Maneuver m) {
-    if (m.type == 26) return _roundaboutText(m);
-    final t = m.alertInstruction ?? m.instruction;
-    return t.isEmpty ? t : t[0].toLowerCase() + t.substring(1);
+    final r = _route;
+    final i = r?.maneuvers.indexOf(m) ?? -1;
+    if (r == null || i < 0) return _phrase(m);
+    return _withThen(r, i);
   }
 
-  /// Pokyn v místě manévru, s návazností: „Sjeďte a pokračujte po D1 směr Praha.“
-  String _nowInstruction(TruckRoute r, int i) {
+  /// Pokyn v místě manévru, s návazností: „Odbočte vpravo a poté se držte vlevo na D35.“
+  String _nowInstruction(TruckRoute r, int i) => '${_capital(_withThen(r, i))}.';
+
+  /// Manévr + navazující manévr do 350 m („… a poté …“).
+  String _withThen(TruckRoute r, int i) {
     final m = r.maneuvers[i];
-    if (m.type == 26) return '${_capital(_roundaboutText(m))}.';
-    if (m.type == 27) {
-      final road = _roadAhead(m);
-      return 'Opusťte kruhový objezd${road != null ? ' a pokračujte po $road' : ''}.';
-    }
-    final base = (m.preInstruction ?? m.instruction).split('. Poté').first.trim();
-    // Sjezd / nájezd na jinou silnici: doplnit, po čem pokračovat.
-    const ramps = {18, 19, 20, 21, 23, 24, 25};
-    if (ramps.contains(m.type)) {
-      final road = _roadAhead(m);
-      final toward = m.exitToward.take(2).join(', ');
-      if (road != null && !base.contains(road)) {
-        final verb = m.type == 20 || m.type == 21 ? 'Sjeďte' : base.replaceAll(RegExp(r'\.$'), '');
-        return '$verb a pokračujte po $road${toward.isNotEmpty ? ' směr $toward' : ''}.';
+    var text = _phrase(m);
+    if (i + 1 < r.maneuvers.length) {
+      final n = r.maneuvers[i + 1];
+      final cum = r.cumulative;
+      final gap =
+          cum[n.beginShapeIndex.clamp(0, cum.length - 1)] - cum[m.beginShapeIndex.clamp(0, cum.length - 1)];
+      if (m.type == 26 && n.type == 27) {
+        // Kruhový objezd: „vyjeďte třetím výjezdem a poté pokračujte po I/35“.
+        final road = _roadAhead(n);
+        if (road != null) text += ' a poté pokračujte po $road';
+      } else if (gap < 350 && n.type != 27) {
+        text += ' a poté ${_phrase(n)}';
       }
     }
-    return base.endsWith('.') ? base : '$base.';
+    return text;
+  }
+
+  /// Jedna věta pokynu (malým písmenem): podle druhu manévru, se silnicí a směrem.
+  String _phrase(Maneuver m) {
+    if (m.synthetic) {
+      final t = m.preInstruction ?? m.instruction;
+      return t.isEmpty ? t : t[0].toLowerCase() + t.substring(1).replaceAll(RegExp(r'\.$'), '');
+    }
+    final road = _roadAhead(m);
+    final toward = m.exitToward.take(2).join(', ');
+    final on = road != null ? ' na $road' : '';
+    final dir = toward.isNotEmpty ? ' směr $toward' : '';
+    switch (m.type) {
+      case 26:
+        return _roundaboutText(m);
+      case 27:
+        return 'opusťte kruhový objezd';
+      case 9:
+        return 'odbočte mírně vpravo$on';
+      case 10:
+        return 'odbočte vpravo$on';
+      case 11:
+        return 'odbočte ostře vpravo$on';
+      case 16:
+        return 'odbočte mírně vlevo$on';
+      case 15:
+        return 'odbočte vlevo$on';
+      case 14:
+        return 'odbočte ostře vlevo$on';
+      case 8:
+      case 22:
+        return 'pokračujte rovně${road != null ? ' po $road' : ''}$dir';
+      case 23:
+        return 'na rozdvojení se držte vpravo${road != null ? ' a pokračujte po $road' : ''}$dir';
+      case 24:
+        return 'na rozdvojení se držte vlevo${road != null ? ' a pokračujte po $road' : ''}$dir';
+      case 17:
+      case 18:
+        return 'najeďte vpravo na nájezd$on$dir';
+      case 19:
+        return 'najeďte vlevo na nájezd$on$dir';
+      case 20:
+        return 'sjeďte vpravo$on$dir';
+      case 21:
+        return 'sjeďte vlevo$on$dir';
+      case 25:
+      case 37:
+      case 38:
+        return 'připojte se${road != null ? ' na $road' : ' do provozu'}';
+      case 4:
+        return 'dorazíte do cíle';
+      case 5:
+        return 'cíl bude vpravo';
+      case 6:
+        return 'cíl bude vlevo';
+      case 12:
+      case 13:
+        return 'otočte se';
+    }
+    final t = (m.preInstruction ?? m.instruction).split('. Poté').first.trim().replaceAll(RegExp(r'\.$'), '');
+    return t.isEmpty ? t : t[0].toLowerCase() + t.substring(1);
   }
 
   String _roundaboutText(Maneuver m) {
@@ -960,24 +1025,26 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   }
 
   DateTime? _overSince;
-  DateTime _overWarnedAt = DateTime(0);
+  bool _overWarned = false;
 
-  /// Překročení rychlosti o víc než toleranci déle než 3 s → „Pozor, rychlost.“ (nejvýš jednou za 30 s).
+  /// Při každém překročení hranice (limit + tolerance z Nastavení, výchozí +10 → 90 při 80) déle než 2 s
+  /// zazní „Pozor, rychlost“. Znovu po zpomalení pod hranici (o 2 km/h, ať to při kolísání neblbne)
+  /// a dalším překročení.
   void _speedWarning(NavState nav, double speedKmh) {
     final raw = _route?.speedLimitAt(nav.segmentIndex);
     if (raw == null) return;
     final limit = math.min(raw, _settings.profile.maxSpeed);
+    final threshold = limit + _settings.speedTolerance;
     final now = DateTime.now();
-    if (speedKmh > limit + _settings.speedTolerance) {
+    if (speedKmh > threshold) {
       _overSince ??= now;
-      if (_settings.speedSound &&
-          now.difference(_overSince!) > const Duration(seconds: 3) &&
-          now.difference(_overWarnedAt) > const Duration(seconds: 30)) {
-        _overWarnedAt = now;
+      if (_settings.speedSound && !_overWarned && now.difference(_overSince!) > const Duration(seconds: 2)) {
+        _overWarned = true;
         _say('Pozor, rychlost. Limit $limit.');
       }
     } else {
       _overSince = null;
+      if (speedKmh < threshold - 2) _overWarned = false;
     }
   }
 
@@ -1150,10 +1217,15 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
 
   /// Odpočívky a pumpy u dálnice na trase (pro okénko vpravo).
   Future<void> _loadServices(TruckRoute r) async {
+    // Hned z rejstříku v telefonu (pumpy), pak doplnit z mapových dat online (i odpočívky bez jména).
     try {
       final list = await findHighwayServices(r);
-      if (!mounted) return;
-      setState(() => r.services = list);
+      if (mounted && list.isNotEmpty) setState(() => r.services = list);
+    } catch (_) {}
+    if (OfflineSearch.instance.hasOsm) return; // balík dat má služby kompletně
+    try {
+      final online = await findHighwayServices(r, local: false);
+      if (mounted && online.length >= r.services.length) setState(() => r.services = online);
     } catch (_) {}
   }
 
@@ -2602,7 +2674,11 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                   Positioned(
                     left: 12,
                     bottom: panelH + 16 + bottomPad,
-                    child: SpeedWidget(limit: limit, speedKmh: _speedKmh),
+                    child: SpeedWidget(
+                      limit: limit,
+                      speedKmh: _speedKmh,
+                      tolerance: _settings.speedTolerance,
+                    ),
                   ),
                 if (_offline)
                   Positioned(

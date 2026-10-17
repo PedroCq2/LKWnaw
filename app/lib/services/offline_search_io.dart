@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:math' as math;
@@ -30,6 +31,7 @@ class OfflineSearch {
       _db = sqlite3.open(p, mode: OpenMode.readOnly);
       _hasBorders = _db!.select("SELECT 1 FROM sqlite_master WHERE name = 'town_rtree'").isNotEmpty;
       _hasRamps = _db!.select("SELECT 1 FROM sqlite_master WHERE name = 'ramp_rtree'").isNotEmpty;
+      _hasOsm = _db!.select("SELECT 1 FROM sqlite_master WHERE name = 'osm_el_rtree'").isNotEmpty;
     } catch (_) {
       _db = null;
     }
@@ -79,6 +81,72 @@ class OfflineSearch {
   }
 
   bool get hasRamps => _db != null && _hasRamps;
+
+  bool _hasOsm = false;
+
+  /// Balík obsahuje omezení, radary, exity a služby (místo dotazů na Overpass).
+  bool get hasOsm => _db != null && _hasOsm;
+
+  /// Prvky OSM v obdélníku ve tvaru odpovědi Overpass (type, id, lat/lon nebo geometry, tags).
+  List<Map<String, dynamic>> osmElements(double minLat, double maxLat, double minLon, double maxLon) {
+    final db = _db;
+    if (db == null || !_hasOsm) return const [];
+    try {
+      final rows = db.select(
+        'SELECT e.type, e.osm_id, e.lat, e.lon, e.tags, e.geom FROM osm_el_rtree r JOIN osm_el e ON e.id = r.id '
+        'WHERE r.maxlat >= ? AND r.minlat <= ? AND r.maxlon >= ? AND r.minlon <= ?',
+        [minLat, maxLat, minLon, maxLon],
+      );
+      return [
+        for (final r in rows)
+          {
+            'type': r['type'],
+            'id': r['osm_id'],
+            'tags': jsonDecode(r['tags'] as String),
+            if (r['geom'] == null) ...{'lat': r['lat'], 'lon': r['lon']},
+            if (r['geom'] != null) 'center': {'lat': r['lat'], 'lon': r['lon']},
+            if (r['geom'] != null) 'geometry': _geom(r['geom'] as Uint8List),
+          },
+      ];
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  static List<Map<String, double>> _geom(Uint8List b) {
+    final bd = ByteData.sublistView(b);
+    return [
+      for (var o = 0; o + 8 <= b.length; o += 8)
+        {'lat': bd.getInt32(o, Endian.little) / 1e6, 'lon': bd.getInt32(o + 4, Endian.little) / 1e6},
+    ];
+  }
+
+  final _kindCache = <String, List<(String, String, LatLng)>>{};
+
+  /// Všechna místa daných druhů (pumpy, odpočívky…) – načtou se jednou a drží v paměti.
+  List<(String, String, LatLng)> poisOfKinds(Set<String> kinds) {
+    final db = _db;
+    if (db == null) return const [];
+    final key = (kinds.toList()..sort()).join('|');
+    return _kindCache[key] ??= () {
+      try {
+        final marks = List.filled(kinds.length, '?').join(',');
+        return [
+          for (final r in db.select(
+            'SELECT name, kind, lat, lon FROM poi WHERE kind IN ($marks)',
+            kinds.toList(),
+          ))
+            (
+              r['name'] as String,
+              r['kind'] as String,
+              LatLng((r['lat'] as num).toDouble(), (r['lon'] as num).toDouble()),
+            ),
+        ];
+      } catch (_) {
+        return <(String, String, LatLng)>[];
+      }
+    }();
+  }
 
   /// Rejstřík obsahuje hranice obcí (novější balík).
   bool get hasTownBorders => _db != null && _hasBorders;
@@ -161,6 +229,7 @@ class OfflineSearch {
 
   void close() {
     _towns = null;
+    _kindCache.clear();
     try {
       _db?.close();
     } catch (_) {}

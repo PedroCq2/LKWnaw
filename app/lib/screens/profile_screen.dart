@@ -210,8 +210,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
             Slider(
               value: _speedTol.toDouble(),
               min: 0,
-              max: 20,
-              divisions: 20,
+              max: 30,
+              divisions: 30,
               label: '+$_speedTol km/h',
               onChanged: (v) => setState(() => _speedTol = v.round()),
             ),

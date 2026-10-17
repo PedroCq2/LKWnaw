@@ -34,7 +34,7 @@ class AppSettings {
     this.voiceName,
     this.speechRate = 0.5,
     this.routeOnDevice = true,
-    this.speedTolerance = 5,
+    this.speedTolerance = 10,
     this.speedSound = true,
     this.bigText = false,
   });
@@ -71,7 +71,7 @@ class AppSettings {
       voiceName: p.getString('voiceName'),
       speechRate: p.getDouble('speechRate') ?? 0.5,
       routeOnDevice: p.getBool('routeOnDevice') ?? true,
-      speedTolerance: p.getInt('speedTolerance') ?? 5,
+      speedTolerance: p.getInt('speedTol2') ?? 10,
       speedSound: p.getBool('speedSound') ?? true,
       bigText: p.getBool('bigText') ?? false,
     );
@@ -94,7 +94,7 @@ class AppSettings {
     }
     await p.setDouble('speechRate', speechRate);
     await p.setBool('routeOnDevice', routeOnDevice);
-    await p.setInt('speedTolerance', speedTolerance);
+    await p.setInt('speedTol2', speedTolerance);
     await p.setBool('speedSound', speedSound);
     await p.setBool('bigText', bigText);
   }

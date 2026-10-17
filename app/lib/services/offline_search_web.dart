@@ -23,6 +23,12 @@ class OfflineSearch {
 
   bool get hasRamps => false;
 
+  bool get hasOsm => false;
+
+  List<Map<String, dynamic>> osmElements(double a, double b, double c, double d) => const [];
+
+  List<(String, String, dynamic)> poisOfKinds(Set<String> kinds) => const [];
+
   (Object, int)? rampAt(Object p) => null;
 
   List<Place> search(String query, {int limit = 12}) => [];

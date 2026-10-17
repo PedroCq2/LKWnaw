@@ -78,6 +78,17 @@ void main() {
     expect(e.isOffRoute, isTrue);
   });
 
+  test('přejetý sjezd: vzdálenost od trasy pozvolna roste', () {
+    final e = NavEngine(line());
+    final t0 = DateTime(2026, 1, 1, 12);
+    // Pod malým úhlem od trasy (jako sjezd vs. dálnice): 20, 25, 30, 35, 40 m.
+    for (var i = 0; i < 5; i++) {
+      final dLat = (20 + 5 * i) / 111000;
+      e.update(LatLng(50.0 + dLat, 14.002 + 0.0007 * i), now: t0.add(Duration(seconds: i)));
+    }
+    expect(e.isOffRoute, isTrue);
+  });
+
   test('short GPS jump does not trigger reroute', () {
     final e = NavEngine(line());
     final t0 = DateTime(2026, 1, 1, 12);

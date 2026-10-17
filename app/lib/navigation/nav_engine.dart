@@ -74,6 +74,13 @@ class NavEngine {
       if (diff > 180) diff = 360 - diff;
       diverging = diff > 45;
     }
+    // Přejetá odbočka: vzdálenost od trasy roste poloha za polohou (sjezd se od dálnice odklání pozvolna).
+    if (dist > math.max(18.0, accuracy) && dist > _prevDist + 0.5) {
+      _growCount++;
+    } else if (dist < 12) {
+      _growCount = 0;
+    }
+    _prevDist = dist;
     if (diverging) {
       _divergeCount++;
       _divergeSince ??= t0;
@@ -115,11 +122,14 @@ class NavEngine {
   DateTime _lastNow = DateTime.now();
 
   int _divergeCount = 0;
+  int _growCount = 0;
+  double _prevDist = 0;
   DateTime? _divergeSince;
 
   /// Sjetí z trasy: jiným směrem než trasa 2 polohy / 1,5 s, jinak 3 polohy a 3 s mimo trasu
   /// (krátký výkyv GPS nestačí).
   bool get isOffRoute =>
+      _growCount >= 4 ||
       (_divergeCount >= 2 &&
           _divergeSince != null &&
           _lastNow.difference(_divergeSince!) >= const Duration(milliseconds: 1500)) ||
@@ -129,7 +139,7 @@ class NavEngine {
 
   /// Po přepočtu: počítat znovu od nuly.
   void resetOffRoute() {
-    _offRouteCount = _divergeCount = 0;
+    _offRouteCount = _divergeCount = _growCount = 0;
     _offSince = _divergeSince = null;
   }
 

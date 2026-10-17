@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:latlong2/latlong.dart';
 
 import '../models/route.dart';
+import 'offline_search.dart';
 import 'restrictions.dart';
 
 /// Bod dálničního úseku trasy: poloha, km po trase, směr a číslo silnice.
@@ -41,6 +42,7 @@ final _roadRef = RegExp(r'^(D\d+|I/\d+)$');
 Future<List<HighwayService>> findHighwayServices(
   TruckRoute route, {
   Future<List<dynamic>?> Function(String q) query = overpassQuery,
+  bool local = true, // false = jen online (Overpass) – doplní odpočívky bez jména
 }) async {
   final cum = route.cumulative;
   // Dálniční úseky trasy (podle tříd silnic z trace_attributes) → body po ~250 m.
@@ -74,12 +76,68 @@ Future<List<HighwayService>> findHighwayServices(
     }
   }
   final hits = <_Hit>[];
+  // Nejdřív rejstřík v telefonu (okamžitě, bez internetu); Overpass jen když rejstřík nic nedá.
+  // Starší balík bez služeb: aspoň pumpy z rejstříku hledání.
+  final localPois = !local || OfflineSearch.instance.hasOsm
+      ? const <(String, String, LatLng)>[]
+      : OfflineSearch.instance.poisOfKinds(const {
+          'Čerpací stanice',
+          'Odpočívka',
+          'Odpočívka s ČS',
+          'Parkoviště',
+        });
+  if (localPois.isNotEmpty && runs.isNotEmpty) {
+    var minLa = 90.0, maxLa = -90.0, minLo = 180.0, maxLo = -180.0;
+    for (final r in runs) {
+      for (final s in r) {
+        minLa = math.min(minLa, s.p.latitude);
+        maxLa = math.max(maxLa, s.p.latitude);
+        minLo = math.min(minLo, s.p.longitude);
+        maxLo = math.max(maxLo, s.p.longitude);
+      }
+    }
+    for (final (name, kind, p) in localPois) {
+      if (p.latitude < minLa - 0.01 || p.latitude > maxLa + 0.01) continue;
+      if (p.longitude < minLo - 0.015 || p.longitude > maxLo + 0.015) continue;
+      double at = 0, off = double.infinity;
+      var right = true;
+      for (final r in runs) {
+        if (r.length < 2) continue;
+        final q = _project(r, p);
+        if (q.$2 < off) (at, off, right) = q;
+      }
+      if (off > 700 || (!right && off > 40)) continue;
+      final tags = <String, dynamic>{
+        'name': name,
+        ...switch (kind) {
+          'Čerpací stanice' => {'amenity': 'fuel'},
+          'Odpočívka' => {'highway': 'rest_area'},
+          'Odpočívka s ČS' => {'highway': 'services'},
+          _ => {'amenity': 'parking'},
+        },
+      };
+      hits.add(_Hit(tags, p, at, off));
+    }
+    if (hits.isNotEmpty) return _buildServices(hits, roadAt: (at) => _roadAt(runs, at));
+  }
   final seen = <String>{};
   for (final c in chunks) {
     final poly = c
         .map((s) => '${s.p.latitude.toStringAsFixed(5)},${s.p.longitude.toStringAsFixed(5)}')
         .join(',');
     final a = '(around:700,$poly)';
+    if (local && OfflineSearch.instance.hasOsm) {
+      var la0 = 90.0, la1 = -90.0, lo0 = 180.0, lo1 = -180.0;
+      for (final x in c) {
+        la0 = math.min(la0, x.p.latitude);
+        la1 = math.max(la1, x.p.latitude);
+        lo0 = math.min(lo0, x.p.longitude);
+        lo1 = math.max(lo1, x.p.longitude);
+      }
+      final els = OfflineSearch.instance.osmElements(la0 - 0.007, la1 + 0.007, lo0 - 0.01, lo1 + 0.01);
+      _collect(els, c, runs, seen, hits);
+      continue;
+    }
     final els = await query(
       '[out:json][timeout:25];('
       'nwr["highway"~"^(services|rest_area)\$"]$a;'
@@ -87,25 +145,47 @@ Future<List<HighwayService>> findHighwayServices(
       'nwr["tourism"~"^(hotel|motel)\$"]$a;'
       ');out center tags 400;',
     );
-    for (final e in els ?? const []) {
-      if (!seen.add('${e['type']}${e['id']}')) continue;
-      final lat = (e['lat'] ?? e['center']?['lat']) as num?;
-      final lon = (e['lon'] ?? e['center']?['lon']) as num?;
-      if (lat == null || lon == null) continue;
-      final p = LatLng(lat.toDouble(), lon.toDouble());
-      // Průmět na celou dálniční část trasy (objekt může vrátit i sousední dotaz).
-      var (at, off, right) = _project(c, p);
-      for (final r in runs) {
-        if (r.length < 2 || identical(r, c)) continue;
-        final q = _project(r, p);
-        if (q.$2 < off) (at, off, right) = q;
-      }
-      // Odpočívky na protisměru nejsou dostupné – kromě společných (těsně u trasy).
-      if (!right && off > 40) continue;
-      hits.add(_Hit(Map<String, dynamic>.from((e['tags'] as Map?) ?? const {}), p, at, off));
-    }
+    _collect(els ?? const [], c, runs, seen, hits);
   }
   return _buildServices(hits, roadAt: (at) => _roadAt(runs, at));
+}
+
+const _svcAmenity = {'fuel', 'parking', 'restaurant', 'fast_food', 'cafe', 'toilets', 'shower'};
+
+/// Prvky (z Overpass nebo z balíku dat) → body služeb promítnuté na dálniční část trasy.
+void _collect(
+  List<dynamic> els,
+  List<_Sample> c,
+  List<List<_Sample>> runs,
+  Set<String> seen,
+  List<_Hit> hits,
+) {
+  for (final e in els) {
+    final t = Map<String, dynamic>.from((e['tags'] as Map?) ?? const {});
+    final svc =
+        t['highway'] == 'services' ||
+        t['highway'] == 'rest_area' ||
+        _svcAmenity.contains(t['amenity']) ||
+        t['tourism'] == 'hotel' ||
+        t['tourism'] == 'motel';
+    if (!svc) continue;
+    if (!seen.add('${e['type']}${e['id']}')) continue;
+    final lat = (e['lat'] ?? e['center']?['lat']) as num?;
+    final lon = (e['lon'] ?? e['center']?['lon']) as num?;
+    if (lat == null || lon == null) continue;
+    final p = LatLng(lat.toDouble(), lon.toDouble());
+    // Průmět na celou dálniční část trasy (objekt může vrátit i sousední dotaz).
+    var (at, off, right) = _project(c, p);
+    for (final r in runs) {
+      if (r.length < 2 || identical(r, c)) continue;
+      final q = _project(r, p);
+      if (q.$2 < off) (at, off, right) = q;
+    }
+    if (off > 800) continue;
+    // Odpočívky na protisměru nejsou dostupné – kromě společných (těsně u trasy).
+    if (!right && off > 40) continue;
+    hits.add(_Hit(t, p, at, off));
+  }
 }
 
 String? _roadAt(List<List<_Sample>> runs, double at) {
@@ -151,6 +231,8 @@ List<HighwayService> _buildServices(List<_Hit> hits, {String? Function(double at
     'services' || 'rest_area' => h.off < 800,
     'fuel' => h.off < 160,
     'hgv_parking' => h.off < 300,
+    // Parkoviště těsně u dálnice je skoro vždy odpočívka.
+    'parking' => h.off < 200,
     _ => false,
   };
   final anchors = hits.where(anchor).toList()..sort((a, b) => a.at.compareTo(b.at));
@@ -220,7 +302,9 @@ List<HighwayService> _buildServices(List<_Hit> hits, {String? Function(double at
         ? (fuel ? 'Odpočívka s čerpací stanicí' : 'Odpočívka')
         : fuel
         ? 'Čerpací stanice'
-        : 'Parkoviště pro kamiony';
+        : kinds.contains('hgv_parking')
+        ? 'Parkoviště pro kamiony'
+        : 'Parkoviště';
     final mainName = (main.tags['name'] as String?)?.trim();
     out.add(
       HighwayService(
