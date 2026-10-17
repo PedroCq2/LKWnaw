@@ -249,6 +249,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       if (_navigating) {
         _voiceGuidance(nav);
         _warningVoice(nav);
+        _speedWarning(nav, speed);
         // Projetá zastávka: odebrat (při přepočtu se už nepoužije).
         for (final st in [..._stops]) {
           if (const Distance()(pos, st.$1) < 80) {
@@ -956,6 +957,28 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     if (m < 1000) return '${(m / 100).round() * 100} metrů';
     final k = (m / 1000).round();
     return '$k ${k == 1 ? 'kilometr' : (k < 5 ? 'kilometry' : 'kilometrů')}';
+  }
+
+  DateTime? _overSince;
+  DateTime _overWarnedAt = DateTime(0);
+
+  /// Překročení rychlosti o víc než toleranci déle než 3 s → „Pozor, rychlost.“ (nejvýš jednou za 30 s).
+  void _speedWarning(NavState nav, double speedKmh) {
+    final raw = _route?.speedLimitAt(nav.segmentIndex);
+    if (raw == null) return;
+    final limit = math.min(raw, _settings.profile.maxSpeed);
+    final now = DateTime.now();
+    if (speedKmh > limit + _settings.speedTolerance) {
+      _overSince ??= now;
+      if (_settings.speedSound &&
+          now.difference(_overSince!) > const Duration(seconds: 3) &&
+          now.difference(_overWarnedAt) > const Duration(seconds: 30)) {
+        _overWarnedAt = now;
+        _say('Pozor, rychlost. Limit $limit.');
+      }
+    } else {
+      _overSince = null;
+    }
   }
 
   void _warningVoice(NavState nav) {
@@ -2003,7 +2026,63 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   // ------------------------------------------------------------ hlášení problému
 
   /// „Tady navigovala špatně“: uloží polohu, profil vozidla a okolní úsek trasy pro pozdější rozbor.
-  Future<void> _reportProblem({String? note}) async {
+  /// Rychlé hlášení podle druhu (nehoda, policie, radar…). Ukládá se v telefonu; sdílení s ostatními
+  /// řidiči přijde se serverem.
+  Future<void> _quickReport() async {
+    const kinds = [
+      ('accident', Icons.car_crash, 'Nehoda'),
+      ('danger', Icons.warning_amber, 'Nebezpečí'),
+      ('police', Icons.local_police, 'Policie'),
+      ('inspection', Icons.fact_check, 'Kontrola (ÚDI, celní)'),
+      ('camera', Icons.photo_camera, 'Radar'),
+      ('weather', Icons.ac_unit, 'Počasí (náledí, mlha)'),
+      ('closure', Icons.do_not_disturb_on, 'Uzavírka'),
+      ('maperror', Icons.wrong_location, 'Chyba mapy / navigace'),
+    ];
+    final kind = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Lkw.panel,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: GridView.count(
+            crossAxisCount: 3,
+            shrinkWrap: true,
+            mainAxisSpacing: 8,
+            crossAxisSpacing: 8,
+            childAspectRatio: 1.1,
+            children: [
+              for (final (id, icon, label) in kinds)
+                Material(
+                  color: Lkw.panelHi,
+                  borderRadius: BorderRadius.circular(14),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(14),
+                    onTap: () => Navigator.pop(ctx, id),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(icon, size: 34, color: Lkw.amber),
+                        const SizedBox(height: 6),
+                        Text(label, textAlign: TextAlign.center, style: const TextStyle(fontSize: 13)),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (kind == null) return;
+    if (kind == 'maperror') {
+      await _reportProblem();
+    } else {
+      await _reportProblem(note: kinds.firstWhere((k) => k.$1 == kind).$3, type: kind);
+    }
+  }
+
+  Future<void> _reportProblem({String? note, String type = 'navigation'}) async {
     var text = note;
     if (text == null) {
       final c = TextEditingController();
@@ -2043,6 +2122,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       if (nav.nextManeuverIndex >= 0) maneuver = r.maneuvers[nav.nextManeuverIndex].instruction;
     }
     await ProblemReports.add({
+      'type': type,
       'time': DateTime.now().toIso8601String(),
       'note': text,
       if (_pos != null) 'pos': [_pos!.latitude, _pos!.longitude],
@@ -2099,6 +2179,12 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     _reportProblem,
                     subtitle: 'Uloží místo a trasu k rozboru',
                   ),
+                item(
+                  Icons.campaign,
+                  'Nahlásit',
+                  _quickReport,
+                  subtitle: 'Nehoda, policie, kontrola, radar, uzavírka, chyba mapy',
+                ),
                 item(
                   Icons.mic,
                   'Hlasové příkazy',
@@ -2385,7 +2471,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     final limit = limitRaw == null ? null : math.min(limitRaw, _settings.profile.maxSpeed);
     final bottomPad = MediaQuery.of(context).padding.bottom;
     final pip = Pip.instance.active.value;
-    final panelH = pip || route == null ? 0.0 : (_navigating ? 104.0 : 270.0);
+    final panelH = pip || route == null ? 0.0 : (_navigating ? 134.0 : 270.0);
 
     return Scaffold(
       resizeToAvoidBottomInset: false,
@@ -2434,7 +2520,14 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      if (_navigating && route != null) _banner(route, nav) else _searchBar(),
+                      if (_navigating && route != null)
+                        MediaQuery(
+                          data: MediaQuery.of(context)
+                              .copyWith(textScaler: TextScaler.linear(_settings.bigText ? 1.25 : 1.0)),
+                          child: _banner(route, nav),
+                        )
+                      else
+                        _searchBar(),
                       if (!_navigating && (_results.isNotEmpty || _savedResults.isNotEmpty)) _resultsList(),
                       if (_pickGate)
                         Container(
@@ -2765,6 +2858,40 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     );
   }
 
+  /// Co je před námi na pruhu průběhu: zastávky, služby, radary, omezení (vzdálenost po trase).
+  List<StripItem> _stripItems(TruckRoute r, NavState? nav) {
+    final at = nav?.traveled ?? 0;
+    final cum = r.cumulative;
+    final idx = RouteIndex(r);
+    final out = <StripItem>[];
+    for (final st in _stops) {
+      final m = idx.locate(st.$1, 300);
+      if (m != null && m > at) out.add(StripItem(m - at, Icons.flag, Lkw.amber));
+    }
+    for (final s in r.services) {
+      if (s.atM < at) continue;
+      out.add(
+        StripItem(
+          s.atM - at,
+          s.amenities.contains(ServiceAmenity.fuel) ? Icons.local_gas_station : Icons.local_parking,
+          s.amenities.contains(ServiceAmenity.fuel) ? Lkw.amber : const Color(0xFF2F6FDE),
+        ),
+      );
+    }
+    for (final w in r.warnings) {
+      if (w.atMeters < at || !w.relevant || w.type == WarningType.noOvertakingHgv) continue;
+      out.add(
+        StripItem(
+          w.atMeters - at,
+          w.type == WarningType.speedCamera ? Icons.photo_camera : Icons.warning_amber,
+          w.type == WarningType.speedCamera ? Lkw.muted : Lkw.danger,
+        ),
+      );
+    }
+    if (cum.isNotEmpty) out.add(StripItem(cum.last - at, Icons.sports_score, Lkw.text));
+    return out;
+  }
+
   Widget _bottomPanel(TruckRoute route) {
     final nav = _nav;
     final remainingM = nav?.remaining ?? route.lengthKm * 1000;
@@ -2784,52 +2911,59 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
           child: _navigating
-              ? Row(
+              ? Column(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            formatDuration(Duration(seconds: remainingSec.round())),
-                            style: const TextStyle(
-                              fontSize: 30,
-                              fontWeight: FontWeight.w900,
-                              color: Lkw.amber,
-                            ),
-                          ),
-                          Text(
-                            '${formatDistance(remainingM)} · příjezd $etaStr',
-                            style: const TextStyle(fontSize: 17, color: Lkw.text),
-                          ),
-                          if (_destSaved?.note != null && remainingM < 3000)
-                            Text(
-                              _destSaved!.note!,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: Lkw.amber,
-                                fontSize: 14,
-                                fontWeight: FontWeight.w800,
+                    RouteStrip(remainingM: remainingM, items: _stripItems(route, nav)),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                formatDuration(Duration(seconds: remainingSec.round())),
+                                style: const TextStyle(
+                                  fontSize: 30,
+                                  fontWeight: FontWeight.w900,
+                                  color: Lkw.amber,
+                                ),
                               ),
-                            )
-                          else
-                            Text(
-                              '${_settings.delivery ? (route.deliveryKm > 0.05 && route.deliveryKm < route.lengthKm * 0.9 ? 'ZÁSOBOVÁNÍ v obci cíle (${route.deliveryKm.toStringAsFixed(1).replaceAll('.', ',')} km) · ' : 'ZÁSOBOVÁNÍ · ') : ''}${_settings.profile.summary}',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: _settings.delivery ? Lkw.amber : Lkw.muted,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w700,
+                              Text(
+                                '${formatDistance(remainingM)} · příjezd $etaStr',
+                                style: const TextStyle(fontSize: 17, color: Lkw.text),
                               ),
-                            ),
-                        ],
-                      ),
+                              if (_destSaved?.note != null && remainingM < 3000)
+                                Text(
+                                  _destSaved!.note!,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: Lkw.amber,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                )
+                              else
+                                Text(
+                                  '${_settings.delivery ? (route.deliveryKm > 0.05 && route.deliveryKm < route.lengthKm * 0.9 ? 'ZÁSOBOVÁNÍ v obci cíle (${route.deliveryKm.toStringAsFixed(1).replaceAll('.', ',')} km) · ' : 'ZÁSOBOVÁNÍ · ') : ''}${_settings.profile.summary}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: _settings.delivery ? Lkw.amber : Lkw.muted,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                        _panelButton(Icons.alt_route, 'Přehled trasy', () => _fitRoute(route), Lkw.panelHi),
+                        const SizedBox(width: 10),
+                        _panelButton(Icons.close, 'Ukončit navigaci', _confirmStop, Lkw.danger),
+                      ],
                     ),
-                    _panelButton(Icons.alt_route, 'Přehled trasy', () => _fitRoute(route), Lkw.panelHi),
-                    const SizedBox(width: 10),
-                    _panelButton(Icons.close, 'Ukončit navigaci', _confirmStop, Lkw.danger),
                   ],
                 )
               : Column(

@@ -18,6 +18,9 @@ class AppSettings {
   String? voiceName; // vybraný český hlas (null = nejlepší dostupný)
   double speechRate; // 0,3–0,8
   bool routeOnDevice; // počítat trasy v telefonu (stažený balík ČR)
+  int speedTolerance; // varovat při překročení limitu o víc než X km/h
+  bool speedSound; // hlasové varování „Pozor, rychlost“
+  bool bigText; // větší texty pokynů
 
   AppSettings({
     required this.profile,
@@ -31,6 +34,9 @@ class AppSettings {
     this.voiceName,
     this.speechRate = 0.5,
     this.routeOnDevice = true,
+    this.speedTolerance = 5,
+    this.speedSound = true,
+    this.bigText = false,
   });
 
   /// Noční vzhled: ručně, nebo automaticky podle západu/východu Slunce v místě.
@@ -65,6 +71,9 @@ class AppSettings {
       voiceName: p.getString('voiceName'),
       speechRate: p.getDouble('speechRate') ?? 0.5,
       routeOnDevice: p.getBool('routeOnDevice') ?? true,
+      speedTolerance: p.getInt('speedTolerance') ?? 5,
+      speedSound: p.getBool('speedSound') ?? true,
+      bigText: p.getBool('bigText') ?? false,
     );
   }
 
@@ -85,5 +94,8 @@ class AppSettings {
     }
     await p.setDouble('speechRate', speechRate);
     await p.setBool('routeOnDevice', routeOnDevice);
+    await p.setInt('speedTolerance', speedTolerance);
+    await p.setBool('speedSound', speedSound);
+    await p.setBool('bigText', bigText);
   }
 }

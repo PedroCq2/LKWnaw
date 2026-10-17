@@ -47,6 +47,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   late bool _simulate = widget.settings.simulate;
+  late int _speedTol = widget.settings.speedTolerance;
+  late bool _speedSound = widget.settings.speedSound;
+  late bool _bigText = widget.settings.bigText;
   late int _mapStyle = widget.settings.mapStyle;
   late bool _delivery = widget.settings.delivery;
 
@@ -84,6 +87,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
       ..voiceName = _voiceName
       ..speechRate = _rate
       ..simulate = _simulate
+      ..speedTolerance = _speedTol
+      ..speedSound = _speedSound
+      ..bigText = _bigText
       ..mapStyle = _mapStyle
       ..delivery = _delivery;
     await widget.settings.save();
@@ -185,6 +191,40 @@ class _ProfileScreenState extends State<ProfileScreen> {
               title: const Text('Vyhnout se trajektům'),
               value: p.avoidFerries,
               onChanged: (v) => setState(() => p.avoidFerries = v),
+            ),
+            SwitchListTile(
+              title: const Text('Vyhnout se nezpevněným cestám'),
+              subtitle: const Text('Polní cesty, šotolina – pokud to jde'),
+              value: p.avoidUnpaved,
+              onChanged: (v) => setState(() => p.avoidUnpaved = v),
+            ),
+            const Divider(),
+            ListTile(
+              title: const Text('Varování před překročením rychlosti'),
+              subtitle: Text(
+                _speedTol == 0
+                    ? 'Hned po překročení limitu'
+                    : 'Když jedete o víc než $_speedTol km/h nad limit',
+              ),
+            ),
+            Slider(
+              value: _speedTol.toDouble(),
+              min: 0,
+              max: 20,
+              divisions: 20,
+              label: '+$_speedTol km/h',
+              onChanged: (v) => setState(() => _speedTol = v.round()),
+            ),
+            SwitchListTile(
+              title: const Text('Hlasité varování „Pozor, rychlost“'),
+              value: _speedSound,
+              onChanged: (v) => setState(() => _speedSound = v),
+            ),
+            SwitchListTile(
+              title: const Text('Větší texty pokynů'),
+              subtitle: const Text('Horní okénko s pokynem větším písmem'),
+              value: _bigText,
+              onChanged: (v) => setState(() => _bigText = v),
             ),
             SwitchListTile(
               title: const Text('Hlasové pokyny'),

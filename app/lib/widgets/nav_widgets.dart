@@ -710,3 +710,72 @@ class ServiceTile extends StatelessWidget {
     );
   }
 }
+
+/// Bod na pruhu průběhu trasy.
+class StripItem {
+  final double aheadM;
+  final IconData icon;
+  final Color color;
+  const StripItem(this.aheadM, this.icon, this.color);
+}
+
+/// Pruh „co mě čeká“: dalších až 50 km trasy se zastávkami, službami, radary a omezeními.
+class RouteStrip extends StatelessWidget {
+  final double remainingM;
+  final List<StripItem> items;
+  const RouteStrip({super.key, required this.remainingM, required this.items});
+
+  @override
+  Widget build(BuildContext context) {
+    final window = remainingM.clamp(2000.0, 50000.0);
+    final shown = items.where((i) => i.aheadM >= 0 && i.aheadM <= window).toList()
+      ..sort((a, b) => b.aheadM.compareTo(a.aheadM)); // bližší navrch
+    final km = (window / 1000).round();
+    return SizedBox(
+      height: 30,
+      child: LayoutBuilder(
+        builder: (ctx, box) {
+          final w = box.maxWidth - 20;
+          return Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Positioned(
+                left: 0,
+                right: 0,
+                top: 13,
+                child: Container(
+                  height: 4,
+                  decoration: BoxDecoration(color: Lkw.panelHi, borderRadius: BorderRadius.circular(2)),
+                ),
+              ),
+              Positioned(
+                left: 0,
+                top: 8,
+                child: Container(
+                  width: 14,
+                  height: 14,
+                  decoration: const BoxDecoration(color: Lkw.amber, shape: BoxShape.circle),
+                ),
+              ),
+              for (final it in shown)
+                Positioned(
+                  left: 4 + w * (it.aheadM / window),
+                  top: 2,
+                  child: Container(
+                    padding: const EdgeInsets.all(2),
+                    decoration: BoxDecoration(color: Lkw.panel, borderRadius: BorderRadius.circular(6)),
+                    child: Icon(it.icon, size: 20, color: it.color),
+                  ),
+                ),
+              Positioned(
+                right: 0,
+                top: -12,
+                child: Text('$km km', style: const TextStyle(fontSize: 10, color: Lkw.muted)),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}

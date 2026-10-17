@@ -12,6 +12,7 @@ class TruckProfile {
   bool hazmat; // ADR náklad
   bool avoidTolls;
   bool avoidFerries;
+  bool avoidUnpaved; // nezpevněné cesty (polní, šotolina)
 
   TruckProfile({
     this.height = 4.0,
@@ -24,6 +25,7 @@ class TruckProfile {
     this.hazmat = false,
     this.avoidTolls = false,
     this.avoidFerries = false,
+    this.avoidUnpaved = true,
   });
 
   /// [delivery] = zásobování: hmotnostní zóny („mimo dopravní obsluhu“) se ignorují,
@@ -38,6 +40,7 @@ class TruckProfile {
     'hazmat': hazmat,
     'use_tolls': avoidTolls ? 0.0 : 0.5,
     'use_ferry': avoidFerries ? 0.0 : 0.5,
+    if (avoidUnpaved) 'exclude_unpaved': true,
   };
 
   /// Krátký přehled aktivního profilu (výška × šířka × délka · hmotnost): „4 m × 2,55 m × 16,5 m · 40 t“.
@@ -62,6 +65,7 @@ class TruckProfile {
     'hazmat': hazmat,
     'avoidTolls': avoidTolls,
     'avoidFerries': avoidFerries,
+    'avoidUnpaved': avoidUnpaved,
   };
 
   factory TruckProfile.fromJson(Map<String, dynamic> j) {
@@ -77,6 +81,7 @@ class TruckProfile {
       hazmat: j['hazmat'] as bool? ?? false,
       avoidTolls: j['avoidTolls'] as bool? ?? false,
       avoidFerries: j['avoidFerries'] as bool? ?? false,
+      avoidUnpaved: j['avoidUnpaved'] as bool? ?? true,
     );
   }
 
