@@ -57,9 +57,55 @@ final _roadRef = RegExp(r'\b([DER])\s?(\d{1,3})\b');
 const _letters = {'D': 'dé', 'E': 'E', 'R': 'er'};
 final _iRoad = RegExp(r'\b(I{1,3})/(\d{1,3})\b');
 
+// Zkratky z dopravních tabulí – hlas je jinak čte doslova („Ml tečka Boleslav“).
+const _abbrev = {
+  'Ml. Boleslav': 'Mladá Boleslav',
+  'Hr. Králové': 'Hradec Králové',
+  'Č. Budějovice': 'České Budějovice',
+  'Č. Krumlov': 'Český Krumlov',
+  'Č. Lípa': 'Česká Lípa',
+  'Č. Třebová': 'Česká Třebová',
+  'K. Vary': 'Karlovy Vary',
+  'M. Lázně': 'Mariánské Lázně',
+  'Fr. Lázně': 'Františkovy Lázně',
+  'Kr. Dvůr': 'Králův Dvůr',
+  'Val. Meziříčí': 'Valašské Meziříčí',
+  'Uh. Hradiště': 'Uherské Hradiště',
+  'Uh. Brod': 'Uherský Brod',
+  'Ž. n. Sázavou': 'Žďár nad Sázavou',
+  'Žďár n. S.': 'Žďár nad Sázavou',
+  'Ústí n. L.': 'Ústí nad Labem',
+  'Ústí n. Orl.': 'Ústí nad Orlicí',
+  'Brandýs n. L.': 'Brandýs nad Labem',
+  'Nové M. n. M.': 'Nové Město na Moravě',
+  'Ostrava-Jih': 'Ostrava jih',
+};
+final _nadRiver = RegExp(
+  r'\bn\. (L\.|Lab\.|Labem|Vlt\.|Ohří|Orl\.|Sáz\.|Sázavou|Mor\.|Odrou|Jiz\.|Jizerou|Metují|Nisou|Svit\.)',
+);
+const _rivers = {
+  'L.': 'Labem',
+  'Lab.': 'Labem',
+  'Labem': 'Labem',
+  'Vlt.': 'Vltavou',
+  'Ohří': 'Ohří',
+  'Orl.': 'Orlicí',
+  'Sáz.': 'Sázavou',
+  'Sázavou': 'Sázavou',
+  'Mor.': 'Moravou',
+  'Odrou': 'Odrou',
+  'Jiz.': 'Jizerou',
+  'Jizerou': 'Jizerou',
+  'Metují': 'Metují',
+  'Nisou': 'Nisou',
+  'Svit.': 'Svitavou',
+};
+
 /// Připraví text pro hlas: „D46“ → „dé čtyřicet šest“, „E422“ → „E čtyři sta dvacet dva“,
-/// „I/35“ → „jedna třicet pět“.
-String forSpeech(String text) => text
+/// „I/35“ → „jedna třicet pět“, „Ml. Boleslav“ → „Mladá Boleslav“.
+String forSpeech(String text) => _abbrev.entries
+    .fold(text, (t, e) => t.replaceAll(e.key, e.value))
+    .replaceAllMapped(_nadRiver, (m) => 'nad ${_rivers[m[1]] ?? m[1]}')
     .replaceAllMapped(
       _iRoad,
       (m) => '${czechNumber(m.group(1)!.length)} ${czechNumber(int.parse(m.group(2)!))}',

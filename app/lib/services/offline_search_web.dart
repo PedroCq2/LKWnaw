@@ -25,6 +25,9 @@ class OfflineSearch {
 
   bool get hasOsm => false;
   bool get hasAccess => false;
+  bool get hasLanes => false;
+
+  Map<int, Map<String, String>> wayTags(Iterable<int> ids) => {};
 
   List<Map<String, dynamic>> osmElements(double a, double b, double c, double d) => const [];
 

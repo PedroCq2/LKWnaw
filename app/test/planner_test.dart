@@ -11,17 +11,19 @@ void main() {
   testWidgets('planner shows start, stops and destination', (t) async {
     SharedPreferences.setMockInitialValues({});
     await t.binding.setSurfaceSize(const Size(360, 800));
-    await t.pumpWidget(MaterialApp(
-      theme: Lkw.theme(),
-      home: PlannerScreen(
-        saved: SavedPlaces([]),
-        initial: TripPlan(
-          name: 'x',
-          stops: [PlanPoint('Kaufland DC Velký Týnec', const LatLng(49.56, 17.31))],
-          dest: PlanPoint('Ostrava', const LatLng(49.83, 18.28)),
+    await t.pumpWidget(
+      MaterialApp(
+        theme: Lkw.theme(),
+        home: PlannerScreen(
+          saved: SavedPlaces([]),
+          initial: TripPlan(
+            name: 'x',
+            stops: [PlanPoint('Kaufland DC Velký Týnec', const LatLng(49.56, 17.31))],
+            dest: PlanPoint('Ostrava', const LatLng(49.83, 18.28)),
+          ),
         ),
       ),
-    ));
+    );
     await t.pumpAndSettle();
     expect(find.text('Moje poloha'), findsOneWidget);
     expect(find.text('Kaufland DC Velký Týnec'), findsOneWidget);

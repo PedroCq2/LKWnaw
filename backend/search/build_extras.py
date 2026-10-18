@@ -4,6 +4,7 @@ Tabulka osm_el (+ R-strom osm_el_rtree) drží prvky OSM ve tvaru, jaký vrací 
 (typ, id, souřadnice, štítky, u cest geometrie), takže aplikace je zpracuje stejným kódem:
   • cesty s omezením: maxheight / maxweight / maxwidth / maxlength / maxaxleload, overtaking:hgv
   • vjezd pro kamiony: hgv / access / motor_vehicle = no, private, delivery, destination (kontrola zkratek)
+  • jízdní pruhy a směry (turn:lanes, destination…) na hlavních silnicích – pruhy bez internetu
   • body: radary (highway=speed_camera), exity (motorway_junction + ref), maxheight na bodech
   • sjezdy motorway_link s destination:ref D… (sjezd na jinou dálnici)
   • služby: odpočívky (services/rest_area), všechny pumpy, parkoviště pro kamiony a parkoviště,
@@ -28,7 +29,14 @@ KEEP = set(RESTR_KEYS) | {'highway', 'bridge', 'tunnel', 'name', 'ref', 'destina
                           'supervised', 'surveillance', 'fenced', 'barrier', 'toilets', 'shower', 'showers',
                           'restaurant', 'food', 'fuel:adblue', 'fuel:HGV_diesel', 'opening_hours', 'brand',
                           'operator', 'access', 'motorroad', 'motor_vehicle', 'vehicle', 'goods',
-                          'hgv:conditional'}
+                          'hgv:conditional', 'turn:lanes', 'turn:lanes:forward', 'turn:lanes:backward',
+                          'destination:lanes', 'destination:ref:lanes', 'destination:forward', 'oneway',
+                          'lanes', 'junction:ref'}
+# Jízdní pruhy a směry na tabulích (pokyny „držte se vpravo, směr Brno“ i bez internetu).
+LANE_KEYS = ('turn:lanes', 'turn:lanes:forward', 'destination', 'destination:ref', 'destination:lanes',
+             'destination:ref:lanes', 'destination:forward')
+LANE_ROADS = {'motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'motorway_link', 'trunk_link',
+              'primary_link', 'secondary_link', 'tertiary_link'}
 # Vjezd pro kamiony (zákaz / jen dopravní obsluha / soukromé) – kontrola zkratek v zásobování.
 ACC_KEYS = ('hgv', 'access', 'motor_vehicle', 'vehicle', 'goods')
 ACC_VALUES = {'no', 'private', 'delivery', 'destination', 'permit', 'agricultural', 'forestry'}
@@ -87,6 +95,7 @@ class H(osmium.SimpleHandler):
         mw = hw in ('motorway', 'trunk', 'motorway_link', 'trunk_link')
         acc = hw in DRIVABLE and any(t.get(a) in ACC_VALUES for a in ACC_KEYS) and not (
             hw == 'service' and 'hgv' not in t)
+        acc = acc or (hw in LANE_ROADS and any(a in t for a in LANE_KEYS))
         if not (restr or link or k or mw or acc):
             return
         try:
@@ -136,6 +145,7 @@ def build(pbf, out):
                             tags TEXT, geom BLOB);
         CREATE VIRTUAL TABLE osm_el_rtree USING rtree(id, minlat, maxlat, minlon, maxlon);
         DROP TABLE IF EXISTS osm_access_v1; CREATE TABLE osm_access_v1(x);  -- značka: data o vjezdu jsou
+        DROP TABLE IF EXISTS osm_lanes_v1; CREATE TABLE osm_lanes_v1(x);    -- značka: pruhy a směry jsou
     ''')
     n = 0
     stats = defaultdict(int)
@@ -161,6 +171,7 @@ def build(pbf, out):
         db.execute('INSERT INTO osm_el_rtree VALUES (?,?,?,?,?)', (n, *box))
         key = tags.get('highway') or tags.get('amenity') or tags.get('tourism') or tags.get('shop') or 'other'
         stats[key] += 1
+    db.execute('CREATE INDEX IF NOT EXISTS osm_el_osm ON osm_el(osm_id)')
     db.commit()
     db.execute('VACUUM')
     db.close()

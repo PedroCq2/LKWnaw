@@ -16,6 +16,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../models/route.dart';
 import '../navigation/nav_engine.dart';
 import '../navigation/simulator.dart';
+import '../navigation/voice_guide.dart';
 import '../services/geocoding.dart';
 import '../services/restrictions.dart';
 import '../services/lanes.dart';
@@ -62,6 +63,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   // Poslední GPS (nebo simulovaný) fix.
   LatLng? _pos;
   double _heading = 0;
+  VoiceGuide? _guide;
   // Kamera čte značky (rychlost, výška, hmotnost, délka) a ukládá je s polohou.
   SignCamera? _cam;
   StreamSubscription<SignRead>? _camSub;
@@ -303,7 +305,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
           _arrivedSpoken = true;
           _clearTrip();
           // „Cíl je vpravo“ právě zaznělo → nehlásit hned znovu.
-          final ds = _destSpokenAt;
+          final ds = _guide?.destSpokenAt;
           if (ds == null || DateTime.now().difference(ds) > const Duration(seconds: 30)) _say('Jste v cíli.');
         }
         // Přepočet jen za jízdy; bez internetu zkoušet jednou za 30 s a vést dál po staré trase.
@@ -889,234 +891,13 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
 
   // ------------------------------------------------------------ hlasové pokyny
 
-  /// Hlasové pokyny jako u profi navigací: odpočet „Za kilometr… Za 500 metrů… Za 200 metrů…“
-  /// a v místě manévru „Sjeďte a pokračujte po D1“. Po manévru „Pokračujte rovně 12 kilometrů“.
+  /// Hlasové pokyny (co a kdy říct) řeší VoiceGuide – tady se jen přehrají.
   void _voiceGuidance(NavState nav) {
-    final i = nav.nextManeuverIndex;
-    if (i < 0) return;
-    final r = _route!, e = _engine!;
-    final m = r.maneuvers[i];
-    final d = nav.distanceToNextManeuver;
-    final key = m.beginShapeIndex;
-    final mps = _speedKmh / 3.6;
-    final roundaboutExit = m.type == 27;
-    // „Teď“: ~4 s před manévrem, nejméně 50 m. Výjezd z kruháče až těsně u něj –
-    // 50 m před ním je v kruhovém objezdu ještě předchozí výjezd.
-    final now = roundaboutExit ? math.max(8.0, mps * 1.2) : math.max(50.0, mps * 4);
-
-    // Po manévru: dlouhý úsek bez pokynu → „Pokračujte rovně (po D1) 12 kilometrů.“
-    if (i > 0 && d > 3000 && !e.preSpoken.contains(key) && !e.continueSpoken.contains(key)) {
-      final prev = r.maneuvers[i - 1];
-      final passed = nav.traveled - r.cumulative[prev.beginShapeIndex.clamp(0, r.shape.length - 1)];
-      if (passed > 900) {
-        e.continueSpoken.add(key);
-      } else if (DateTime.now().difference(Voice.instance.lastSpokenAt) > const Duration(seconds: 7)) {
-        // Až předchozí pokyn dozní – ne „Najeďte na nájezd.“ a hned „Pokračujte 7 km.“
-        e.continueSpoken.add(key);
-        final road = _roadAhead(prev);
-        final street = road != null && !RegExp(r'^(D\d|I+/|E\d|silnici )').hasMatch(road);
-        _say(
-          'Pokračujte rovně${road == null ? '' : (street ? ' po ulici $road' : ' po $road')} ${_kmWords(d)}.',
-        );
-      }
+    final g = _guide;
+    if (g == null) return;
+    for (final t in g.update(nav, _speedKmh, DateTime.now(), Voice.instance.lastSpokenAt)) {
+      _say(t);
     }
-
-    // Už řečeno jako „… a poté …“ u předchozího manévru a jede se k němu jen pár sekund:
-    // znovu nehlásit (jinak dvě hlášky hned za sebou).
-    final ch = e.chained[key];
-    if (ch != null) {
-      // Odpočet („Za 200 metrů…“) už nedává smysl – manévr zazněl v „a poté“.
-      for (var t = 0; t < 3; t++) {
-        e.stageSpoken.add(key * 10 + t);
-      }
-      if (ch < math.max(150.0, mps * 8)) {
-        e.preSpoken.add(key);
-        return;
-      }
-    }
-
-    if (d <= now) {
-      if (e.preSpoken.add(key)) {
-        e.alertSpoken.add(key);
-        _say(_nowInstruction(r, i));
-        _markChained(r, i);
-      }
-      return;
-    }
-    if (roundaboutExit || m.synthetic && d < 300) return;
-    // Odpočet podle rychlosti: dálnice 1000/500/200 m, město 500/200 m, pomalu 200 m.
-    final stages = _speedKmh > 70
-        ? const [1000.0, 500.0, 200.0]
-        : _speedKmh > 35
-        ? const [500.0, 200.0]
-        : const [200.0];
-    for (var s = 0; s < stages.length; s++) {
-      final st = stages[s];
-      if (d > st) continue;
-      final k = key * 10 + s;
-      if (e.stageSpoken.contains(k)) return;
-      // Zmeškané větší stupně už nehlásit (např. po přepočtu trasy).
-      for (var t = 0; t <= s; t++) {
-        e.stageSpoken.add(key * 10 + t);
-      }
-      if (d < st * 0.6 || d - now < 80) return;
-      e.alertSpoken.add(key);
-      final what = _shortInstruction(m);
-      // Hláška se zpozdila (zatáčka, přepočet): říct skutečnou vzdálenost, ne „Za 200 metrů“.
-      _say('${_spokenDistance(st - d > 40 ? d : st)} $what');
-      return;
-    }
-  }
-
-  /// Zapamatuje si navazující manévr, který zazněl v „… a poté …“.
-  void _markChained(TruckRoute r, int i) {
-    final e = _engine;
-    if (e == null || i + 1 >= r.maneuvers.length) return;
-    final m = r.maneuvers[i], n = r.maneuvers[i + 1];
-    final cum = r.cumulative;
-    final gap =
-        cum[n.beginShapeIndex.clamp(0, cum.length - 1)] - cum[m.beginShapeIndex.clamp(0, cum.length - 1)];
-    if (m.type == 26 && n.type == 27) {
-      e.chained[n.beginShapeIndex] = 0; // výjezd z kruháče už je v „vyjeďte druhým výjezdem“
-    } else if (gap < 350 && n.type != 27 && !const {4, 5, 6}.contains(n.type)) {
-      e.chained[n.beginShapeIndex] = gap;
-    }
-  }
-
-  /// Krátký pokyn do odpočtu: „sjeďte“, „odbočte vpravo“, „na kruhovém objezdu vyjeďte třetím výjezdem“.
-  /// Pokyn do odpočtu: „sjeďte vpravo na D46 směr Olomouc a poté se držte vlevo“.
-  String _shortInstruction(Maneuver m) {
-    final r = _route;
-    final i = r?.maneuvers.indexOf(m) ?? -1;
-    if (r == null || i < 0) return _phrase(m);
-    return _withThen(r, i);
-  }
-
-  /// Pokyn v místě manévru, s návazností: „Odbočte vpravo a poté se držte vlevo na D35.“
-  String _nowInstruction(TruckRoute r, int i) {
-    final m = r.maneuvers[i];
-    if (const {4, 5, 6}.contains(m.type)) {
-      _destSpokenAt = DateTime.now();
-      return switch (m.type) {
-        5 => 'Cíl je vpravo.',
-        6 => 'Cíl je vlevo.',
-        _ => 'Jste v cíli.',
-      };
-    }
-    return '${_capital(_withThen(r, i))}.';
-  }
-
-  DateTime? _destSpokenAt;
-
-  /// Manévr + navazující manévr do 350 m („… a poté …“).
-  String _withThen(TruckRoute r, int i) {
-    final m = r.maneuvers[i];
-    var text = _phrase(m);
-    if (i + 1 < r.maneuvers.length) {
-      final n = r.maneuvers[i + 1];
-      final cum = r.cumulative;
-      final gap =
-          cum[n.beginShapeIndex.clamp(0, cum.length - 1)] - cum[m.beginShapeIndex.clamp(0, cum.length - 1)];
-      if (m.type == 26 && n.type == 27) {
-        // Kruhový objezd: „vyjeďte třetím výjezdem a poté pokračujte po I/35“.
-        final road = _roadAhead(n);
-        if (road != null) text += ' a poté pokračujte po $road';
-      } else if (gap < 350 && n.type != 27 && !const {4, 5, 6}.contains(n.type)) {
-        final same = _roadAhead(n) != null && _roadAhead(n) == _roadAhead(m);
-        text += ' a poté ${_phrase(n, noRoad: same)}';
-      }
-    }
-    return text;
-  }
-
-  /// Jedna věta pokynu (malým písmenem): podle druhu manévru, se silnicí a směrem.
-  String _phrase(Maneuver m, {bool noRoad = false}) {
-    if (m.synthetic) {
-      final t = m.preInstruction ?? m.instruction;
-      return t.isEmpty ? t : t[0].toLowerCase() + t.substring(1).replaceAll(RegExp(r'\.$'), '');
-    }
-    final road = noRoad ? null : _roadAhead(m);
-    final toward = m.exitToward.take(2).join(', ');
-    // Ulice: „do ulice Na Stínadlech“, „po ulici …“; silnice: „na D1“, „po silnici 13“.
-    final street = road != null && !RegExp(r'^(D\d|I+/|E\d|silnici )').hasMatch(road);
-    final on = road == null ? '' : (street ? ' do ulice $road' : ' na $road');
-    final po = road == null ? '' : (street ? ' po ulici $road' : ' po $road');
-    final dir = toward.isNotEmpty ? ' směr $toward' : '';
-    switch (m.type) {
-      case 26:
-        return _roundaboutText(m);
-      case 27:
-        return 'opusťte kruhový objezd';
-      case 9:
-        return 'odbočte mírně vpravo$on';
-      case 10:
-        return 'odbočte vpravo$on';
-      case 11:
-        return 'odbočte ostře vpravo$on';
-      case 16:
-        return 'odbočte mírně vlevo$on';
-      case 15:
-        return 'odbočte vlevo$on';
-      case 14:
-        return 'odbočte ostře vlevo$on';
-      case 8:
-      case 22:
-        return 'pokračujte rovně$po$dir';
-      case 23:
-        return 'na rozdvojení se držte vpravo${road != null ? ' a pokračujte$po' : ''}$dir';
-      case 24:
-        return 'na rozdvojení se držte vlevo${road != null ? ' a pokračujte$po' : ''}$dir';
-      case 17:
-      case 18:
-        return 'najeďte vpravo na nájezd$on$dir';
-      case 19:
-        return 'najeďte vlevo na nájezd$on$dir';
-      case 20:
-        return 'sjeďte vpravo$on$dir';
-      case 21:
-        return 'sjeďte vlevo$on$dir';
-      case 25:
-      case 37:
-      case 38:
-        return 'připojte se${road != null ? ' na $road' : ' do provozu'}';
-      case 4:
-        return 'dorazíte do cíle';
-      case 5:
-        return 'cíl bude vpravo';
-      case 6:
-        return 'cíl bude vlevo';
-      case 12:
-      case 13:
-        return 'otočte se';
-    }
-    final t = (m.preInstruction ?? m.instruction).split('. Poté').first.trim().replaceAll(RegExp(r'\.$'), '');
-    return t.isEmpty ? t : t[0].toLowerCase() + t.substring(1);
-  }
-
-  String _roundaboutText(Maneuver m) {
-    final n =
-        m.roundaboutExit ?? int.tryParse(RegExp(r'(\d+)\. výjezd').firstMatch(m.instruction)?.group(1) ?? '');
-    const ord = ['prvním', 'druhým', 'třetím', 'čtvrtým', 'pátým', 'šestým', 'sedmým', 'osmým'];
-    final road = m.streetNames.isNotEmpty ? ' na ${m.streetNames.first}' : '';
-    if (n == null || n < 1 || n > ord.length) return 'na kruhovém objezdu vyjeďte$road';
-    return 'na kruhovém objezdu vyjeďte ${ord[n - 1]} výjezdem$road';
-  }
-
-  static String _capital(String s) => s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
-
-  /// Silnice za manévrem: číslo (D1, I/35, 635) má přednost před názvem ulice.
-  String? _roadAhead(Maneuver m) {
-    final refs = m.streetNames.where((n) => RegExp(r'^(D\d+|I+/\d+|\d{1,5})$').hasMatch(n)).toList();
-    final ref = refs.isNotEmpty ? refs.first : (m.streetNames.isNotEmpty ? m.streetNames.first : null);
-    if (ref == null) return null;
-    // Holé číslo silnice → „silnici 635“ (D a I/ se čtou samy).
-    return RegExp(r'^\d{1,5}$').hasMatch(ref) ? 'silnici $ref' : ref;
-  }
-
-  static String _kmWords(double m) {
-    if (m < 1000) return '${(m / 100).round() * 100} metrů';
-    final k = (m / 1000).round();
-    return '$k ${k == 1 ? 'kilometr' : (k < 5 ? 'kilometry' : 'kilometrů')}';
   }
 
   DateTime? _overSince;
@@ -1154,7 +935,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         _ => w.violates && d <= 1000,
       };
       if (speak && _warnSpoken.add(w)) {
-        final dist = _spokenDistance(d);
+        final dist = VoiceGuide.spokenDistance(d);
         if (w.type == WarningType.speedCamera) {
           _say('$dist radar.');
         } else if (w.type == WarningType.noOvertakingHgv) {
@@ -1168,20 +949,6 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         }
       }
     }
-  }
-
-  String _spokenDistance(double m) {
-    if (m < 1000) {
-      final r = m >= 300 ? (m / 100).round() * 100 : math.max(50, (m / 50).round() * 50);
-      return 'Za $r metrů';
-    }
-    final km = (m / 100).round() / 10;
-    if (km == km.roundToDouble()) {
-      final k = km.round();
-      if (k == 1) return 'Za kilometr';
-      return 'Za $k ${k < 5 ? 'kilometry' : 'kilometrů'}';
-    }
-    return 'Za ${km.toString().replaceAll('.', ',')} kilometru';
   }
 
   // ------------------------------------------------------------ trasa
@@ -1269,6 +1036,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       _sel = i;
       _route = r;
       _engine = NavEngine(r);
+      _guide = VoiceGuide(r, _engine!);
       _nav = _pos == null ? null : _engine!.update(_pos!);
       _arrivedSpoken = false;
       _warnSpoken.clear();
@@ -1602,28 +1370,6 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     if (_route != null && mounted) await _startNavigation();
   }
 
-  /// Jedna hláška na startu. Blízko první odbočka → rovnou ona (a odpočet ji pak nehlásí znovu),
-  /// jinak „Jeďte … po …“ z Valhally.
-  String _startPhrase(TruckRoute r, Maneuver? first) {
-    final e = _engine;
-    final i = r.maneuvers.length > 1 ? 1 : -1;
-    if (e == null || i < 0) return first?.preInstruction ?? 'Navigace spuštěna.';
-    final m = r.maneuvers[i];
-    final d = r.cumulative[m.beginShapeIndex.clamp(0, r.cumulative.length - 1)] - (_nav?.traveled ?? 0);
-    if (d > 600) return first?.preInstruction ?? 'Navigace spuštěna.';
-    final key = m.beginShapeIndex;
-    for (var t = 0; t < 3; t++) {
-      e.stageSpoken.add(key * 10 + t);
-    }
-    e.alertSpoken.add(key);
-    if (d < 80) {
-      e.preSpoken.add(key);
-      _markChained(r, i);
-      return _nowInstruction(r, i);
-    }
-    return '${_spokenDistance(d)} ${_shortInstruction(m)}';
-  }
-
   Future<void> _startNavigation() async {
     _approach = false;
     // Plán začínal jinde: jedeme odsud → přepočítat z aktuální polohy (zastávky zůstanou).
@@ -1647,8 +1393,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     await _applyInsets();
     await _updateMeLayer();
     WakelockPlus.enable();
-    final first = r.maneuvers.isNotEmpty ? r.maneuvers.first : null;
-    _say(_startPhrase(r, first));
+    _say(_guide?.startPhrase(_nav?.traveled ?? 0, DateTime.now()) ?? 'Navigace spuštěna.');
     if (_settings.simulate) {
       _sim?.stop();
       _sim = RouteSimulator(
@@ -1700,6 +1445,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       _route = null;
       _options = [];
       _engine = null;
+      _guide = null;
       _nav = null;
       _dest = null;
       _destName = null;

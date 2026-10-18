@@ -237,6 +237,9 @@ void main() {
     expect(forSpeech('Vjeďte na D1 směr E 50'), 'Vjeďte na dé jedna směr E padesát');
     expect(forSpeech('E442'), 'E čtyři sta čtyřicet dva');
     expect(forSpeech('na I/35'), 'na jedna třicet pět');
+    expect(forSpeech('směr Ml. Boleslav, Hr. Králové'), 'směr Mladá Boleslav, Hradec Králové');
+    expect(forSpeech('směr Ústí n. L.'), 'směr Ústí nad Labem');
+    expect(forSpeech('směr Kostelec n. Orl.'), 'směr Kostelec nad Orlicí');
     expect(czechNumber(602), 'šest set dva');
     expect(czechNumber(230), 'dvě stě třicet');
     expect(czechNumber(114), 'sto čtrnáct');

@@ -33,6 +33,7 @@ class OfflineSearch {
       _hasRamps = _db!.select("SELECT 1 FROM sqlite_master WHERE name = 'ramp_rtree'").isNotEmpty;
       _hasOsm = _db!.select("SELECT 1 FROM sqlite_master WHERE name = 'osm_el_rtree'").isNotEmpty;
       _hasAccess = _db!.select("SELECT 1 FROM sqlite_master WHERE name = 'osm_access_v1'").isNotEmpty;
+      _hasLanes = _db!.select("SELECT 1 FROM sqlite_master WHERE name = 'osm_lanes_v1'").isNotEmpty;
     } catch (_) {
       _db = null;
     }
@@ -91,6 +92,34 @@ class OfflineSearch {
 
   /// V balíku jsou i zákazy vjezdu kamionů (hgv=no, jen dopravní obsluha…).
   bool get hasAccess => hasOsm && _hasAccess;
+
+  bool _hasLanes = false;
+
+  /// V balíku jsou jízdní pruhy a směry na tabulích (turn:lanes, destination…).
+  bool get hasLanes => hasOsm && _hasLanes;
+
+  /// Štítky cest podle id (pruhy, směry, omezení) – jen cesty, které balík obsahuje.
+  Map<int, Map<String, String>> wayTags(Iterable<int> ids) {
+    final db = _db;
+    final out = <int, Map<String, String>>{};
+    if (db == null || !_hasOsm) return out;
+    final list = ids.toSet().toList();
+    try {
+      for (var i = 0; i < list.length; i += 400) {
+        final chunk = list.sublist(i, math.min(i + 400, list.length));
+        final rows = db.select(
+          "SELECT osm_id, tags FROM osm_el WHERE type = 'way' AND osm_id IN (${List.filled(chunk.length, '?').join(',')})",
+          chunk,
+        );
+        for (final r in rows) {
+          out[r['osm_id'] as int] = (jsonDecode(r['tags'] as String) as Map).map(
+            (k, v) => MapEntry('$k', '$v'),
+          );
+        }
+      }
+    } catch (_) {}
+    return out;
+  }
 
   /// Prvky OSM v obdélníku ve tvaru odpovědi Overpass (type, id, lat/lon nebo geometry, tags).
   List<Map<String, dynamic>> osmElements(double minLat, double maxLat, double minLon, double maxLon) {

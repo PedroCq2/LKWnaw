@@ -5,6 +5,7 @@ import 'package:latlong2/latlong.dart';
 
 import '../models/route.dart';
 import 'http_headers.dart';
+import 'offline_search.dart';
 
 /// Směr manévru pro výběr pruhů.
 enum _Dir { straight, left, right }
@@ -206,8 +207,9 @@ String? _activeDestinations(Map<String, String> t, LaneInfo? lanes) {
   return null;
 }
 
-/// Tagy cest z oficiálního OSM API (rychlé, dotaz podle ID).
+/// Tagy cest: z balíku dat v telefonu (okamžitě, bez internetu), jinak z oficiálního OSM API.
 Future<Map<int, Map<String, String>>> _osmWayTags(List<int> ids) async {
+  if (OfflineSearch.instance.hasLanes) return OfflineSearch.instance.wayTags(ids);
   final out = <int, Map<String, String>>{};
   for (var i = 0; i < ids.length; i += 100) {
     final chunk = ids.sublist(i, (i + 100).clamp(0, ids.length));
@@ -285,6 +287,32 @@ Future<List<(LatLng, String)>> _interchangeRampsFromOsm(TruckRoute route) async 
     if (ramp) cands.add((e.wayId!, route.shape[e.end]));
   }
   if (cands.isEmpty) return [];
+  const dist = Distance();
+  // Balík dat v telefonu: sjezdy s destination:ref jsou v něm i s tvarem → bez internetu.
+  final off = OfflineSearch.instance;
+  if (off.hasOsm) {
+    final out = <(LatLng, String)>[];
+    for (final (_, fork) in cands) {
+      for (final e in off.osmElements(
+        fork.latitude - 0.0006,
+        fork.latitude + 0.0006,
+        fork.longitude - 0.0009,
+        fork.longitude + 0.0009,
+      )) {
+        final t = (e['tags'] as Map?) ?? const {};
+        final ref = '${t['destination:ref'] ?? ''}';
+        final g = e['geometry'] as List?;
+        if (t['highway'] != 'motorway_link' || g == null || g.isEmpty) continue;
+        if (!RegExp(r'(^|;)\s*D\s*\d').hasMatch(ref)) continue;
+        final first = LatLng((g.first['lat'] as num).toDouble(), (g.first['lon'] as num).toDouble());
+        if (dist(first, fork) < 40) {
+          out.add((first, ref));
+          break;
+        }
+      }
+    }
+    return out;
+  }
   // Uzly přijezdových cest + jejich souřadnice (dávkově).
   final wayNodes = <int, List<int>>{};
   final ids = cands.map((c) => c.$1).toSet().toList();
@@ -304,7 +332,6 @@ Future<List<(LatLng, String)>> _interchangeRampsFromOsm(TruckRoute route) async 
       coords[(n['id'] as num).toInt()] = LatLng((n['lat'] as num).toDouble(), (n['lon'] as num).toDouble());
     }
   }
-  const dist = Distance();
   final out = <(LatLng, String)>[];
   final checked = <int>{};
   // Po 4 souběžně, ať nepřetěžujeme OSM API.
