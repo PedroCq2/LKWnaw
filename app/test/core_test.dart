@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:truck_nav/services/map_style.dart';
+import 'package:truck_nav/services/route_economy.dart';
 import 'package:truck_nav/widgets/nav_widgets.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -320,5 +321,73 @@ void main() {
     final py = File('../backend/map/pinned_style.py').readAsStringSync();
     final pin = RegExp(r"^PIN = '([^']+)'", multiLine: true).firstMatch(py)?.group(1);
     expect(pin, pinnedTiles);
+  });
+
+  test('omezení: jen cesta, po které trasa opravdu jede (ne dotyk dvou konců objížďky)', () {
+    final r = TruckRoute(
+      shape: const [LatLng(50, 14), LatLng(50, 14.01), LatLng(50, 14.02)],
+      maneuvers: [
+        Maneuver(
+          type: 1,
+          instruction: 'Start',
+          streetNames: [],
+          beginShapeIndex: 0,
+          endShapeIndex: 1,
+          lengthKm: 1.4,
+        ),
+        Maneuver(
+          type: 4,
+          instruction: 'Cíl',
+          streetNames: [],
+          beginShapeIndex: 2,
+          endShapeIndex: 2,
+          lengthKm: 0,
+        ),
+      ],
+      lengthKm: 1.43,
+      timeSec: 100,
+      hasToll: false,
+      hasHighway: false,
+    );
+    final idx = RouteIndex(r);
+    // Stará silnice pod mostem (3,5 m): začíná a končí na trase, mezi tím 60 m stranou.
+    final loop = const [
+      LatLng(50, 14.004),
+      LatLng(50.0005, 14.006),
+      LatLng(50.0005, 14.008),
+      LatLng(50, 14.010),
+    ];
+    expect(wayOnRoute(idx, loop, onRoute: false), isNull);
+    // Silnice, po které trasa jede (sdílený úsek).
+    final along = const [LatLng(50, 14.004), LatLng(50, 14.006), LatLng(50.0004, 14.007)];
+    expect(wayOnRoute(idx, along, onRoute: false), isNotNull);
+    // Cesta z atributů trasy: stačí 2 body do 15 m.
+    expect(
+      wayOnRoute(idx, const [LatLng(50.0001, 14.004), LatLng(50.0001, 14.012)], onRoute: true),
+      isNotNull,
+    );
+  });
+
+  test('ekonomika trasy: kamion raději po dálnici než přes vesnice (Veltěže → Čertousy)', () {
+    EcoEdge e(String c, double km, double v) => (roadClass: c, lengthM: km * 1000, speedKmh: v);
+    // Přes vesnice: kratší, ale 30 km „dvojek“ a „trojek“ uprostřed trasy.
+    final villages = [
+      e('residential', 1, 30),
+      e('secondary', 30, 80),
+      e('tertiary', 8, 70),
+      e('motorway', 35, 80),
+    ];
+    // Po hlavních: delší, skoro celá po dálnici a „jedničkách“.
+    final main = [
+      e('residential', 2, 30),
+      e('tertiary', 6, 70),
+      e('motorway', 41, 80),
+      e('primary', 15, 80),
+      e('trunk', 12, 80),
+    ];
+    expect(economyMinutes(main, 28), lessThan(economyMinutes(villages, 18)));
+    // Začátek a konec trasy bez přirážky (k nakládce a vykládce se jinak nedá).
+    expect(economyMinutes([e('residential', 2, 30)], 0), closeTo(4.8, 0.01));
+    expect(countTurns([1, 10, 8, 15, 22, 26, 4]), 3);
   });
 }

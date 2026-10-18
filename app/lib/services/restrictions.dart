@@ -79,24 +79,11 @@ Future<List<RouteWarning>> loadRouteWarnings(
           }
           continue;
         }
-        // Jen cesty, po kterých trasa opravdu vede: souběžná silnice 10 m vedle dálnice
-        // (např. III/13036 vedle D1 u Koberovic) se nesmí počítat.
-        // Neznámá cesta (chybí atributy úseku) → body musí ležet přímo na trase.
-        final onRoute = routeWays.contains(id);
-        // Cesta musí s trasou sdílet aspoň 2 body (ne jen křížení).
-        final hits = <double>[];
-        LatLng? first;
-        for (final g in geom) {
-          final p = LatLng((g['lat'] as num).toDouble(), (g['lon'] as num).toDouble());
-          final at = index.locate(p, onRoute ? 15 : 3);
-          if (at != null) {
-            hits.add(at);
-            first ??= p;
-          }
-        }
-        if (hits.length < 2) continue;
-        final at = hits.reduce(math.min);
-        out.addAll(_fromTags(tags, at, first!, truck, delivery));
+        final on = wayOnRoute(index, [
+          for (final g in geom) LatLng((g['lat'] as num).toDouble(), (g['lon'] as num).toDouble()),
+        ], onRoute: routeWays.contains(id));
+        if (on == null) continue;
+        out.addAll(_fromTags(tags, on.$1, on.$2, truck, delivery));
       } else {
         if (!seenNodes.add(id)) continue;
         final p = LatLng((e['lat'] as num).toDouble(), (e['lon'] as num).toDouble());
@@ -121,6 +108,39 @@ Future<List<RouteWarning>> loadRouteWarnings(
   route.kmPoints = junctions;
   if (links.isNotEmpty) route.interchangeLinks = links;
   return mergeWarnings(out);
+}
+
+/// Kde trasa vede po cestě [geom] (m od začátku trasy a bod), nebo null.
+/// - Cesta na trase (podle atributů úseků z Valhally): stačí 2 její body do 15 m.
+/// - Jiná cesta: trasa po ní musí opravdu jet – dva SOUSEDNÍ body i bod mezi nimi do 3 m (společný
+///   úsek). Souběžná silnice 10 m vedle dálnice (III/13036 u Koberovic), dotyk na křižovatce ani dva
+///   konce staré silnice pod mostem, když trasa jede po obchvatu (II/239 u Slavětína, 3,5 m), se nepočítají.
+(double, LatLng)? wayOnRoute(RouteIndex index, List<LatLng> geom, {required bool onRoute}) {
+  final tol = onRoute ? 15.0 : 3.0;
+  final hits = [for (final p in geom) index.locate(p, tol)];
+  (double, LatLng)? best;
+  void take(int i) {
+    final at = hits[i]!;
+    if (best == null || at < best!.$1) best = (at, geom[i]);
+  }
+
+  if (onRoute) {
+    var n = 0;
+    for (var i = 0; i < geom.length; i++) {
+      if (hits[i] == null) continue;
+      n++;
+      take(i);
+    }
+    return n >= 2 ? best : null;
+  }
+  for (var i = 0; i + 1 < geom.length; i++) {
+    if (hits[i] == null || hits[i + 1] == null) continue;
+    final a = geom[i], b = geom[i + 1];
+    final mid = LatLng((a.latitude + b.latitude) / 2, (a.longitude + b.longitude) / 2);
+    if (index.locate(mid, tol) == null) continue;
+    take(i);
+  }
+  return best;
 }
 
 /// Sloučí navazující stejná omezení (jedna zóna = mnoho úseků cesty v OSM).

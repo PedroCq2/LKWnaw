@@ -10,6 +10,7 @@ import 'http_headers.dart';
 import 'offline_search.dart';
 import 'offline_routing.dart';
 import 'restrictions.dart';
+import 'route_economy.dart';
 import 'town.dart';
 
 import '../models/route.dart';
@@ -80,7 +81,7 @@ class ValhallaClient {
       for (final (i, r) in (await main).indexed) {
         out.add(RouteOption(i == 0 ? 'Nejrychlejší' : 'Alternativa', r));
       }
-      return out;
+      return _rank(out, profile);
     }
     final noToll = safe(
       _request(
@@ -126,7 +127,62 @@ class ValhallaClient {
     for (final r in res[2].take(1)) {
       add('Nejkratší', r);
     }
-    return out;
+    return _rank(out, profile);
+  }
+
+  /// Pořadí variant: první je ta nejlepší pro kamion (ekonomická doba – třídy silnic, odbočky,
+  /// vesnice), pokud není o víc než 15 % pomalejší než nejrychlejší. Nejrychlejší zůstává v nabídce.
+  /// (Veltěže → Čertousy: Louny – D7 – I/16 místo III. tříd přes Slavětín a Velvary.)
+  Future<List<RouteOption>> _rank(List<RouteOption> opts, TruckProfile profile) async {
+    if (opts.length < 2) return opts;
+    final scores = await Future.wait([for (final o in opts) _economy(o.route, profile)]);
+    var best = 0;
+    for (var i = 1; i < opts.length; i++) {
+      if (scores[i] < scores[best]) best = i;
+    }
+    if (best == 0 || !scores[best].isFinite) return opts;
+    if (opts[best].route.timeSec > opts.first.route.timeSec * 1.15) return opts;
+    return [
+      RouteOption('Doporučená', opts[best].route),
+      for (final (i, o) in opts.indexed)
+        if (i != best) o,
+    ];
+  }
+
+  Future<double> _economy(TruckRoute r, TruckProfile profile) async {
+    try {
+      final legs = r.legShapes.isNotEmpty
+          ? [for (final (enc, _) in r.legShapes) enc]
+          : [if (r.encodedShape != null) r.encodedShape!];
+      final edges = <EcoEdge>[];
+      for (final enc in legs) {
+        final data = await _call('trace_attributes', {
+          'encoded_polyline': enc,
+          'costing': 'truck',
+          'costing_options': {'truck': profile.toValhallaCosting()},
+          'shape_match': 'edge_walk',
+          'filters': {
+            'attributes': ['edge.road_class', 'edge.length', 'edge.speed'],
+            'action': 'include',
+          },
+        });
+        for (final e in (data['edges'] as List? ?? const [])) {
+          edges.add((
+            roadClass: e['road_class'] as String?,
+            lengthM: ((e['length'] as num?)?.toDouble() ?? 0) * 1000,
+            speedKmh: (e['speed'] as num?)?.toDouble() ?? 0,
+          ));
+        }
+      }
+      if (edges.isEmpty) return double.infinity;
+      return economyMinutes(
+        edges,
+        countTurns(r.maneuvers.map((m) => m.type)),
+        maxSpeedKmh: profile.maxSpeed.toDouble(),
+      );
+    } catch (_) {
+      return double.infinity;
+    }
   }
 
   /// Kamion se neotáčí: obsahuje-li trasa „Otočte se“, zkusit ji znovu s vyloučeným místem otočení

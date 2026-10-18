@@ -41,6 +41,14 @@ class TruckProfile {
     'use_tolls': avoidTolls ? 0.0 : 0.5,
     'use_ferry': avoidFerries ? 0.0 : 0.5,
     if (avoidUnpaved) 'exclude_unpaved': true,
+    // Kamion po hlavních silnicích: dálnice a „jedničky“ přednostně, obytné ulice a obslužné cesty
+    // jen když jinak nelze. Bez toho Valhalla zkracuje přes III. třídy a vesnice
+    // (Veltěže → Čertousy: přes Slavětín a obytné ulice místo Loun, D7 a I/16).
+    'use_highways': 1.0,
+    'low_class_penalty': 120,
+    'service_penalty': 60,
+    'service_factor': 2,
+    'use_living_streets': 0.0,
   };
 
   /// Krátký přehled aktivního profilu (výška × šířka × délka · hmotnost): „4 m × 2,55 m × 16,5 m · 40 t“.
