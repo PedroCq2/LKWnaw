@@ -89,6 +89,49 @@ void main() {
     expect(e.isOffRoute, isTrue);
   });
 
+  test('trasa vedoucí blízko sebe (podjezd, pak most): poloha neskočí dopředu', () {
+    // Na východ, smyčka na sever a zpět na západ 15 m vedle původního úseku.
+    final r = TruckRoute(
+      shape: const [
+        LatLng(50, 14),
+        LatLng(50, 14.01),
+        LatLng(50.003, 14.012),
+        LatLng(50.00014, 14.0115),
+        LatLng(50.00014, 14.0),
+      ],
+      maneuvers: [
+        Maneuver(
+          type: 1,
+          instruction: 'Start',
+          streetNames: [],
+          beginShapeIndex: 0,
+          endShapeIndex: 1,
+          lengthKm: 0.7,
+        ),
+        Maneuver(
+          type: 4,
+          instruction: 'Cíl',
+          streetNames: [],
+          beginShapeIndex: 4,
+          endShapeIndex: 4,
+          lengthKm: 0,
+        ),
+      ],
+      lengthKm: 2.5,
+      timeSec: 200,
+      hasToll: false,
+      hasHighway: false,
+    );
+    final e = NavEngine(r);
+    final t0 = DateTime(2026, 1, 1, 12);
+    // Jede po prvním úseku, s GPS šumem 10 m na sever (blíž k pozdějšímu úseku).
+    for (var i = 0; i < 20; i++) {
+      final n = e.update(LatLng(50.0001, 14.0 + 0.0003 * i), now: t0.add(Duration(seconds: i)));
+      expect(n.segmentIndex, 0);
+      expect(e.isOffRoute, isFalse);
+    }
+  });
+
   test('short GPS jump does not trigger reroute', () {
     final e = NavEngine(line());
     final t0 = DateTime(2026, 1, 1, 12);
@@ -202,7 +245,10 @@ void main() {
 
   test('profile summary', () {
     expect(TruckProfile().summary, '4 m × 2,55 m × 16,5 m · 40 t');
-    expect(TruckProfile(height: 3.8, weight: 7.5, hazmat: true).summary, '3,8 m × 2,55 m × 16,5 m · 7,5 t · ADR');
+    expect(
+      TruckProfile(height: 3.8, weight: 7.5, hazmat: true).summary,
+      '3,8 m × 2,55 m × 16,5 m · 7,5 t · ADR',
+    );
   });
 
   test('trip plans round-trip', () async {

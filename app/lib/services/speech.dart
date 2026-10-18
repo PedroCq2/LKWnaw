@@ -65,4 +65,6 @@ String forSpeech(String text) => text
       (m) => '${czechNumber(m.group(1)!.length)} ${czechNumber(int.parse(m.group(2)!))}',
     )
     .replaceAllMapped(_roadRef, (m) => '${_letters[m.group(1)]} ${czechNumber(int.parse(m.group(2)!))}')
-    .replaceAll(' km/h', ' kilometrů za hodinu');
+    .replaceAll(' km/h', ' kilometrů za hodinu')
+    // Valhalla: „Poté Odbočte vpravo.“ → „poté odbočte“
+    .replaceAllMapped(RegExp(r'([Pp]oté) (\p{Lu})', unicode: true), (m) => '${m[1]} ${m[2]!.toLowerCase()}');

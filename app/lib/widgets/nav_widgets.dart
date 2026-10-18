@@ -561,7 +561,12 @@ class LaneRow extends StatelessWidget {
   final LaneInfo lanes;
   const LaneRow({super.key, required this.lanes});
 
-  static IconData _icon(Set<String> t) {
+  static IconData _icon(Set<String> t, [String? want]) {
+    // Sdílený pruh (rovně + vpravo): u našeho pruhu šipka tam, kam jedeme.
+    if (want != null && t.length > 1) {
+      final mine = t.where((x) => want == 'through' ? (x == 'through' || x == 'none') : x.endsWith(want));
+      if (mine.isNotEmpty) t = {mine.first};
+    }
     const order = [
       'sharp_left',
       'left',
@@ -611,7 +616,7 @@ class LaneRow extends StatelessWidget {
               borderRadius: BorderRadius.circular(8),
             ),
             child: Icon(
-              _icon(lanes.turns[i]),
+              _icon(lanes.turns[i], lanes.active[i] ? lanes.want : null),
               size: 32,
               color: lanes.active[i] ? Colors.black : const Color(0xFF5C6570),
             ),

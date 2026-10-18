@@ -41,6 +41,9 @@ class NavEngine {
   final Set<int> stageSpoken = {};
   final Set<int> continueSpoken = {};
 
+  /// Manévry už řečené jako „… a poté …“ u předchozího (klíč → vzdálenost od něj v m).
+  final Map<int, double> chained = {};
+
   NavEngine(this.route);
 
   static const offRouteMeters = 60.0;
@@ -49,16 +52,30 @@ class NavEngine {
   /// [course] = směr jízdy z GPS (jen za jízdy) – jede-li vozidlo jinam než trasa, sjetí se pozná hned.
   NavState update(LatLng pos, {double accuracy = 10, DateTime? now, double? course}) {
     final shape = route.shape;
-    // Hledej nejdřív v okně kolem posledního segmentu, pak globálně.
-    var best = _search(pos, math.max(0, _lastSegment - 5), math.min(shape.length - 1, _lastSegment + 300));
+    final t0 = now ?? DateTime.now();
+    final cum0 = route.cumulative;
+    // Hledej jen tam, kam kamion od minulé polohy mohl dojet (max ~140 km/h): trasa se může
+    // vracet blízko sebe (podjezd pod mostem, po kterém se pojede za chvíli) – bez okna by poloha
+    // „skočila“ dopředu a navigace by přeskočila odbočky a hlásila sjetí z trasy.
+    final dt = _lastFixAt == null ? 20.0 : t0.difference(_lastFixAt!).inMilliseconds / 1000;
+    final fromM = _lastTraveled - 40, toM = _lastTraveled + 80 + 40 * dt;
+    var lo = _lastSegment;
+    while (lo > 0 && cum0[lo] > fromM) {
+      lo--;
+    }
+    var hi = _lastSegment;
+    while (hi < shape.length - 1 && cum0[hi] < toM) {
+      hi++;
+    }
+    var best = _search(pos, lo, math.min(shape.length - 1, hi + 1));
     if (best.$2 > offRouteMeters) {
       final global = _search(pos, 0, shape.length - 1);
       if (global.$2 < best.$2) best = global;
     }
     final (seg, dist, t, snapped) = best;
     _lastSegment = seg;
+    _lastFixAt = t0;
     final limit = math.max(offRouteMeters, accuracy * 1.5);
-    final t0 = now ?? DateTime.now();
     if (dist > limit) {
       _offRouteCount++;
       _offSince ??= t0;
@@ -93,6 +110,7 @@ class NavEngine {
     final cum = route.cumulative;
     final segLen = seg + 1 < shape.length ? cum[seg + 1] - cum[seg] : 0.0;
     final traveled = cum[seg] + segLen * t;
+    _lastTraveled = traveled;
     final total = cum.last;
     final remaining = math.max(0.0, total - traveled);
 
@@ -120,6 +138,8 @@ class NavEngine {
   }
 
   DateTime _lastNow = DateTime.now();
+  DateTime? _lastFixAt;
+  double _lastTraveled = 0;
 
   int _divergeCount = 0;
   int _growCount = 0;

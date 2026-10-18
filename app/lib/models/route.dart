@@ -4,7 +4,8 @@ import 'package:latlong2/latlong.dart';
 class LaneInfo {
   final List<Set<String>> turns;
   final List<bool> active;
-  LaneInfo(this.turns, this.active);
+  final String? want; // kam jedeme: left / right / through (šipka u sdíleného pruhu)
+  LaneInfo(this.turns, this.active, {this.want});
 }
 
 /// Úsek trasy s atributy z Valhally (trace_attributes).

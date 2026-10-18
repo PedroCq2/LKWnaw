@@ -31,6 +31,7 @@ _Dir _dirOf(Maneuver m) {
 }
 
 const _highway = {'motorway', 'trunk'};
+const _laneRoads = {'motorway', 'trunk', 'primary', 'secondary', 'tertiary'};
 
 /// Doplní trasu o pokyny na dálničních rozdvojeních („Pokračujte rovně na D1 směr Ostrava“),
 /// o jízdní pruhy a směry z OSM. Vyžaduje [TruckRoute.edges] (Valhalla trace_attributes).
@@ -111,7 +112,8 @@ Future<void> enrichManeuvers(TruckRoute route) async {
     if (m.enriched) continue; // druhé volání (po načtení OSM dat) řeší jen nové pokyny
     m.enriched = true;
     final a = approach(m.beginShapeIndex);
-    if (a.isEmpty || !(_highway.contains(a.first.roadClass) || a.first.roadClass == 'primary')) continue;
+    // Pruhy i ve městech (křižovatky na hlavních a vedlejších silnicích), ne v obytných ulicích.
+    if (a.isEmpty || !_laneRoads.contains(a.first.roadClass)) continue;
     targets[m] = (a, after(m.beginShapeIndex));
   }
   final ids = <int>{
@@ -185,8 +187,14 @@ LaneInfo? _lanes(Map<String, String> t, _Dir dir, String? ref) {
         },
     ];
   }
+  // Rozdvojení / sjezd bez šipek na naši stranu: krajní průběžné pruhy na té straně.
+  if (!active.contains(true) && dir != _Dir.straight) {
+    final n = turns.length;
+    final keep = n >= 4 ? 2 : 1;
+    active = [for (var i = 0; i < n; i++) dir == _Dir.left ? i < keep : i >= n - keep];
+  }
   if (!active.contains(true)) return null;
-  return LaneInfo(turns, active);
+  return LaneInfo(turns, active, want: dir.name == 'straight' ? 'through' : dir.name);
 }
 
 String? _activeDestinations(Map<String, String> t, LaneInfo? lanes) {

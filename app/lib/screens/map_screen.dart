@@ -225,15 +225,29 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         .listen(_onPosition, onError: (e) => _toast('Chyba GPS: $e'));
   }
 
+  (LatLng, DateTime)? _prevRaw;
+
   void _onPosition(Position p) {
     if (_sim != null) return; // v simulaci se skutečné GPS ignoruje
-    final speed = p.speed.isFinite && p.speed > 0 ? p.speed : 0.0;
-    _onFix(
-      LatLng(p.latitude, p.longitude),
-      speed,
-      p.heading.isFinite && p.heading >= 0 ? p.heading : null,
-      accuracy: p.accuracy.isFinite ? p.accuracy : 10,
-    );
+    final here = LatLng(p.latitude, p.longitude);
+    final at = DateTime.now();
+    var speed = p.speed.isFinite && p.speed > 0 ? p.speed : 0.0;
+    double? heading = p.heading.isFinite && p.heading >= 0 ? p.heading : null;
+    // Některé telefony (a web) rychlost / kurz občas nedají: dopočet z posledních dvou poloh.
+    final prev = _prevRaw;
+    if (prev != null) {
+      final dt = at.difference(prev.$2).inMilliseconds / 1000;
+      final dm = const Distance()(prev.$1, here);
+      if (dt > 0.3 && dt < 4) {
+        if (speed == 0 && dm / dt > 1.5) speed = dm / dt;
+        if (heading == null && dm > 6) {
+          final b = const Distance().bearing(prev.$1, here);
+          heading = b < 0 ? b + 360 : b;
+        }
+      }
+    }
+    _prevRaw = (here, at);
+    _onFix(here, speed, heading, accuracy: p.accuracy.isFinite ? p.accuracy : 10);
   }
 
   void _onFix(LatLng pos, double speedMps, double? heading, {bool simulated = false, double accuracy = 10}) {
@@ -288,7 +302,9 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         if (nav.arrived && !_arrivedSpoken) {
           _arrivedSpoken = true;
           _clearTrip();
-          _say('Jste v cíli.');
+          // „Cíl je vpravo“ právě zaznělo → nehlásit hned znovu.
+          final ds = _destSpokenAt;
+          if (ds == null || DateTime.now().difference(ds) > const Duration(seconds: 30)) _say('Jste v cíli.');
         }
         // Přepočet jen za jízdy; bez internetu zkoušet jednou za 30 s a vést dál po staré trase.
         if (_engine!.isOffRoute &&
@@ -339,7 +355,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         ? 1.0
         : (DateTime.now().difference(lastFix).inMilliseconds / 1000).clamp(0.3, 1.5);
     final mps = _speedKmh / 3.6;
-    final lead = mps > 2 ? mps * gapSec : 0.0;
+    // + ~0,4 s: poloha z GPS je o chvilku starší, než když dorazí do aplikace.
+    final lead = mps > 2 ? mps * (gapSec + 0.4) : 0.0;
     // Přichytit k trase jen do 25 m – při sjetí jinam je hned vidět skutečná poloha.
     if (_navigating && nav != null && route != null && nav.distanceFromRoute < 25) {
       // Na trase: přichycená poloha a směr podle trasy (bez GPS šumu), posunutá o předpověď po trase.
@@ -459,6 +476,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     const empty = {'type': 'FeatureCollection', 'features': []};
     try {
       _lineRoute = null;
+      _meHidden = false;
       for (final id in ['alts', 'route', 'routehead', 'warn', 'parking', 'dest', 'me']) {
         await m.addGeoJsonSource(id, empty);
       }
@@ -813,14 +831,17 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     final p = _dispPos ?? _pos;
     if (p != null) _updateRouteHead(p);
     if (m == null || !_styleReady || _meBusy) return;
+    if (_fixedArrow && _meHidden) return;
     _meBusy = true;
     try {
+      final hide = _fixedArrow;
       await m.setGeoJsonSource(
         'me',
         _points([
-          if (p != null) (p, {'h': _dispHeading}),
+          if (p != null && !hide) (p, {'h': _dispHeading}),
         ]),
       );
+      _meHidden = hide;
     } catch (_) {
     } finally {
       _meBusy = false;
@@ -830,7 +851,14 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   static Future<Uint8List> _arrowPng() async {
     const size = 120.0;
     final rec = ui.PictureRecorder();
-    final c = Canvas(rec);
+    paintArrow(Canvas(rec), size);
+    final img = await rec.endRecording().toImage(size.toInt(), size.toInt());
+    final data = await img.toByteData(format: ui.ImageByteFormat.png);
+    return data!.buffer.asUint8List();
+  }
+
+  /// Šipka kamionu (stejná na mapě i pevně na obrazovce).
+  static void paintArrow(Canvas c, double size) {
     final path = ui.Path()
       ..moveTo(size / 2, 8)
       ..lineTo(size - 16, size - 12)
@@ -852,10 +880,12 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         ..strokeWidth = 7
         ..strokeJoin = StrokeJoin.round,
     );
-    final img = await rec.endRecording().toImage(size.toInt(), size.toInt());
-    final data = await img.toByteData(format: ui.ImageByteFormat.png);
-    return data!.buffer.asUint8List();
   }
+
+  /// Za jízdy se sledováním je šipka pevně na obrazovce (pod ní se točí mapa) – bez zpoždění
+  /// za kamerou, které má šipka kreslená do mapy (nová data každý snímek přes kanál).
+  bool get _fixedArrow => _follow && _driveView && _dispPos != null && _styleReady;
+  bool _meHidden = false;
 
   // ------------------------------------------------------------ hlasové pokyny
 
@@ -884,10 +914,25 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       }
     }
 
+    // Už řečeno jako „… a poté …“ u předchozího manévru a jede se k němu jen pár sekund:
+    // znovu nehlásit (jinak dvě hlášky hned za sebou).
+    final ch = e.chained[key];
+    if (ch != null) {
+      // Odpočet („Za 200 metrů…“) už nedává smysl – manévr zazněl v „a poté“.
+      for (var t = 0; t < 3; t++) {
+        e.stageSpoken.add(key * 10 + t);
+      }
+      if (ch < math.max(150.0, mps * 8)) {
+        e.preSpoken.add(key);
+        return;
+      }
+    }
+
     if (d <= now) {
       if (e.preSpoken.add(key)) {
         e.alertSpoken.add(key);
         _say(_nowInstruction(r, i));
+        _markChained(r, i);
       }
       return;
     }
@@ -915,6 +960,21 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     }
   }
 
+  /// Zapamatuje si navazující manévr, který zazněl v „… a poté …“.
+  void _markChained(TruckRoute r, int i) {
+    final e = _engine;
+    if (e == null || i + 1 >= r.maneuvers.length) return;
+    final m = r.maneuvers[i], n = r.maneuvers[i + 1];
+    final cum = r.cumulative;
+    final gap =
+        cum[n.beginShapeIndex.clamp(0, cum.length - 1)] - cum[m.beginShapeIndex.clamp(0, cum.length - 1)];
+    if (m.type == 26 && n.type == 27) {
+      e.chained[n.beginShapeIndex] = 0; // výjezd z kruháče už je v „vyjeďte druhým výjezdem“
+    } else if (gap < 350 && n.type != 27 && !const {4, 5, 6}.contains(n.type)) {
+      e.chained[n.beginShapeIndex] = gap;
+    }
+  }
+
   /// Krátký pokyn do odpočtu: „sjeďte“, „odbočte vpravo“, „na kruhovém objezdu vyjeďte třetím výjezdem“.
   /// Pokyn do odpočtu: „sjeďte vpravo na D46 směr Olomouc a poté se držte vlevo“.
   String _shortInstruction(Maneuver m) {
@@ -925,7 +985,20 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   }
 
   /// Pokyn v místě manévru, s návazností: „Odbočte vpravo a poté se držte vlevo na D35.“
-  String _nowInstruction(TruckRoute r, int i) => '${_capital(_withThen(r, i))}.';
+  String _nowInstruction(TruckRoute r, int i) {
+    final m = r.maneuvers[i];
+    if (const {4, 5, 6}.contains(m.type)) {
+      _destSpokenAt = DateTime.now();
+      return switch (m.type) {
+        5 => 'Cíl je vpravo.',
+        6 => 'Cíl je vlevo.',
+        _ => 'Jste v cíli.',
+      };
+    }
+    return '${_capital(_withThen(r, i))}.';
+  }
+
+  DateTime? _destSpokenAt;
 
   /// Manévr + navazující manévr do 350 m („… a poté …“).
   String _withThen(TruckRoute r, int i) {
@@ -940,22 +1013,26 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         // Kruhový objezd: „vyjeďte třetím výjezdem a poté pokračujte po I/35“.
         final road = _roadAhead(n);
         if (road != null) text += ' a poté pokračujte po $road';
-      } else if (gap < 350 && n.type != 27) {
-        text += ' a poté ${_phrase(n)}';
+      } else if (gap < 350 && n.type != 27 && !const {4, 5, 6}.contains(n.type)) {
+        final same = _roadAhead(n) != null && _roadAhead(n) == _roadAhead(m);
+        text += ' a poté ${_phrase(n, noRoad: same)}';
       }
     }
     return text;
   }
 
   /// Jedna věta pokynu (malým písmenem): podle druhu manévru, se silnicí a směrem.
-  String _phrase(Maneuver m) {
+  String _phrase(Maneuver m, {bool noRoad = false}) {
     if (m.synthetic) {
       final t = m.preInstruction ?? m.instruction;
       return t.isEmpty ? t : t[0].toLowerCase() + t.substring(1).replaceAll(RegExp(r'\.$'), '');
     }
-    final road = _roadAhead(m);
+    final road = noRoad ? null : _roadAhead(m);
     final toward = m.exitToward.take(2).join(', ');
-    final on = road != null ? ' na $road' : '';
+    // Ulice: „do ulice Na Stínadlech“, „po ulici …“; silnice: „na D1“, „po silnici 13“.
+    final street = road != null && !RegExp(r'^(D\d|I+/|E\d|silnici )').hasMatch(road);
+    final on = road == null ? '' : (street ? ' do ulice $road' : ' na $road');
+    final po = road == null ? '' : (street ? ' po ulici $road' : ' po $road');
     final dir = toward.isNotEmpty ? ' směr $toward' : '';
     switch (m.type) {
       case 26:
@@ -976,11 +1053,11 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         return 'odbočte ostře vlevo$on';
       case 8:
       case 22:
-        return 'pokračujte rovně${road != null ? ' po $road' : ''}$dir';
+        return 'pokračujte rovně$po$dir';
       case 23:
-        return 'na rozdvojení se držte vpravo${road != null ? ' a pokračujte po $road' : ''}$dir';
+        return 'na rozdvojení se držte vpravo${road != null ? ' a pokračujte$po' : ''}$dir';
       case 24:
-        return 'na rozdvojení se držte vlevo${road != null ? ' a pokračujte po $road' : ''}$dir';
+        return 'na rozdvojení se držte vlevo${road != null ? ' a pokračujte$po' : ''}$dir';
       case 17:
       case 18:
         return 'najeďte vpravo na nájezd$on$dir';
@@ -1517,6 +1594,28 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     if (_route != null && mounted) await _startNavigation();
   }
 
+  /// Jedna hláška na startu. Blízko první odbočka → rovnou ona (a odpočet ji pak nehlásí znovu),
+  /// jinak „Jeďte … po …“ z Valhally.
+  String _startPhrase(TruckRoute r, Maneuver? first) {
+    final e = _engine;
+    final i = r.maneuvers.length > 1 ? 1 : -1;
+    if (e == null || i < 0) return first?.preInstruction ?? 'Navigace spuštěna.';
+    final m = r.maneuvers[i];
+    final d = r.cumulative[m.beginShapeIndex.clamp(0, r.cumulative.length - 1)] - (_nav?.traveled ?? 0);
+    if (d > 600) return first?.preInstruction ?? 'Navigace spuštěna.';
+    final key = m.beginShapeIndex;
+    for (var t = 0; t < 3; t++) {
+      e.stageSpoken.add(key * 10 + t);
+    }
+    e.alertSpoken.add(key);
+    if (d < 80) {
+      e.preSpoken.add(key);
+      _markChained(r, i);
+      return _nowInstruction(r, i);
+    }
+    return '${_spokenDistance(d)} ${_shortInstruction(m)}';
+  }
+
   Future<void> _startNavigation() async {
     _approach = false;
     // Plán začínal jinde: jedeme odsud → přepočítat z aktuální polohy (zastávky zůstanou).
@@ -1541,7 +1640,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     await _updateMeLayer();
     WakelockPlus.enable();
     final first = r.maneuvers.isNotEmpty ? r.maneuvers.first : null;
-    _say(first?.preInstruction ?? 'Navigace spuštěna.');
+    _say(_startPhrase(r, first));
     if (_settings.simulate) {
       _sim?.stop();
       _sim = RouteSimulator(
@@ -2824,6 +2923,24 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     onMapLongClick: (_, p) => _onLongPress(LatLng(p.latitude, p.longitude)),
                   ),
                 ),
+              if (_fixedArrow)
+                Positioned(
+                  left: _screen.width / 2 - 42,
+                  top: _topInset + (_screen.height - _topInset) / 2 - 42,
+                  child: IgnorePointer(
+                    child: Transform(
+                      alignment: Alignment.center,
+                      transform: Matrix4.identity()
+                        ..setEntry(3, 2, 0.0015)
+                        ..rotateX(_settings.view3d ? 0.96 : 0.0),
+                      child: const SizedBox(
+                        width: 84,
+                        height: 84,
+                        child: CustomPaint(painter: _ArrowPainter()),
+                      ),
+                    ),
+                  ),
+                ),
               if (pip)
                 _pipOverlay(route, nav, limit)
               else ...[
@@ -3471,4 +3588,16 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
 
 extension on String {
   String ifEmpty(String other) => isEmpty ? other : this;
+}
+
+class _ArrowPainter extends CustomPainter {
+  const _ArrowPainter();
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.scale(size.width / 120);
+    _MapScreenState.paintArrow(canvas, 120);
+  }
+
+  @override
+  bool shouldRepaint(_ArrowPainter old) => false;
 }
