@@ -101,7 +101,7 @@ class CountryMap {
         await _save(st);
       }
     } catch (e) {
-      error = '$e';
+      error = '$e'.replaceFirst('Exception: ', '');
       await _save(st);
     } finally {
       progress.value = null;

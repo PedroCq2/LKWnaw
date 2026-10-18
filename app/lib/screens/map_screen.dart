@@ -1821,7 +1821,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       _toast('Mapa podél trasy je stažená – pojede i bez signálu.');
     } catch (e) {
       if (mounted) setState(() => _dlProgress = null);
-      _toast('Stažení mapy selhalo: $e');
+      _toast('Stažení mapy selhalo: ${'$e'.replaceFirst('Exception: ', '')}');
     }
   }
 

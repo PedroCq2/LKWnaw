@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'http_headers.dart';
+
 /// Vlastní vzhled mapy LKWnav nad vektorovými dlaždicemi OpenFreeMap.
 ///
 /// Stáhne styl „liberty“ a přebarví ho paletou LKWnav: den = „Asfalt“
@@ -19,14 +21,18 @@ const pinnedTiles = 'https://tiles.openfreemap.org/planet/20261011_080001_pt/{z}
 /// Styl s pevnou adresou dlaždic pro stahování mapy do telefonu (vydání routing-cz).
 const offlineStyleUrl = 'https://github.com/PedroCq2/LKWnaw/releases/download/routing-cz/lkwnav-style.json';
 
-/// Styl pro stahování mapy: náš s pevnou adresou, dokud není zveřejněný, původní
-/// (tento týden ukazuje na stejnou verzi dlaždic).
+/// Styl pro stahování mapy do telefonu – jen náš s pevnou adresou dlaždic (stejnou jako v aplikaci).
+/// Původní styl by uložil dlaždice pod adresou z TileJSON, která se každý týden mění, a stažená mapa
+/// by bez signálu později zmizela – proto raději srozumitelná chyba než tichá náhrada.
+/// (GitHub přesměruje na podepsanou adresu, která přijme jen GET – HEAD vrací 401.)
 Future<String> downloadStyleUrl() async {
   try {
-    final r = await http.head(Uri.parse(offlineStyleUrl)).timeout(const Duration(seconds: 8));
-    if (r.statusCode == 200) return offlineStyleUrl;
+    final r = await http
+        .get(Uri.parse(offlineStyleUrl), headers: uaHeaders())
+        .timeout(const Duration(seconds: 15));
+    if (r.statusCode == 200 && utf8.decode(r.bodyBytes).contains(pinnedTiles)) return offlineStyleUrl;
   } catch (_) {}
-  return baseStyleUrl;
+  throw Exception('styl mapy pro stažení teď není dostupný – zkuste to za chvíli (s internetem)');
 }
 
 /// Zdroj dlaždic na pevnou adresu (bez TileJSON).
