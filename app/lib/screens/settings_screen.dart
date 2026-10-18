@@ -170,6 +170,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             _head('DATA V TELEFONU'),
             OfflineRoutingSection(settings: widget.settings),
+            const OfflineMapSection(),
             _head('HLÁŠENÍ'),
             FutureBuilder<List<Map<String, dynamic>>>(
               future: ProblemReports.load(),
