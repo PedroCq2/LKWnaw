@@ -1,4 +1,7 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:truck_nav/services/map_style.dart';
 import 'package:truck_nav/widgets/nav_widgets.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -287,5 +290,35 @@ void main() {
       '1. výjezd · 8/E 442',
     );
     expect(roundaboutLabel(rb('Vjeďte na kruhový objezd.', [])), isNull);
+  });
+
+  test('mapa: pevná adresa dlaždic (stažená mapa funguje i po týdenní aktualizaci dat)', () {
+    final style = <String, dynamic>{
+      'sources': <String, dynamic>{
+        'openmaptiles': {
+          'type': 'vector',
+          'url': 'https://tiles.openfreemap.org/planet',
+          'attribution': 'OSM',
+        },
+        'ne2_shaded': {
+          'type': 'raster',
+          'tiles': ['x'],
+          'maxzoom': 6,
+        },
+      },
+    };
+    pinTiles(style);
+    final src = (style['sources'] as Map)['openmaptiles'] as Map;
+    expect(src.containsKey('url'), isFalse);
+    expect(src['tiles'], [pinnedTiles]);
+    expect(src['maxzoom'], 14);
+    expect(src['attribution'], 'OSM');
+    expect(pinnedTiles, contains('{z}/{x}/{y}.pbf'));
+  });
+
+  test('pevná adresa dlaždic je stejná v aplikaci i ve stylu pro stahování', () {
+    final py = File('../backend/map/pinned_style.py').readAsStringSync();
+    final pin = RegExp(r"^PIN = '([^']+)'", multiLine: true).firstMatch(py)?.group(1);
+    expect(pin, pinnedTiles);
   });
 }

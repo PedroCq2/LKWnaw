@@ -227,28 +227,34 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         .listen(_onPosition, onError: (e) => _toast('Chyba GPS: $e'));
   }
 
-  (LatLng, DateTime)? _prevRaw;
+  (LatLng, DateTime, double)? _prevRaw; // poslední poloha z GPS: místo, čas polohy, přesnost
 
   void _onPosition(Position p) {
     if (_sim != null) return; // v simulaci se skutečné GPS ignoruje
     final here = LatLng(p.latitude, p.longitude);
-    final at = DateTime.now();
+    final at = p.timestamp; // čas měření, ne čas doručení (poloha z mezipaměti bývá stará)
+    final acc = p.accuracy.isFinite && p.accuracy > 0 ? p.accuracy : 50.0;
     var speed = p.speed.isFinite && p.speed > 0 ? p.speed : 0.0;
     double? heading = p.heading.isFinite && p.heading >= 0 ? p.heading : null;
-    // Některé telefony (a web) rychlost / kurz občas nedají: dopočet z posledních dvou poloh.
+    // Některé telefony (a web) rychlost / kurz občas nedají: dopočet z posledních dvou poloh –
+    // jen z přesných poloh a jen když posun je větší než chyba GPS (stojící kamion „nejede“),
+    // a nejvýš 40 m/s (skok polohy z mezipaměti / v tunelu není rychlost).
     final prev = _prevRaw;
     if (prev != null) {
       final dt = at.difference(prev.$2).inMilliseconds / 1000;
       final dm = const Distance()(prev.$1, here);
-      if (dt > 0.3 && dt < 4) {
-        if (speed == 0 && dm / dt > 1.5) speed = dm / dt;
-        if (heading == null && dm > 6) {
+      final err = math.max(acc, prev.$3);
+      final moved = err <= 20 && dm > math.max(8.0, err * 1.5);
+      final v = dt > 0 ? dm / dt : 0.0;
+      if (dt > 0.3 && dt < 4 && moved && v < 40) {
+        if (speed == 0 && v > 1.5) speed = v;
+        if (heading == null) {
           final b = const Distance().bearing(prev.$1, here);
           heading = b < 0 ? b + 360 : b;
         }
       }
     }
-    _prevRaw = (here, at);
+    _prevRaw = (here, at, acc);
     _onFix(here, speed, heading, accuracy: p.accuracy.isFinite ? p.accuracy : 10);
   }
 
@@ -1389,11 +1395,12 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       _options = [_options[_sel]];
       _sel = 0;
     });
+    // Úvodní hláška hned – dřív, než může zaznít pokyn z první polohy (jinak dvakrát / v opačném pořadí).
+    _say(_guide?.startPhrase(_nav?.traveled ?? 0, DateTime.now()) ?? 'Navigace spuštěna.');
     await _syncLayers();
     await _applyInsets();
     await _updateMeLayer();
     WakelockPlus.enable();
-    _say(_guide?.startPhrase(_nav?.traveled ?? 0, DateTime.now()) ?? 'Navigace spuštěna.');
     if (_settings.simulate) {
       _sim?.stop();
       _sim = RouteSimulator(

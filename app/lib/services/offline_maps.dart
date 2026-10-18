@@ -15,9 +15,10 @@ Future<void> downloadRouteMap(TruckRoute route, {void Function(double progress)?
     if (r.metadata['app'] == 'lkwnav-route') await ml.deleteOfflineRegion(r.id);
   }
   final boxes = _corridor(route);
+  final styleUrl = await downloadStyleUrl();
   for (var i = 0; i < boxes.length; i++) {
     await ml.downloadOfflineRegion(
-      ml.OfflineRegionDefinition(bounds: boxes[i], mapStyleUrl: baseStyleUrl, minZoom: 8, maxZoom: 14),
+      ml.OfflineRegionDefinition(bounds: boxes[i], mapStyleUrl: styleUrl, minZoom: 8, maxZoom: 14),
       metadata: {'app': 'lkwnav-route', 'part': i},
       onEvent: (e) {
         if (e is ml.InProgress) onProgress?.call((i + e.progress / 100) / boxes.length);

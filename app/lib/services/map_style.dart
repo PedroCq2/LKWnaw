@@ -11,6 +11,38 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// Skryje ikony obchodů a čísla silnic, ať mapa neruší.
 const baseStyleUrl = 'https://tiles.openfreemap.org/styles/liberty';
 
+/// Pevná adresa dlaždic – stejná ve stažené mapě i v aplikaci (viz backend/map/pinned_style.py).
+/// Původní styl ji bere z TileJSON, který každý týden ukáže na novou verzi dat; stažená mapa by
+/// pak bez signálu zmizela. Server OpenFreeMap na starší verzi odpovídá aktuálními daty.
+const pinnedTiles = 'https://tiles.openfreemap.org/planet/20261011_080001_pt/{z}/{x}/{y}.pbf';
+
+/// Styl s pevnou adresou dlaždic pro stahování mapy do telefonu (vydání routing-cz).
+const offlineStyleUrl = 'https://github.com/PedroCq2/LKWnaw/releases/download/routing-cz/lkwnav-style.json';
+
+/// Styl pro stahování mapy: náš s pevnou adresou, dokud není zveřejněný, původní
+/// (tento týden ukazuje na stejnou verzi dlaždic).
+Future<String> downloadStyleUrl() async {
+  try {
+    final r = await http.head(Uri.parse(offlineStyleUrl)).timeout(const Duration(seconds: 8));
+    if (r.statusCode == 200) return offlineStyleUrl;
+  } catch (_) {}
+  return baseStyleUrl;
+}
+
+/// Zdroj dlaždic na pevnou adresu (bez TileJSON).
+void pinTiles(Map<String, dynamic> style) {
+  final sources = style['sources'] as Map<String, dynamic>?;
+  final src = sources?['openmaptiles'] as Map<String, dynamic>?;
+  if (sources == null || src == null) return;
+  sources['openmaptiles'] = {
+    'type': 'vector',
+    'tiles': [pinnedTiles],
+    'minzoom': 0,
+    'maxzoom': 14,
+    if (src['attribution'] != null) 'attribution': src['attribution'],
+  };
+}
+
 class _Palette {
   final String land, residential, green, water, building, building3d, rail;
   final String motorway, motorwayCase, trunk, trunkCase, secondary, secondaryCase, minor, minorCase;
@@ -111,6 +143,7 @@ Future<String> lkwStyle({required bool night, MapLayer layer = MapLayer.map}) as
     }
     if (_baseJson == null) return baseStyleUrl;
     final style = jsonDecode(_baseJson!) as Map<String, dynamic>;
+    pinTiles(style);
     applyPalette(style, night ? _night : _day);
     if (layer != MapLayer.map) applyAerial(style, hybrid: layer == MapLayer.hybrid);
     return _cache[key] = jsonEncode(style);

@@ -111,4 +111,17 @@ void main() {
       reason: 'přejeto v ${d.missAt}. s, sjetí v ${d.offRouteAt}. s',
     );
   });
+
+  test('start až za první odbočkou: nehlásí odbočku, která je už za námi', () {
+    final j = jsonDecode(File('test/fixtures/teplice.json').readAsStringSync()) as Map<String, dynamic>;
+    final r = ValhallaClient.parseTrip(j['trip'] as Map<String, dynamic>);
+    final g = VoiceGuide(r, NavEngine(r));
+    final m1 = r.maneuvers[1];
+    final past = r.cumulative[m1.beginShapeIndex] + 40; // těsně za první odbočkou
+    final t = g.startPhrase(past, DateTime(2026));
+    expect(t, isNot(g.nowInstruction(1, DateTime(2026))));
+    // ozve se další manévr před námi (nebo obecné „Jeďte…“)
+    final g2 = VoiceGuide(r, NavEngine(r));
+    expect(g2.startPhrase(0, DateTime(2026)), isNotEmpty);
+  });
 }

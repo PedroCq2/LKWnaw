@@ -84,9 +84,17 @@ Future<void> enrichManeuvers(TruckRoute route) async {
       ),
     );
   }
+  // Stabilní řazení: příjezd na zastávku a odjezd k další mají stejný bod – nesmí se prohodit
+  // (List.sort u více než 32 prvků pořadí stejných nezachová).
+  final order = {for (final (i, m) in route.maneuvers.indexed) m: i};
   route.maneuvers
     ..addAll(forks)
-    ..sort((a, b) => a.beginShapeIndex.compareTo(b.beginShapeIndex));
+    ..sort((a, b) {
+      final c = a.beginShapeIndex.compareTo(b.beginShapeIndex);
+      if (c != 0) return c;
+      // Vložené pokyny (rozdvojení) až za původními v tomtéž bodě.
+      return (order[a] ?? 1 << 30).compareTo(order[b] ?? 1 << 30);
+    });
 
   // 2) Pruhy a směry z OSM pro manévry na dálnicích a silnicích pro motorová vozidla.
   /// Až 3 úseky před manévrem (do 1,5 km) – pruhy bývají v OSM zapsané o kus dřív.

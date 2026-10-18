@@ -141,10 +141,17 @@ class VoiceGuide {
       RegExp(r' (na|po) \d{4,5}(?=[\s.,]|$)'),
       '',
     );
-    if (r.maneuvers.length < 2) return fallback;
-    const i = 1;
+    // První manévr před námi (start mohl být až za první odbočkou – náhled trasy za jízdy).
+    var i = -1;
+    for (var k = 1; k < r.maneuvers.length; k++) {
+      if (_at(r.maneuvers[k]) > traveled + 5) {
+        i = k;
+        break;
+      }
+    }
+    if (i < 0) return fallback;
     final m = r.maneuvers[i];
-    final d = r.cumulative[m.beginShapeIndex.clamp(0, r.cumulative.length - 1)] - traveled;
+    final d = _at(m) - traveled;
     if (d > 600) return fallback;
     final e = engine, key = m.beginShapeIndex;
     for (var t = 0; t < 3; t++) {

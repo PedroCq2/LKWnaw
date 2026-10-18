@@ -72,9 +72,10 @@ class CountryMap {
     progress.value = st.done.length / total;
     try {
       await ml.setOfflineTileCountLimit(1000000);
+      final styleUrl = await downloadStyleUrl();
       // Hrubé měřítko pro celou zemi najednou (index -1).
       if (!st.done.contains(-1)) {
-        await _region(czBounds, 0, 10, -1, (p) => progress.value = p / total);
+        await _region(styleUrl, czBounds, 0, 10, -1, (p) => progress.value = p / total);
         st = st.copyWith(done: {...st.done, -1});
         await _save(st);
       }
@@ -84,6 +85,7 @@ class CountryMap {
         final c = cells[i];
         final bounds = ml.LatLngBounds(southwest: ml.LatLng(c[0], c[1]), northeast: ml.LatLng(c[2], c[3]));
         await _region(
+          styleUrl,
           bounds,
           11,
           detailed ? 14 : 13,
@@ -108,6 +110,7 @@ class CountryMap {
 
   /// Jeden region; čeká na dokončení (nativní volání se vrací hned po založení regionu).
   Future<void> _region(
+    String styleUrl,
     ml.LatLngBounds b,
     double minZ,
     double maxZ,
@@ -126,18 +129,20 @@ class CountryMap {
       });
     }
 
-    watch();
-    await ml.downloadOfflineRegion(
-      ml.OfflineRegionDefinition(bounds: b, mapStyleUrl: baseStyleUrl, minZoom: minZ, maxZoom: maxZ),
-      metadata: {'app': _app, 'part': part},
-      onEvent: (e) {
-        watch();
-        if (e is ml.InProgress) onP(e.progress / 100);
-        if (e is ml.Success && !done.isCompleted) done.complete();
-        if (e is ml.Error && !done.isCompleted) done.completeError(e.cause.message ?? e.cause.code);
-      },
-    );
     try {
+      watch();
+      await ml.downloadOfflineRegion(
+        ml.OfflineRegionDefinition(bounds: b, mapStyleUrl: styleUrl, minZoom: minZ, maxZoom: maxZ),
+        metadata: {'app': _app, 'part': part},
+        onEvent: (e) {
+          // Po hlídači (nebo chybě) už nic – jinak by pozdní zprávy „oživily“ ukončené stahování.
+          if (done.isCompleted) return;
+          watch();
+          if (e is ml.InProgress) onP(e.progress / 100);
+          if (e is ml.Success) done.complete();
+          if (e is ml.Error) done.completeError(e.cause.message ?? e.cause.code);
+        },
+      );
       await done.future;
     } finally {
       idle?.cancel();
