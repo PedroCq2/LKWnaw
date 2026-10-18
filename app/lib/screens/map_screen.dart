@@ -1098,11 +1098,11 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
 
   /// Silnice za manévrem: číslo (D1, I/35, 635) má přednost před názvem ulice.
   String? _roadAhead(Maneuver m) {
-    final refs = m.streetNames.where((n) => RegExp(r'^(D\d+|I+/\d+|\d{1,3})$').hasMatch(n)).toList();
+    final refs = m.streetNames.where((n) => RegExp(r'^(D\d+|I+/\d+|\d{1,5})$').hasMatch(n)).toList();
     final ref = refs.isNotEmpty ? refs.first : (m.streetNames.isNotEmpty ? m.streetNames.first : null);
     if (ref == null) return null;
     // Holé číslo silnice → „silnici 635“ (D a I/ se čtou samy).
-    return RegExp(r'^\d{1,3}$').hasMatch(ref) ? 'silnici $ref' : ref;
+    return RegExp(r'^\d{1,5}$').hasMatch(ref) ? 'silnici $ref' : ref;
   }
 
   static String _kmWords(double m) {
