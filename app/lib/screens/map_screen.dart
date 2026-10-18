@@ -2782,7 +2782,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     final limit = limitRaw == null ? null : math.min(limitRaw, _settings.profile.maxSpeed);
     final bottomPad = MediaQuery.of(context).padding.bottom;
     final pip = Pip.instance.active.value;
-    final panelH = pip || route == null ? 0.0 : (_navigating ? 154.0 : 290.0);
+    final panelH = pip || route == null ? 0.0 : (_navigating ? 116.0 : 252.0);
 
     return Scaffold(
       resizeToAvoidBottomInset: false,
@@ -3176,49 +3176,6 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   }
 
   /// Co je před námi na pruhu průběhu: zastávky, služby, radary, omezení (vzdálenost po trase).
-  String _shortBrand(String b) {
-    final w = b.split(RegExp(r'[\s\-–]+')).first;
-    return w.length > 7 ? w.substring(0, 7) : w;
-  }
-
-  List<StripItem> _stripItems(TruckRoute r, NavState? nav) {
-    final at = nav?.traveled ?? 0;
-    final cum = r.cumulative;
-    final idx = RouteIndex(r);
-    final out = <StripItem>[];
-    for (final st in _stops) {
-      final m = idx.locate(st.$1, 300);
-      if (m != null && m > at) out.add(StripItem(m - at, Icons.flag, Lkw.amber));
-    }
-    for (final s in r.services) {
-      if (s.atM < at) continue;
-      final fuel = s.amenities.contains(ServiceAmenity.fuel);
-      final d = s.atM - at;
-      final brand = fuel && s.brands.isNotEmpty ? ' ${_shortBrand(s.brands.first)}' : '';
-      out.add(
-        StripItem(
-          d,
-          fuel ? Icons.local_gas_station : Icons.local_parking,
-          fuel ? Lkw.amber : const Color(0xFF2F6FDE),
-          label: '${d < 1000 ? '${(d / 100).round() * 100} m' : '${(d / 1000).round()} km'}$brand',
-          onTap: () => _showService(s),
-        ),
-      );
-    }
-    for (final w in r.warnings) {
-      if (w.atMeters < at || !w.relevant || w.type == WarningType.noOvertakingHgv) continue;
-      out.add(
-        StripItem(
-          w.atMeters - at,
-          w.type == WarningType.speedCamera ? Icons.photo_camera : Icons.warning_amber,
-          w.type == WarningType.speedCamera ? Lkw.muted : Lkw.danger,
-        ),
-      );
-    }
-    if (cum.isNotEmpty) out.add(StripItem(cum.last - at, Icons.sports_score, Lkw.text));
-    return out;
-  }
-
   Widget _bottomPanel(TruckRoute route) {
     final nav = _nav;
     final remainingM = nav?.remaining ?? route.lengthKm * 1000;
@@ -3241,8 +3198,6 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
               ? Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    RouteStrip(remainingM: remainingM, items: _stripItems(route, nav)),
-                    const SizedBox(height: 8),
                     Row(
                       children: [
                         Expanded(

@@ -5,8 +5,11 @@ import 'dart:math' as math;
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 
+import 'delivery_shortcut.dart';
 import 'http_headers.dart';
+import 'offline_search.dart';
 import 'offline_routing.dart';
+import 'restrictions.dart';
 import 'town.dart';
 
 import '../models/route.dart';
@@ -430,6 +433,22 @@ class ValhallaClient {
       }
 
       final mainTrips = [for (final l in fullLegs) l['trip'] as Map<String, dynamic>];
+      // Jediný cíl: dojezd v obci vykládky kratší cestou pro dopravní obsluhu, když ji kamion smí.
+      if (legCount == 1) {
+        try {
+          final st = stitch(mainTrips);
+          final sc = await _deliveryShortcut(
+            st,
+            from,
+            to,
+            profile,
+            heading,
+          ).timeout(const Duration(seconds: 12));
+          if (sc != null) {
+            return [parseTrip(sc)..deliveryKm = (st['_exemptKm'] as num).toDouble()];
+          }
+        } catch (_) {}
+      }
       return [
         build(mainTrips),
         for (final a in alternatesData) build([(a as Map)['trip'] as Map<String, dynamic>]),
@@ -461,6 +480,129 @@ class ValhallaClient {
       x.deliveryKm = x.lengthKm;
     }
     return r;
+  }
+
+  /// Zásobování: Valhalla nepustí kamion na ulici „jen dopravní obsluha“ (hgv=delivery), když cíl
+  /// neleží přímo na ní – a vede ho oklikou (Teplice: Alejní → Čs. dobrovolců ke Kauflandu).
+  /// Proto v obci vykládky zkusí krátkou trasu jako auto a ověří ji pro kamion (rozměry, náprava,
+  /// zákaz vjezdu kamionů, žádné uličky). Vrací spojenou trasu, nebo null (původní zůstane).
+  Future<Map<String, dynamic>?> _deliveryShortcut(
+    Map<String, dynamic> trip,
+    LatLng from,
+    LatLng to,
+    TruckProfile profile,
+    double? heading,
+  ) async {
+    const d = Distance();
+    final shape = [for (final l in trip['legs'] as List) ...decodePolyline6((l as Map)['shape'] as String)];
+    if (shape.length < 2 || d(shape.last, to) > 150) return null;
+    final cum = <double>[0];
+    for (var i = 1; i < shape.length; i++) {
+      cum.add(cum.last + d(shape[i - 1], shape[i]));
+    }
+    final total = cum.last;
+    final towns = TownLookup();
+    final town = await towns.at(to);
+    if (town == null) return null;
+    // Místo odbočení ze trasy kamionu: co nejdál před cílem, ale už v obci vykládky.
+    int? xi;
+    for (final back in const [3000.0, 2200.0, 1500.0, 900.0]) {
+      if (back >= total) continue;
+      final i = cum.lastIndexWhere((c) => total - c >= back);
+      if (i > 0 && await towns.at(shape[i]) == town) {
+        xi = i;
+        break;
+      }
+    }
+    if (xi == null && total < 3000 && await towns.at(shape.first) == town) xi = 0;
+    if (xi == null) return null;
+    final x = shape[xi];
+    final truckTail = total - cum[xi];
+    double? head;
+    for (var j = xi + 1; j < shape.length; j++) {
+      if (d(x, shape[j]) > 15) {
+        final b = d.bearing(x, shape[j]);
+        head = b < 0 ? b + 360 : b;
+        break;
+      }
+    }
+    if (xi == 0) head = heading;
+    final car = await _call('route', {
+      'locations': [
+        {
+          'lat': x.latitude,
+          'lon': x.longitude,
+          if (head != null) 'heading': head.round(),
+          'heading_tolerance': 45,
+        },
+        {'lat': to.latitude, 'lon': to.longitude},
+      ],
+      'costing': 'auto',
+      'costing_options': {
+        'auto': {'use_living_streets': 0.0, 'service_penalty': 120, 'use_tracks': 0.0},
+      },
+      'language': 'cs-CZ',
+      'units': 'kilometers',
+      'directions_options': {'units': 'kilometers', 'language': 'cs-CZ'},
+    });
+    final carTrip = car['trip'] as Map<String, dynamic>;
+    final carLen = ((carTrip['summary'] as Map)['length'] as num).toDouble() * 1000;
+    // Jen když je zkratka opravdu znát.
+    if (carLen > truckTail - 300 || carLen > truckTail * 0.75) return null;
+    final carLeg = (carTrip['legs'] as List).first as Map;
+    final carShape = decodePolyline6(carLeg['shape'] as String);
+    if (d(carShape.last, to) > 150) return null;
+    final tr = await _call('trace_attributes', {
+      'encoded_polyline': carLeg['shape'],
+      'costing': 'auto',
+      'shape_match': 'edge_walk',
+      'filters': {
+        'attributes': ['edge.way_id', 'edge.road_class', 'edge.use', 'edge.length'],
+        'action': 'include',
+      },
+    });
+    final edges = <ShortcutEdge>[
+      for (final e in (tr['edges'] as List? ?? const []))
+        (
+          wayId: (e['way_id'] as num?)?.toInt(),
+          roadClass: e['road_class'] as String?,
+          use: e['use'] as String?,
+          lengthM: ((e['length'] as num?)?.toDouble() ?? 0) * 1000,
+        ),
+    ];
+    if (edges.isEmpty) return null;
+    final ids = {for (final e in edges) ?e.wayId};
+    final tags = <int, Map<String, dynamic>>{};
+    final off = OfflineSearch.instance;
+    if (off.hasAccess) {
+      var la0 = 90.0, la1 = -90.0, lo0 = 180.0, lo1 = -180.0;
+      for (final p in carShape) {
+        la0 = math.min(la0, p.latitude);
+        la1 = math.max(la1, p.latitude);
+        lo0 = math.min(lo0, p.longitude);
+        lo1 = math.max(lo1, p.longitude);
+      }
+      for (final e in off.osmElements(la0 - 0.002, la1 + 0.002, lo0 - 0.003, lo1 + 0.003)) {
+        final id = e['id'] as int;
+        if (e['type'] == 'way' && ids.contains(id)) tags[id] = (e['tags'] as Map).cast<String, dynamic>();
+      }
+    } else {
+      // Starší balík dat: štítky cest z Overpass; bez nich zkratku nepoužít.
+      final els = await overpassQuery('[out:json][timeout:10];way(id:${ids.join(',')});out tags;');
+      if (els == null) return null;
+      for (final e in els) {
+        tags[(e['id'] as num).toInt()] = Map<String, dynamic>.from((e['tags'] as Map?) ?? const {});
+      }
+    }
+    if (shortcutProblem(edges, tags, profile) != null) return null;
+    // Kamionem k místu odbočení (stejná trasa jako dosud), dál krátkou cestou.
+    if (xi == 0) return carTrip;
+    final headTrip =
+        (await _routeData(from: from, to: x, profile: profile, heading: heading))['trip']
+            as Map<String, dynamic>;
+    final headEnd = decodePolyline6(((headTrip['legs'] as List).last as Map)['shape'] as String).last;
+    if (d(headEnd, x) > 60) return null;
+    return _joinTrips(headTrip, carTrip);
   }
 
   /// Směr jízdy na konci tvaru trasy (stupně), pro navázání další části bez otáčení.

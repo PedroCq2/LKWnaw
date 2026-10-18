@@ -3,6 +3,7 @@
 Tabulka osm_el (+ R-strom osm_el_rtree) drží prvky OSM ve tvaru, jaký vrací Overpass
 (typ, id, souřadnice, štítky, u cest geometrie), takže aplikace je zpracuje stejným kódem:
   • cesty s omezením: maxheight / maxweight / maxwidth / maxlength / maxaxleload, overtaking:hgv
+  • vjezd pro kamiony: hgv / access / motor_vehicle = no, private, delivery, destination (kontrola zkratek)
   • body: radary (highway=speed_camera), exity (motorway_junction + ref), maxheight na bodech
   • sjezdy motorway_link s destination:ref D… (sjezd na jinou dálnici)
   • služby: odpočívky (services/rest_area), všechny pumpy, parkoviště pro kamiony a parkoviště,
@@ -26,7 +27,14 @@ KEEP = set(RESTR_KEYS) | {'highway', 'bridge', 'tunnel', 'name', 'ref', 'destina
                           'amenity', 'tourism', 'shop', 'craft', 'hgv', 'capacity', 'capacity:hgv', 'fee',
                           'supervised', 'surveillance', 'fenced', 'barrier', 'toilets', 'shower', 'showers',
                           'restaurant', 'food', 'fuel:adblue', 'fuel:HGV_diesel', 'opening_hours', 'brand',
-                          'operator', 'access', 'motorroad'}
+                          'operator', 'access', 'motorroad', 'motor_vehicle', 'vehicle', 'goods',
+                          'hgv:conditional'}
+# Vjezd pro kamiony (zákaz / jen dopravní obsluha / soukromé) – kontrola zkratek v zásobování.
+ACC_KEYS = ('hgv', 'access', 'motor_vehicle', 'vehicle', 'goods')
+ACC_VALUES = {'no', 'private', 'delivery', 'destination', 'permit', 'agricultural', 'forestry'}
+DRIVABLE = {'motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential',
+            'motorway_link', 'trunk_link', 'primary_link', 'secondary_link', 'tertiary_link',
+            'living_street', 'service', 'road'}
 NEAR_CELL = 0.004  # mřížka bodů dálnic (~300–450 m)
 
 
@@ -77,7 +85,9 @@ class H(osmium.SimpleHandler):
         if hw == 'services' or hw == 'rest_area':
             k = 'anchor'
         mw = hw in ('motorway', 'trunk', 'motorway_link', 'trunk_link')
-        if not (restr or link or k or mw):
+        acc = hw in DRIVABLE and any(t.get(a) in ACC_VALUES for a in ACC_KEYS) and not (
+            hw == 'service' and 'hgv' not in t)
+        if not (restr or link or k or mw or acc):
             return
         try:
             pts = [(n.lat, n.lon) for n in w.nodes]
@@ -94,6 +104,10 @@ class H(osmium.SimpleHandler):
         elif k:
             c = (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts))
             self.rows.append(('way', w.id, c[0], c[1], tags_of(t), None, k == 'near'))
+        elif acc:
+            # Bez geometrie (hledá se podle id cesty), jen obálka do R-stromu.
+            c = pts[len(pts) // 2]
+            self.rows.append(('way', w.id, c[0], c[1], tags_of(t), None, False, pts))
 
     def near_mw(self, lat, lon, m=500):
         cy, cx = int(lat / NEAR_CELL), int(lon / NEAR_CELL)
@@ -121,10 +135,13 @@ def build(pbf, out):
         CREATE TABLE osm_el(id INTEGER PRIMARY KEY, type TEXT, osm_id INTEGER, lat REAL, lon REAL,
                             tags TEXT, geom BLOB);
         CREATE VIRTUAL TABLE osm_el_rtree USING rtree(id, minlat, maxlat, minlon, maxlon);
+        DROP TABLE IF EXISTS osm_access_v1; CREATE TABLE osm_access_v1(x);  -- značka: data o vjezdu jsou
     ''')
     n = 0
     stats = defaultdict(int)
-    for typ, oid, lat, lon, tags, geom, near in h.rows:
+    for row in h.rows:
+        typ, oid, lat, lon, tags, geom, near = row[:7]
+        extent = row[7] if len(row) > 7 else None
         if near and not h.near_mw(lat, lon):
             continue
         n += 1
@@ -134,6 +151,9 @@ def build(pbf, out):
             lats = [p[0] for p in geom]
             lons = [p[1] for p in geom]
             box = (min(lats), max(lats), min(lons), max(lons))
+        elif extent:
+            box = (min(p[0] for p in extent), max(p[0] for p in extent),
+                   min(p[1] for p in extent), max(p[1] for p in extent))
         else:
             box = (lat, lat, lon, lon)
         db.execute('INSERT INTO osm_el VALUES (?,?,?,?,?,?,?)',

@@ -32,6 +32,7 @@ class OfflineSearch {
       _hasBorders = _db!.select("SELECT 1 FROM sqlite_master WHERE name = 'town_rtree'").isNotEmpty;
       _hasRamps = _db!.select("SELECT 1 FROM sqlite_master WHERE name = 'ramp_rtree'").isNotEmpty;
       _hasOsm = _db!.select("SELECT 1 FROM sqlite_master WHERE name = 'osm_el_rtree'").isNotEmpty;
+      _hasAccess = _db!.select("SELECT 1 FROM sqlite_master WHERE name = 'osm_access_v1'").isNotEmpty;
     } catch (_) {
       _db = null;
     }
@@ -86,6 +87,10 @@ class OfflineSearch {
 
   /// Balík obsahuje omezení, radary, exity a služby (místo dotazů na Overpass).
   bool get hasOsm => _db != null && _hasOsm;
+  bool _hasAccess = false;
+
+  /// V balíku jsou i zákazy vjezdu kamionů (hgv=no, jen dopravní obsluha…).
+  bool get hasAccess => hasOsm && _hasAccess;
 
   /// Prvky OSM v obdélníku ve tvaru odpovědi Overpass (type, id, lat/lon nebo geometry, tags).
   List<Map<String, dynamic>> osmElements(double minLat, double maxLat, double minLon, double maxLon) {

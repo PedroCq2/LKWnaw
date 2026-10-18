@@ -24,6 +24,7 @@ class OfflineSearch {
   bool get hasRamps => false;
 
   bool get hasOsm => false;
+  bool get hasAccess => false;
 
   List<Map<String, dynamic>> osmElements(double a, double b, double c, double d) => const [];
 
