@@ -74,7 +74,12 @@ class ManeuverBanner extends StatelessWidget {
         ? (m!.roundaboutExit ??
               int.tryParse(RegExp(r'(\d+)\. výjezd').firstMatch(m.instruction)?.group(1) ?? ''))
         : null;
-    final shown = exitNo != null && !title.contains('výjezd') ? '$exitNo. výjezd · $title' : title;
+    final rbRoad = m == null
+        ? null
+        : (m.streetNames.isNotEmpty
+              ? m.streetNames.first
+              : RegExp(r'výjezdu na (.+?)\.?$').firstMatch(m.instruction)?.group(1));
+    final shown = exitNo != null ? '$exitNo. výjezd${rbRoad != null ? ' · $rbRoad' : ''}' : title;
     return Container(
       margin: const EdgeInsets.fromLTRB(10, 8, 10, 0),
       decoration: BoxDecoration(
