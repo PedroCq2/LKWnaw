@@ -34,7 +34,7 @@ jobs:
           python3 backend/search/build_towns.py data/cz.osm.pbf search-cz.sqlite
           python3 backend/search/build_ramps.py data/cz.osm.pbf search-cz.sqlite
           python3 backend/search/build_extras.py data/cz.osm.pbf search-cz.sqlite
-          python3 backend/map/pinned_style.py lkwnav-style.json
+          python3 backend/map/pinned_style.py lkwnav-style.json || echo "styl mapy se nepodařilo připravit"
           gzip -6 -c search-cz.sqlite > search-cz.sqlite.gz
           rm search-cz.sqlite
           ls -la search-cz.sqlite.gz
