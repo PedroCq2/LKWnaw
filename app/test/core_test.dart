@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:truck_nav/widgets/nav_widgets.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:truck_nav/models/route.dart';
@@ -266,5 +267,25 @@ void main() {
     expect(p.start, isNull);
     expect(p.stops.single.name, 'Kaufland DC');
     expect(p.dest.point, const LatLng(49.83, 18.28));
+  });
+
+  test('kruhový objezd v okénku krátce: „3. výjezd · 13“', () {
+    Maneuver rb(String text, List<String> names) => Maneuver(
+      type: 26,
+      instruction: text,
+      streetNames: names,
+      beginShapeIndex: 0,
+      endShapeIndex: 1,
+      lengthKm: 0.1,
+    );
+    expect(
+      roundaboutLabel(rb('Vjeďte na kruhový objezd a sjeďte na 3. výjezdu na 13.', ['13'])),
+      '3. výjezd · 13',
+    );
+    expect(
+      roundaboutLabel(rb('Vjeďte na kruhový objezd a sjeďte na 1. výjezdu na 8/E 442.', [])),
+      '1. výjezd · 8/E 442',
+    );
+    expect(roundaboutLabel(rb('Vjeďte na kruhový objezd.', [])), isNull);
   });
 }

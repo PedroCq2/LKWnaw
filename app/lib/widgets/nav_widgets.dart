@@ -70,16 +70,8 @@ class ManeuverBanner extends StatelessWidget {
         ? toward.take(2).join(', ')
         : (m.streetNames.isNotEmpty ? m.streetNames.take(2).join(' / ') : m.instruction);
     // Kruhový objezd: číslo výjezdu vždy vidět („3. výjezd · 13“).
-    final exitNo = m?.type == 26
-        ? (m!.roundaboutExit ??
-              int.tryParse(RegExp(r'(\d+)\. výjezd').firstMatch(m.instruction)?.group(1) ?? ''))
-        : null;
-    final rbRoad = m == null
-        ? null
-        : (m.streetNames.isNotEmpty
-              ? m.streetNames.first
-              : RegExp(r'výjezdu na (.+?)\.?$').firstMatch(m.instruction)?.group(1));
-    final shown = exitNo != null ? '$exitNo. výjezd${rbRoad != null ? ' · $rbRoad' : ''}' : title;
+    // Kruhový objezd: číslo výjezdu vždy vidět („3. výjezd · 13“).
+    final shown = (m == null ? null : roundaboutLabel(m)) ?? title;
     return Container(
       margin: const EdgeInsets.fromLTRB(10, 8, 10, 0),
       decoration: BoxDecoration(
@@ -204,7 +196,8 @@ class ManeuverBanner extends StatelessWidget {
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      then!.streetNames.isNotEmpty ? then!.streetNames.first : then!.instruction,
+                      roundaboutLabel(then!) ??
+                          (then!.streetNames.isNotEmpty ? then!.streetNames.first : then!.instruction),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(color: Lkw.text, fontSize: 16),
@@ -217,6 +210,18 @@ class ManeuverBanner extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Kruhový objezd krátce: „3. výjezd · 13“ (místo „Vjeďte na kruhový objezd a sjeďte na 3. výjezdu na 13.“).
+String? roundaboutLabel(Maneuver m) {
+  if (m.type != 26) return null;
+  final n =
+      m.roundaboutExit ?? int.tryParse(RegExp(r'(\d+)\. výjezd').firstMatch(m.instruction)?.group(1) ?? '');
+  if (n == null) return null;
+  final road = m.streetNames.isNotEmpty
+      ? m.streetNames.first
+      : RegExp(r'výjezdu na (.+?)\.?$').firstMatch(m.instruction)?.group(1);
+  return '$n. výjezd${road != null ? ' · $road' : ''}';
 }
 
 Widget _exitTag(String n) => Container(
