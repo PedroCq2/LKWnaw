@@ -240,8 +240,9 @@ List<HighwayService> _buildServices(List<_Hit> hits, {String? Function(double at
     'services' || 'rest_area' => h.off < 800,
     'fuel' => h.off < 160,
     'hgv_parking' => h.off < 300,
-    // Parkoviště těsně u dálnice je skoro vždy odpočívka.
-    'parking' => h.off < 200,
+    // Parkoviště těsně u dálnice je skoro vždy odpočívka – u silnice pro motorová vozidla
+    // ve městě (I/8 v Teplicích) bývá obchodní, takže jen u dálnice.
+    'parking' => h.off < 200 && (roadAt?.call(h.at)?.startsWith('D') ?? false),
     _ => false,
   };
   final anchors = hits.where(anchor).toList()..sort((a, b) => a.at.compareTo(b.at));

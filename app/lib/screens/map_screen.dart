@@ -905,12 +905,19 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     final now = roundaboutExit ? math.max(8.0, mps * 1.2) : math.max(50.0, mps * 4);
 
     // Po manévru: dlouhý úsek bez pokynu → „Pokračujte rovně (po D1) 12 kilometrů.“
-    if (i > 0 && d > 3000 && !e.preSpoken.contains(key) && e.continueSpoken.add(key)) {
+    if (i > 0 && d > 3000 && !e.preSpoken.contains(key) && !e.continueSpoken.contains(key)) {
       final prev = r.maneuvers[i - 1];
       final passed = nav.traveled - r.cumulative[prev.beginShapeIndex.clamp(0, r.shape.length - 1)];
-      if (passed < 400) {
+      if (passed > 900) {
+        e.continueSpoken.add(key);
+      } else if (DateTime.now().difference(Voice.instance.lastSpokenAt) > const Duration(seconds: 7)) {
+        // Až předchozí pokyn dozní – ne „Najeďte na nájezd.“ a hned „Pokračujte 7 km.“
+        e.continueSpoken.add(key);
         final road = _roadAhead(prev);
-        _say('Pokračujte rovně${road != null ? ' po $road' : ''} ${_kmWords(d)}.');
+        final street = road != null && !RegExp(r'^(D\d|I+/|E\d|silnici )').hasMatch(road);
+        _say(
+          'Pokračujte rovně${road == null ? '' : (street ? ' po ulici $road' : ' po $road')} ${_kmWords(d)}.',
+        );
       }
     }
 

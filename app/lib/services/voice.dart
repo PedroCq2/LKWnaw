@@ -67,6 +67,9 @@ class Voice {
     return ([...voices]..sort((a, b) => score(b).compareTo(score(a)))).first;
   }
 
+  /// Kdy naposledy zazněla hláška (navazující hlášky nechají předchozí doznít).
+  DateTime get lastSpokenAt => _lastAt;
+
   Future<void> say(String text, {bool force = false}) async {
     final s = _settings;
     if (text.isEmpty || (s != null && !s.voice && !force)) return;

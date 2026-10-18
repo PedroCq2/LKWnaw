@@ -28,12 +28,13 @@ IconData maneuverIcon(int type) {
     case 16:
     case 24:
       return Icons.turn_slight_left;
+    // Sjezd / nájezd: šipka mírně do strany (ikona „ramp“ vypadá jako připojení zleva).
     case 18:
     case 20:
-      return Icons.ramp_right;
+      return Icons.turn_slight_right;
     case 19:
     case 21:
-      return Icons.ramp_left;
+      return Icons.turn_slight_left;
     case 25:
       return Icons.merge;
     case 26:
