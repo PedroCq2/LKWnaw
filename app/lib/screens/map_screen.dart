@@ -2657,6 +2657,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                   onPointerMove: (e) {
                     if (_follow && e.delta.distance > 1.5) {
                       setState(() => _follow = false);
+                      _updateMeLayer(); // šipka hned do mapy (pevná na obrazovce zmizí)
                     }
                   },
                   child: ml.MapLibreMap(
@@ -2679,18 +2680,19 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                 ),
               if (_fixedArrow)
                 Positioned(
-                  left: _screen.width / 2 - 42,
-                  top: _topInset + (_screen.height - _topInset) / 2 - 42,
+                  // V malém okénku (obraz v obraze) menší šipka.
+                  left: _screen.width / 2 - (pip ? 20 : 42),
+                  top: _topInset + (_screen.height - _topInset) / 2 - (pip ? 20 : 42),
                   child: IgnorePointer(
                     child: Transform(
                       alignment: Alignment.center,
                       transform: Matrix4.identity()
                         ..setEntry(3, 2, 0.0015)
                         ..rotateX(_settings.view3d ? 0.96 : 0.0),
-                      child: const SizedBox(
-                        width: 84,
-                        height: 84,
-                        child: CustomPaint(painter: _ArrowPainter()),
+                      child: SizedBox(
+                        width: pip ? 40 : 84,
+                        height: pip ? 40 : 84,
+                        child: const CustomPaint(painter: _ArrowPainter()),
                       ),
                     ),
                   ),
