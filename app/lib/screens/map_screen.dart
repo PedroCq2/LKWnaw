@@ -955,7 +955,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       if (d < st * 0.6 || d - now < 80) return;
       e.alertSpoken.add(key);
       final what = _shortInstruction(m);
-      _say('${_spokenDistance(st)} $what');
+      // Hláška se zpozdila (zatáčka, přepočet): říct skutečnou vzdálenost, ne „Za 200 metrů“.
+      _say('${_spokenDistance(st - d > 40 ? d : st)} $what');
       return;
     }
   }

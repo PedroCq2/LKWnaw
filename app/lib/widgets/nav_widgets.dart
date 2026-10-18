@@ -68,6 +68,12 @@ class ManeuverBanner extends StatelessWidget {
         : toward.isNotEmpty
         ? toward.take(2).join(', ')
         : (m.streetNames.isNotEmpty ? m.streetNames.take(2).join(' / ') : m.instruction);
+    // Kruhový objezd: číslo výjezdu vždy vidět („3. výjezd · 13“).
+    final exitNo = m?.type == 26
+        ? (m!.roundaboutExit ??
+              int.tryParse(RegExp(r'(\d+)\. výjezd').firstMatch(m.instruction)?.group(1) ?? ''))
+        : null;
+    final shown = exitNo != null && !title.contains('výjezd') ? '$exitNo. výjezd · $title' : title;
     return Container(
       margin: const EdgeInsets.fromLTRB(10, 8, 10, 0),
       decoration: BoxDecoration(
@@ -115,7 +121,7 @@ class ManeuverBanner extends StatelessWidget {
                         ],
                       ),
                       Text(
-                        title,
+                        shown,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
