@@ -83,7 +83,7 @@ Future<List<RouteWarning>> loadRouteWarnings(
           for (final g in geom) LatLng((g['lat'] as num).toDouble(), (g['lon'] as num).toDouble()),
         ], onRoute: routeWays.contains(id));
         if (on == null) continue;
-        out.addAll(_fromTags(tags, on.$1, on.$2, truck, delivery));
+        out.addAll(warningsFromTags(tags, on.$1, on.$2, truck, delivery));
       } else {
         if (!seenNodes.add(id)) continue;
         final p = LatLng((e['lat'] as num).toDouble(), (e['lon'] as num).toDouble());
@@ -98,7 +98,7 @@ Future<List<RouteWarning>> loadRouteWarnings(
           );
         } else if (index.locate(p, 5) != null) {
           // Značka výšky jako bod musí ležet přímo na trase, ne na souběžné cestě.
-          out.addAll(_fromTags(tags, at, p, truck, delivery));
+          out.addAll(warningsFromTags(tags, at, p, truck, delivery));
         }
       }
     }
@@ -172,7 +172,14 @@ Future<List<dynamic>?> overpassQuery(String q) async {
   return null;
 }
 
-List<RouteWarning> _fromTags(Map<String, dynamic> tags, double at, LatLng p, TruckProfile t, bool delivery) {
+/// Omezení z OSM štítků cesty / bodu [tags] ve vzdálenosti [at] (m) po trase.
+List<RouteWarning> warningsFromTags(
+  Map<String, dynamic> tags,
+  double at,
+  LatLng p,
+  TruckProfile t,
+  bool delivery,
+) {
   final out = <RouteWarning>[];
   final bridge = tags['bridge'] != null && tags['bridge'] != 'no';
   void add(String key, WarningType type, double Function(String) parse, double truckValue) {

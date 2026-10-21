@@ -11,6 +11,10 @@ Flutter aplikace pro navigaci nákladních vozidel nad OpenStreetMap a routing e
   ADR (nebezpečný náklad), max. rychlost vozidla, vyhnutí se mýtu / trajektům.
 - **Výstrahy na trase** – omezení výšky, hmotnosti, šířky, délky a nápravy z OSM
   (červeně, pokud je vaše vozidlo překračuje, + hlasové varování) a radary.
+- **Jízda bez cíle** – aplikace pozná silnici, po které jedete (I/8, D8, ulice), a hlídá na ní
+  dopředu do 30 km nízké mosty, hmotnost, šířku, délku a zákazy vjezdu kamionů: karta vpravo
+  („3,3 m · 21 km“), značka v mapě a hlas („Na silnici 8 za 20 kilometrů omezení výšky 3,3 metru.
+  Vaše vozidlo neprojede.“), znovu kilometr před ním.
 - **Varianty tras** – nejrychlejší, alternativa, bez mýta, nejkratší (výběr kartou).
 - **Vyhledávání firem a skladů** (Photon/OSM) – např. „kaufland dc olomouc“.
 - **Rozdvojení dálnic a jízdní pruhy** – „Pokračujte rovně na D1 směr Vyškov“ i tam, kde

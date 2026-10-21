@@ -300,7 +300,7 @@ class TruckRoute {
   }
 }
 
-enum WarningType { height, weight, width, length, axleLoad, speedCamera, noOvertakingHgv }
+enum WarningType { height, weight, width, length, axleLoad, speedCamera, noOvertakingHgv, noHgv }
 
 class RouteWarning {
   final WarningType type;
@@ -347,6 +347,7 @@ class RouteWarning {
       case WarningType.speedCamera:
         return 'radar';
       case WarningType.noOvertakingHgv:
+      case WarningType.noHgv:
         return note ?? '';
     }
   }
@@ -367,6 +368,10 @@ class RouteWarning {
         return 'radar';
       case WarningType.noOvertakingHgv:
         return 'zákaz předjíždění nákladních vozidel';
+      case WarningType.noHgv:
+        return note == null
+            ? 'zákaz vjezdu nákladních vozidel'
+            : 'vjezd nákladních vozidel jen pro dopravní obsluhu';
     }
   }
 }

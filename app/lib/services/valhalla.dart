@@ -998,6 +998,50 @@ class ValhallaClient {
     return data;
   }
 
+  /// Jména silnice, po které vozidlo jede, podle posledních poloh [track] („13“, „D8“, „Teplická“).
+  Future<List<String>> roadNamesAt(List<LatLng> track) async {
+    final data = await _call('trace_attributes', {
+      'shape': [
+        for (final p in track) {'lat': p.latitude, 'lon': p.longitude},
+      ],
+      'costing': 'auto',
+      'shape_match': 'map_snap',
+      'filters': {
+        'attributes': ['edge.names', 'edge.use'],
+        'action': 'include',
+      },
+    });
+    for (final e in ((data['edges'] as List?) ?? const []).reversed) {
+      if (e['use'] == 'ramp') continue;
+      final n = [for (final x in (e['names'] as List?) ?? const []) '$x'];
+      if (n.isNotEmpty) return n;
+    }
+    return const [];
+  }
+
+  /// Trasa autem z [from] (ve směru [heading]) do [to] – délka a manévry (null = nelze).
+  Future<TruckRoute?> carRoute(LatLng from, double? heading, LatLng to) async {
+    try {
+      final data = await _call('route', {
+        'locations': [
+          {
+            'lat': from.latitude,
+            'lon': from.longitude,
+            if (heading != null) 'heading': heading.round(),
+            if (heading != null) 'heading_tolerance': 60,
+          },
+          {'lat': to.latitude, 'lon': to.longitude},
+        ],
+        'costing': 'auto',
+        'language': 'cs-CZ',
+        'directions_options': {'units': 'kilometers', 'language': 'cs-CZ'},
+      });
+      return parseTrip(data['trip'] as Map<String, dynamic>);
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Doby jízdy kamionem mezi všemi body (s) – pro seřazení zastávek.
   Future<List<List<double>>> matrix(List<LatLng> pts, TruckProfile profile, {bool delivery = false}) async {
     final locs = [

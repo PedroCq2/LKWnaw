@@ -22,6 +22,7 @@ import '../services/restrictions.dart';
 import '../services/road_via.dart';
 import '../services/lanes.dart';
 import '../services/highway_services.dart';
+import '../services/horizon.dart';
 import '../services/map_style.dart';
 import '../services/problem_reports.dart';
 import '../services/voice_commands.dart';
@@ -73,6 +74,17 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   bool _follow = true;
   // Volná jízda bez trasy: po rozjetí mapa ve směru jízdy (jako při navigaci).
   bool _freeDrive = false;
+
+  // Jízda bez cíle: omezení na silnici před námi („za 20 km most 3,3 m“).
+  final List<LatLng> _track = []; // poslední polohy (silnice, po které jedeme)
+  double _odo = 0; // ujeto (m)
+  LatLng? _odoAt;
+  List<AheadWarning> _ahead = [];
+  String? _aheadRoad;
+  bool _aheadBusy = false;
+  double _aheadScanOdo = -1e9;
+  DateTime _aheadScanAt = DateTime(2000);
+  final Set<String> _aheadSpoken = {};
   bool get _driveView => _navigating || _freeDrive;
   bool get _night => _settings.nightAt(_pos?.latitude, _pos?.longitude);
   Timer? _nightTimer;
@@ -330,8 +342,103 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         }
       }
     }
+    _odometer(pos, speed);
+    if (_route == null && _freeDrive) _aheadTick(speed);
     _animateTo();
   }
+
+  /// Ujetá vzdálenost a stopa posledních poloh (po ~25 m).
+  void _odometer(LatLng pos, double speedKmh) {
+    final last = _odoAt;
+    if (last != null && speedKmh > 3) _odo += const Distance()(last, pos);
+    _odoAt = pos;
+    if (speedKmh < 5) return;
+    if (_track.isEmpty || const Distance()(_track.last, pos) > 25) {
+      _track.add(pos);
+      if (_track.length > 12) _track.removeAt(0);
+    }
+  }
+
+  /// Bez cíle: jednou za 2 km (nebo 90 s) najít omezení na silnici před námi; mezi tím odečítat ujeté.
+  void _aheadTick(double speedKmh) {
+    _ahead.removeWhere((a) => a.remaining(_odo) < -30);
+    _aheadVoice();
+    if (_aheadBusy || speedKmh < 15 || _track.length < 3) return;
+    if (const Distance()(_track.first, _track.last) < 80) return;
+    if (_odo - _aheadScanOdo < 2000 &&
+        DateTime.now().difference(_aheadScanAt) < const Duration(seconds: 90)) {
+      return;
+    }
+    _aheadBusy = true;
+    _aheadScanOdo = _odo;
+    _aheadScanAt = DateTime.now();
+    final odo = _odo;
+    Horizon(ValhallaClient(_settings.valhallaUrl))
+        .scan(
+          track: [..._track],
+          heading: _heading,
+          truck: _settings.profile,
+          odo: odo,
+          delivery: _settings.delivery,
+        )
+        .then((res) {
+          if (!mounted || _route != null) return;
+          final (road, list) = res;
+          setState(() {
+            _aheadRoad = road;
+            _ahead = list;
+          });
+          _syncLayers();
+          _aheadVoice(found: true);
+        })
+        .catchError((_) {})
+        .whenComplete(() => _aheadBusy = false);
+  }
+
+  /// Hlas: nové omezení, které vozidlo překračuje, hned („Na silnici 13 za 20 kilometrů…“),
+  /// každé (i těsné) ještě kilometr před ním.
+  void _aheadVoice({bool found = false}) {
+    if (!_settings.voice) return;
+    for (final a in _ahead) {
+      final d = a.remaining(_odo);
+      if (d < 50) continue;
+      final w = a.w;
+      String what() {
+        if (w.type == WarningType.noHgv) return w.spokenName;
+        final unit = w.type == WarningType.weight || w.type == WarningType.axleLoad ? 'tun' : 'metru';
+        return '${w.spokenName} ${w.value!.toStringAsFixed(1).replaceAll('.', ',')} $unit';
+      }
+
+      if (found && w.violates && d > 1500 && _aheadSpoken.add('${a.key}:far')) {
+        final road = RegExp(r'^\d+$').hasMatch(a.road) ? 'silnici ${a.road}' : a.road;
+        _say(
+          'Na $road ${VoiceGuide.spokenDistance(d).toLowerCase()} ${what()}. '
+          'Vaše vozidlo ${w.type == WarningType.noHgv ? 'tudy nesmí' : 'neprojede'}.',
+        );
+      } else if (d <= 1000 && _aheadSpoken.add('${a.key}:near')) {
+        _say('Pozor! ${VoiceGuide.spokenDistance(d)} ${what()}.');
+      }
+    }
+  }
+
+  Widget _aheadColumn() => Padding(
+    padding: const EdgeInsets.only(top: 10, right: 8),
+    child: Column(
+      children: [
+        if (_aheadRoad != null)
+          Container(
+            margin: const EdgeInsets.only(bottom: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(color: Lkw.panel, borderRadius: BorderRadius.circular(10)),
+            child: Text(
+              'Na ${_aheadRoad!}',
+              style: const TextStyle(color: Lkw.muted, fontSize: 12, fontWeight: FontWeight.w700),
+            ),
+          ),
+        for (final a in _ahead.take(3)) WarningCard(w: a.w, distance: math.max(0, a.remaining(_odo))),
+      ],
+    ),
+  );
 
   /// Web/test: `?dest=lat,lon&go=1` nastaví cíl (a spustí navigaci).
   void _webDemo() {
@@ -798,14 +905,16 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       await m.setGeoJsonSource(
         'warn',
         _points([
-          for (final w in r?.warnings ?? const <RouteWarning>[])
+          for (final w in r?.warnings ?? [for (final a in _ahead) a.w])
             if (w.type != WarningType.noOvertakingHgv && w.relevant)
               (
                 w.point,
                 {
-                  'label': w.type == WarningType.speedCamera || w.type == WarningType.noOvertakingHgv
-                      ? ''
-                      : w.label.replaceAll(' ', ''),
+                  'label': switch (w.type) {
+                    WarningType.speedCamera || WarningType.noOvertakingHgv => '',
+                    WarningType.noHgv => '!',
+                    _ => w.label.replaceAll(' ', ''),
+                  },
                   'cam': w.type == WarningType.speedCamera,
                 },
               ),
@@ -1077,6 +1186,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   Future<void> _selectRoute(int i, {bool fit = false}) async {
     if (i >= _options.length) return;
     final r = _options[i].route;
+    _ahead = []; // omezení „bez cíle“ – teď platí ta na trase
     _passAt.clear();
     for (final MapEntry(key: st, value: p) in _passTarget.entries) {
       if (!_stops.contains(st)) continue;
@@ -2858,7 +2968,13 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                       Expanded(
                         child: Row(
                           crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [const Spacer(), if (_navigating) _warningsColumn(route, nav)],
+                          children: [
+                            const Spacer(),
+                            if (_navigating)
+                              _warningsColumn(route, nav)
+                            else if (_freeDrive && route == null && _ahead.isNotEmpty)
+                              _aheadColumn(),
+                          ],
                         ),
                       ),
                     ],

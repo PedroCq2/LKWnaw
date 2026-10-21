@@ -356,6 +356,19 @@ class WarningSign extends StatelessWidget {
         ),
       );
     }
+    if (w.type == WarningType.noHgv) {
+      // Značka B4 – zákaz vjezdu nákladních automobilů.
+      return Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          shape: BoxShape.circle,
+          border: Border.all(color: const Color(0xFFD50000), width: size * 0.11),
+        ),
+        child: Icon(Icons.local_shipping, size: size * 0.45, color: Colors.black),
+      );
+    }
     if (w.type == WarningType.speedCamera) {
       return Container(
         width: size,
@@ -426,7 +439,7 @@ class WarningCard extends StatelessWidget {
       child: Column(
         children: [
           WarningSign(w: w, size: 60),
-          if (w.type == WarningType.noOvertakingHgv && w.note != null)
+          if ((w.type == WarningType.noOvertakingHgv || w.type == WarningType.noHgv) && w.note != null)
             Text(
               w.note!,
               style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: Lkw.muted),
