@@ -505,7 +505,18 @@ class SpeedWidget extends StatelessWidget {
   final int? limit;
   final double speedKmh;
   final int tolerance; // červeně až nad limit + tolerance
-  const SpeedWidget({super.key, required this.limit, required this.speedKmh, this.tolerance = 3});
+
+  /// Nižší limit před námi (obec za zatáčkou) a za kolik metrů.
+  final int? nextLimit;
+  final double? nextLimitM;
+  const SpeedWidget({
+    super.key,
+    required this.limit,
+    required this.speedKmh,
+    this.tolerance = 3,
+    this.nextLimit,
+    this.nextLimitM,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -542,6 +553,31 @@ class SpeedWidget extends StatelessWidget {
             style: TextStyle(fontSize: 30, fontWeight: FontWeight.w900, color: Lkw.text),
           ),
           Text('km/h', style: TextStyle(fontSize: 12, color: over ? Colors.white : Lkw.muted)),
+          if (nextLimit case final n?) ...[
+            const SizedBox(height: 6),
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                shape: BoxShape.circle,
+                border: Border.all(color: const Color(0xFFD50000), width: 4),
+              ),
+              alignment: Alignment.center,
+              child: Text(
+                '$n',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w900, color: Colors.black),
+              ),
+            ),
+            Text(
+              formatDistance(nextLimitM ?? 0),
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w800,
+                color: over ? Colors.white : Lkw.amber,
+              ),
+            ),
+          ],
         ],
       ),
     );

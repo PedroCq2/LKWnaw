@@ -292,6 +292,21 @@ class TruckRoute {
     return k < maneuvers.length ? k : -1;
   }
 
+  /// Kde před námi (do [range] m) klesne rychlostní limit pod [ref] o víc než 5 km/h – obec za
+  /// zatáčkou (90 → 50). [ref] = aktuální limit, není-li známý, rychlost; [cap] = omezovač kamionu.
+  /// Vrací (vzdálenost m, nový limit), nebo null.
+  (double, int)? limitDropAhead(int seg, double traveled, int ref, {double range = 600, int cap = 999}) {
+    final cum = cumulative;
+    for (var j = seg + 1; j < speedLimits.length && j < cum.length; j++) {
+      final d = cum[j] - traveled;
+      if (d > range) break;
+      final l = speedLimits[j];
+      if (l == null || l >= cap) continue;
+      if (l < ref - 5) return (d < 0 ? 0 : d, l);
+    }
+    return null;
+  }
+
   int? speedLimitAt(int seg) => seg >= 0 && seg < speedLimits.length ? speedLimits[seg] : null;
   String? roadNameAt(int seg) => seg >= 0 && seg < roadNames.length ? roadNames[seg] : null;
 

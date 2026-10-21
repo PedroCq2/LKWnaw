@@ -405,4 +405,17 @@ void main() {
     expect(economyMinutes([e('residential', 2, 30)], 0), closeTo(4.8, 0.01));
     expect(countTurns([1, 10, 8, 15, 22, 26, 4]), 3);
   });
+
+  test('nižší limit před námi: obec za zatáčkou 90 → 50', () {
+    final r = line()..speedLimits = [90, 90, 90];
+    // line(): 3 body ~0,7 km od sebe; limit 50 až na posledním úseku.
+    r.speedLimits = [90, 50];
+    final at = r.cumulative[1];
+    expect(r.limitDropAhead(0, at - 300, 90), (300.0, 50));
+    expect(r.limitDropAhead(0, at - 800, 90, range: 600), isNull); // ještě daleko
+    expect(r.limitDropAhead(0, at - 300, 50), isNull); // už jedeme 50
+    // Limit nad omezovačem kamionu (90 → 80 při omezovači 80) se nehlásí.
+    r.speedLimits = [90, 80];
+    expect(r.limitDropAhead(0, at - 300, 80, cap: 81), isNull);
+  });
 }

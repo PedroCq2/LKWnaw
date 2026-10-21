@@ -1190,7 +1190,38 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   /// Při každém překročení hranice (limit + tolerance z Nastavení, výchozí +10 → 90 při 80) déle než 2 s
   /// zazní „Pozor, rychlost“. Znovu po zpomalení pod hranici (o 2 km/h, ať to při kolísání neblbne)
   /// a dalším překročení.
+  /// Nižší limit před námi: (vzdálenost m, limit) – obec za zatáčkou. Dohled podle rychlosti
+  /// (~15 s jízdy, 300–700 m).
+  (double, int)? _limitAhead(NavState nav, double speedKmh) {
+    final r = _route;
+    if (r == null || r.speedLimits.isEmpty) return null;
+    final cap = _settings.profile.maxSpeed;
+    final cur = r.speedLimitAt(nav.segmentIndex);
+    final ref = math.min(cur ?? speedKmh.round(), cap);
+    return r.limitDropAhead(
+      nav.segmentIndex,
+      nav.traveled,
+      ref,
+      range: (speedKmh / 3.6 * 15).clamp(300.0, 700.0),
+      cap: cap + 1,
+    );
+  }
+
+  final Set<int> _limitSpoken = {};
+
+  /// „Pozor, za 300 metrů omezení na 50.“ – jen když jedeme rychleji, než bude povoleno.
+  void _limitAheadVoice(NavState nav, double speedKmh) {
+    final a = _limitAhead(nav, speedKmh);
+    if (a == null || !_settings.speedSound) return;
+    final (d, lim) = a;
+    if (d < 120 || speedKmh < lim + 8) return;
+    // Jedno hlášení na jedno místo poklesu (po 50 m kvůli přepočtům trasy).
+    if (!_limitSpoken.add(((nav.traveled + d) / 50).round())) return;
+    _say('Pozor, ${VoiceGuide.spokenDistance(d).toLowerCase()} omezení na $lim.');
+  }
+
   void _speedWarning(NavState nav, double speedKmh) {
+    _limitAheadVoice(nav, speedKmh);
     final raw = _route?.speedLimitAt(nav.segmentIndex);
     if (raw == null) return;
     final limit = math.min(raw, _settings.profile.maxSpeed);
@@ -3469,10 +3500,17 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                   Positioned(
                     left: 12,
                     bottom: panelH + 16 + bottomPad,
-                    child: SpeedWidget(
-                      limit: limit,
-                      speedKmh: _speedKmh,
-                      tolerance: _settings.speedTolerance,
+                    child: Builder(
+                      builder: (_) {
+                        final next = nav == null ? null : _limitAhead(nav, _speedKmh);
+                        return SpeedWidget(
+                          limit: limit,
+                          speedKmh: _speedKmh,
+                          tolerance: _settings.speedTolerance,
+                          nextLimit: next?.$2,
+                          nextLimitM: next?.$1,
+                        );
+                      },
                     ),
                   ),
                 if (_cam != null && !pip)
