@@ -365,6 +365,17 @@ void main() {
     // Silnice, po které trasa jede (sdílený úsek).
     final along = const [LatLng(50, 14.004), LatLng(50, 14.006), LatLng(50.0004, 14.007)];
     expect(wayOnRoute(idx, along, onRoute: false), isNotNull);
+    // Vedlejší silnice „6 t“ začínající na trase (kruhový objezd): uzel na trase, další 2 m od ní
+    // („dej přednost“), pak pryč – trasa po ní nejede.
+    final side = const [LatLng(50, 14.005), LatLng(50.00002, 14.005), LatLng(50.0008, 14.0052)];
+    expect(wayOnRoute(idx, side, onRoute: false), isNull);
+    // Rameno Na Průhoně (Mělník, OSM 1050310676): plynule se napojí, posledních 5 m těsně podél trasy.
+    LatLng m(double north, double east) => LatLng(50 + north / 111320, 14.005 + east / 71556);
+    final flare = [m(22, -25), m(16.6, -20), m(11.3, -15), m(6.3, -10), m(2.5, -5), m(0, 0)];
+    expect(wayOnRoute(idx, flare, onRoute: false), isNull);
+    // Krátký most na trase (12 m) se počítá.
+    final bridge = const [LatLng(50, 14.0150), LatLng(50, 14.01517)];
+    expect(wayOnRoute(idx, bridge, onRoute: false), isNotNull);
     // Cesta z atributů trasy: stačí 2 body do 15 m.
     expect(
       wayOnRoute(idx, const [LatLng(50.0001, 14.004), LatLng(50.0001, 14.012)], onRoute: true),

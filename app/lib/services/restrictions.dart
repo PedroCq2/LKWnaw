@@ -114,8 +114,11 @@ Future<List<RouteWarning>> loadRouteWarnings(
 /// Kde trasa vede po cestě [geom] (m od začátku trasy a bod), nebo null.
 /// - Cesta na trase (podle atributů úseků z Valhally): stačí 2 její body do 15 m.
 /// - Jiná cesta: trasa po ní musí opravdu jet – dva SOUSEDNÍ body i bod mezi nimi do 3 m (společný
-///   úsek). Souběžná silnice 10 m vedle dálnice (III/13036 u Koberovic), dotyk na křižovatce ani dva
-///   konce staré silnice pod mostem, když trasa jede po obchvatu (II/239 u Slavětína, 3,5 m), se nepočítají.
+///   úsek) podél trasy, dohromady aspoň 15 m nebo většina délky cesty (krátký most). Souběžná silnice
+///   10 m vedle dálnice (III/13036 u Koberovic), dotyk na křižovatce, dva konce staré silnice pod mostem,
+///   když trasa jede po obchvatu (II/239 u Slavětína, 3,5 m), ani rameno vedlejší silnice, které se
+///   plynule napojí na kruhový objezd (Mělník, I/9: „6 t“ Na Průhoně, posledních 5 m těsně podél
+///   kruháče), se nepočítají.
 (double, LatLng)? wayOnRoute(RouteIndex index, List<LatLng> geom, {required bool onRoute}) {
   final tol = onRoute ? 15.0 : 3.0;
   final hits = [for (final p in geom) index.locate(p, tol)];
@@ -134,14 +137,23 @@ Future<List<RouteWarning>> loadRouteWarnings(
     }
     return n >= 2 ? best : null;
   }
+  const dist = Distance();
+  var total = 0.0, shared = 0.0;
   for (var i = 0; i + 1 < geom.length; i++) {
-    if (hits[i] == null || hits[i + 1] == null) continue;
     final a = geom[i], b = geom[i + 1];
+    final len = dist(a, b);
+    total += len;
+    if (hits[i] == null || hits[i + 1] == null) continue;
+    // Úsek musí vést podél trasy: krátký kus odbočky napříč (od uzlu na kruhovém objezdu k bodu
+    // „dej přednost“ 2 m od něj) má oba konce u trasy, ale trasa po něm nejede.
+    if (len < 4 || (hits[i + 1]! - hits[i]!).abs() < len * 0.7) continue;
     final mid = LatLng((a.latitude + b.latitude) / 2, (a.longitude + b.longitude) / 2);
     if (index.locate(mid, tol) == null) continue;
+    shared += len;
     take(i);
   }
-  return best;
+  // Společně aspoň 15 m, nebo skoro celá cesta (most 10 m) – ne jen napojení ramene na kruháč.
+  return shared >= 15 || (total > 0 && shared >= total * 0.8) ? best : null;
 }
 
 /// Sloučí navazující stejná omezení (jedna zóna = mnoho úseků cesty v OSM).
