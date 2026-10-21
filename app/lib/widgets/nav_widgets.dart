@@ -449,10 +449,15 @@ const warningCardHeight = 128.0;
 class WarningCard extends StatelessWidget {
   final RouteWarning w;
   final double distance;
-  const WarningCard({super.key, required this.w, required this.distance});
+
+  /// Klepnutí: ukázat místo na mapě.
+  final VoidCallback? onTap;
+  const WarningCard({super.key, required this.w, required this.distance, this.onTap});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => GestureDetector(onTap: onTap, child: _card());
+
+  Widget _card() {
     final bad = w.violates;
     return Container(
       width: 92,
@@ -466,10 +471,14 @@ class WarningCard extends StatelessWidget {
       child: Column(
         children: [
           WarningSign(w: w, size: 60),
-          if ((w.type == WarningType.noOvertakingHgv || w.type == WarningType.noHgv) && w.note != null)
+          if (w.note != null)
             Text(
               w.note!,
-              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: Lkw.muted),
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w800,
+                color: bad ? Colors.white : Lkw.muted,
+              ),
             ),
           if (w.onBridge)
             Text(

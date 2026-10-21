@@ -12,10 +12,16 @@ Flutter aplikace pro navigaci nákladních vozidel nad OpenStreetMap a routing e
 - **Výstrahy na trase** – omezení výšky, hmotnosti, šířky, délky a nápravy z OSM
   (červeně, pokud je vaše vozidlo překračuje, + hlasové varování) a radary. Vpravo nejvýš dvě
   nejbližší značky, nikdy přes tlačítka (okénko pumpy se na chvíli schová); po projetí další.
+- **Zakázané a úzké ulice v mapě** – kolem polohy (i kde si mapu prohlížíte) červeně úseky, kudy
+  vaše vozidlo nesmí (nízký most, úzká ulice, nosnost, zákaz vjezdu kamionů), oranžově těsné / jen
+  dopravní obsluha; značky s hodnotou („3,5t“, „3,3m“, „zákaz“). Vypínač *Zákazy* v nabídce.
+- **Most „21 t“ s tabulkou pro jednotlivé vozidlo** (OSM `maxweight:total`, např. 34 t): karta
+  „21t · sám 34 t“, kamion do 34 t oranžově (projede jen sám na mostě), hlasem „jednotlivé vozidlo
+  34 tun“.
 - **Jízda bez cíle** – aplikace pozná silnici, po které jedete (I/8, D8, ulice), a hlídá na ní
   dopředu do 30 km nízké mosty, hmotnost, šířku, délku a zákazy vjezdu kamionů: karta vpravo
   („3,3 m · 21 km“), značka v mapě a hlas („Na silnici 8 za 20 kilometrů omezení výšky 3,3 metru.
-  Vaše vozidlo neprojede.“), znovu kilometr před ním.
+  Vaše vozidlo neprojede.“), znovu kilometr před ním. Klepnutím na kartu mapa ukáže, kde to je.
 - **Varianty tras** – nejrychlejší, až 3 alternativy, bez dálnic (po „jedničkách“), bez mýta,
   nejkratší (výběr kartou); první „Doporučená“ pro kamion. „… a po dálnici“ hlasem dá dopředu tu po dálnici.
 - **Vyhledávání firem a skladů** (Photon/OSM) – např. „kaufland dc olomouc“.

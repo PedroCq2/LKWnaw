@@ -123,4 +123,18 @@ void main() {
     expect(warningsFromTags(zone, 0, const LatLng(50, 14), t, true).single.violates, isFalse);
     expect(warningsFromTags(zone, 0, const LatLng(50, 14), t, false).single.violates, isTrue);
   });
+
+  test('most 21 t s tabulkou „jednotlivé vozidlo 34 t“', () {
+    final bridge = {'bridge': 'yes', 'maxweight': '21', 'maxweight:total': '34'};
+    // 30 t: projede, ale jen sám na mostě → oranžově, ne červeně.
+    var w = warningsFromTags(bridge, 0, const LatLng(50, 14), TruckProfile(weight: 30), false).single;
+    expect(w.violates, isFalse);
+    expect(w.tight, isTrue);
+    expect(w.single, 34);
+    expect(w.note, 'sám 34 t');
+    expect(w.spokenValue, 'most s nosností 21 tun, jednotlivé vozidlo 34 tun');
+    // 40 t: neprojede.
+    w = warningsFromTags(bridge, 0, const LatLng(50, 14), TruckProfile(weight: 40), false).single;
+    expect(w.violates, isTrue);
+  });
 }

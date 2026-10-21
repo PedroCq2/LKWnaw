@@ -321,8 +321,12 @@ class RouteWarning {
       violates || tight || type == WarningType.speedCamera || type == WarningType.noOvertakingHgv;
   final bool onBridge; // omezení je na mostě (fyzická nosnost)
 
-  /// Doplňující text (např. časové omezení „6–22 h“).
+  /// Doplňující text (např. časové omezení „6–22 h“, u mostu „sám 34 t“).
   final String? note;
+
+  /// Most: nosnost pro jednotlivé vozidlo samo na mostě (dodatková tabulka pod „21 t“; OSM
+  /// `maxweight:total`). Kamion těžší než [value], ale ne než [single], projede jen sám.
+  final double? single;
 
   RouteWarning({
     required this.type,
@@ -333,7 +337,16 @@ class RouteWarning {
     required this.violates,
     this.tight = false,
     this.onBridge = false,
+    this.single,
   });
+
+  /// Hlasem: „most s nosností 21 tun, jednotlivé vozidlo 34 tun“.
+  String get spokenValue {
+    String n(double x) => x.toStringAsFixed(x == x.roundToDouble() ? 0 : 1).replaceAll('.', ',');
+    final unit = type == WarningType.weight || type == WarningType.axleLoad ? 'tun' : 'metru';
+    final s = single;
+    return '$spokenName ${n(value!)} $unit${s == null ? '' : ', jednotlivé vozidlo ${n(s)} tun'}';
+  }
 
   String get label {
     final v = value;

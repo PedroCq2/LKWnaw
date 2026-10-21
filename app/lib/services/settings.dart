@@ -21,6 +21,7 @@ class AppSettings {
   int speedTolerance; // varovat při překročení limitu o víc než X km/h
   bool speedSound; // hlasové varování „Pozor, rychlost“
   bool bigText; // větší texty pokynů
+  bool showRestrictions; // zakázané / úzké ulice pro kamion v mapě
 
   AppSettings({
     required this.profile,
@@ -37,6 +38,7 @@ class AppSettings {
     this.speedTolerance = 10,
     this.speedSound = true,
     this.bigText = false,
+    this.showRestrictions = true,
   });
 
   /// Noční vzhled: ručně, nebo automaticky podle západu/východu Slunce v místě.
@@ -74,6 +76,7 @@ class AppSettings {
       speedTolerance: p.getInt('speedTol2') ?? 10,
       speedSound: p.getBool('speedSound') ?? true,
       bigText: p.getBool('bigText') ?? false,
+      showRestrictions: p.getBool('showRestrictions') ?? true,
     );
   }
 
@@ -97,5 +100,6 @@ class AppSettings {
     await p.setInt('speedTol2', speedTolerance);
     await p.setBool('speedSound', speedSound);
     await p.setBool('bigText', bigText);
+    await p.setBool('showRestrictions', showRestrictions);
   }
 }

@@ -170,9 +170,12 @@ List<RouteWarning> mergeWarnings(List<RouteWarning> sorted, {double gapM = 400})
   return out;
 }
 
+/// Vlastní Overpass server (sestavení s `--dart-define=OVERPASS_URL=…`), zkouší se první.
+const _overpassOwn = String.fromEnvironment('OVERPASS_URL');
+
 /// Dotaz na Overpass API se záložními servery; null = žádný neodpověděl.
 Future<List<dynamic>?> overpassQuery(String q) async {
-  for (final url in _overpassMirrors) {
+  for (final url in [if (_overpassOwn.isNotEmpty) _overpassOwn, ..._overpassMirrors]) {
     try {
       final res = await http
           .post(Uri.parse(url), headers: uaHeaders(), body: {'data': q})
@@ -228,6 +231,25 @@ List<RouteWarning> warningsFromTags(
   add('maxwidth', WarningType.width, parseMeters, t.width);
   add('maxlength', WarningType.length, parseMeters, t.length);
   add('maxweight', WarningType.weight, parseTonnes, t.weight);
+  // Most „21 t“ s dodatkovou tabulkou pro jednotlivé vozidlo („34 t“): kamion do 34 t projede, ale
+  // jen sám na mostě (oranžově); nad 34 t neprojede vůbec.
+  final single = parseTonnes('${tags['maxweight:total'] ?? ''}');
+  final wi = out.indexWhere((w) => w.type == WarningType.weight);
+  if (wi >= 0 && single.isFinite && single > out[wi].value!) {
+    final w = out[wi];
+    final over = t.weight > single + 1e-6;
+    out[wi] = RouteWarning(
+      type: w.type,
+      value: w.value,
+      note: 'sám ${single.toStringAsFixed(single == single.roundToDouble() ? 0 : 1).replaceAll('.', ',')} t',
+      atMeters: w.atMeters,
+      point: w.point,
+      violates: over && (w.violates || bridge),
+      tight: !over && (w.violates || w.tight) || (!over && single - t.weight < 1.0),
+      onBridge: w.onBridge,
+      single: single,
+    );
+  }
   add('maxaxleload', WarningType.axleLoad, parseTonnes, t.axleLoad);
   // Zákaz předjíždění nákladních vozidel (i časově omezený, např. „no @ (06:00-22:00)“).
   final ov = tags['overtaking:hgv'], ovc = tags['overtaking:hgv:conditional'];

@@ -18,6 +18,7 @@ import '../navigation/nav_engine.dart';
 import '../navigation/simulator.dart';
 import '../navigation/voice_guide.dart';
 import '../services/geocoding.dart';
+import '../services/restriction_map.dart';
 import '../services/restrictions.dart';
 import '../services/road_via.dart';
 import '../services/lanes.dart';
@@ -166,6 +167,11 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   List<Place> _results = [];
   SavedPlaces _saved = SavedPlaces([]);
 
+  // Zakázané / úzké ulice pro kamion v mapě (načítá se po čtvercích kolem polohy a pohledu).
+  final _restr = RestrictionMap();
+  bool _restrBusy = false;
+  LatLng? _restrAt;
+
   // „Naučit trasu“: nahrávaná jízda (null = nenahrává se) a naučené trasy k cílům.
   LearnedRoutes _learned = LearnedRoutes([]);
   List<LatLng>? _rec;
@@ -295,7 +301,10 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     final at = p.timestamp; // čas měření, ne čas doručení (poloha z mezipaměti bývá stará)
     final acc = p.accuracy.isFinite && p.accuracy > 0 ? p.accuracy : 50.0;
     var speed = p.speed.isFinite && p.speed > 0 ? p.speed : 0.0;
-    double? heading = p.heading.isFinite && p.heading >= 0 ? p.heading : null;
+    // Kurz 0 bez rychlosti = žádný kurz (web, některé telefony), ne „na sever“.
+    double? heading = p.heading.isFinite && (p.heading > 0 || (p.heading == 0 && p.speed > 0))
+        ? p.heading
+        : null;
     // Některé telefony (a web) rychlost / kurz občas nedají: dopočet z posledních dvou poloh –
     // jen z přesných poloh a jen když posun je větší než chyba GPS (stojící kamion „nejede“),
     // a nejvýš 40 m/s (skok polohy z mezipaměti / v tunelu není rychlost).
@@ -389,6 +398,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     }
     _odometer(pos, speed);
     if (_route == null && _freeDrive) _aheadTick(speed);
+    _loadRestr(pos);
     // Obrazovka se překreslí jednou za polohu z GPS (ne 60–120× za sekundu při animaci mapy).
     if (mounted) setState(() {});
     _animateTo();
@@ -408,14 +418,16 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     }
   }
 
-  /// Bez cíle: jednou za 2 km (nebo 90 s) najít omezení na silnici před námi; mezi tím odečítat ujeté.
+  /// Bez cíle: jednou za 2 km (nebo 90 s; když zatím nic, po 500 m / 30 s) najít omezení na silnici
+  /// před námi; mezi tím odečítat ujeté.
   void _aheadTick(double speedKmh) {
     _ahead.removeWhere((a) => a.remaining(_odo) < -30);
     _aheadVoice();
     if (_aheadBusy || speedKmh < 15 || _track.length < 3) return;
     if (const Distance()(_track.first, _track.last) < 80) return;
-    if (_odo - _aheadScanOdo < 2000 &&
-        DateTime.now().difference(_aheadScanAt) < const Duration(seconds: 90)) {
+    // Dokud dopředu nic není (třeba po odbočení na jinou silnici), hledat častěji.
+    final (stepM, stepS) = _ahead.isEmpty ? (500.0, 30) : (2000.0, 90);
+    if (_odo - _aheadScanOdo < stepM && DateTime.now().difference(_aheadScanAt) < Duration(seconds: stepS)) {
       return;
     }
     _aheadBusy = true;
@@ -452,11 +464,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       final d = a.remaining(_odo);
       if (d < 50) continue;
       final w = a.w;
-      String what() {
-        if (w.type == WarningType.noHgv) return w.spokenName;
-        final unit = w.type == WarningType.weight || w.type == WarningType.axleLoad ? 'tun' : 'metru';
-        return '${w.spokenName} ${w.value!.toStringAsFixed(1).replaceAll('.', ',')} $unit';
-      }
+      String what() => w.type == WarningType.noHgv ? w.spokenName : w.spokenValue;
 
       if (found && w.violates && d > 1500 && _aheadSpoken.add('${a.key}:far')) {
         final road = RegExp(r'^\d+$').hasMatch(a.road) ? 'silnici ${a.road}' : a.road;
@@ -485,7 +493,12 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
             ),
           ),
         for (final (i, a) in _ahead.take(n).indexed)
-          WarningCard(key: i == 0 ? _cardKey : null, w: a.w, distance: math.max(0, a.remaining(_odo))),
+          WarningCard(
+            key: i == 0 ? _cardKey : null,
+            w: a.w,
+            distance: math.max(0, a.remaining(_odo)),
+            onTap: () => _showOnMap(a.w.point),
+          ),
       ],
     ),
   );
@@ -653,7 +666,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     try {
       _lineRoute = null;
       _meHidden = false;
-      for (final id in ['alts', 'route', 'routehead', 'warn', 'parking', 'dest', 'me']) {
+      for (final id in ['restr', 'restrpt', 'alts', 'route', 'routehead', 'warn', 'parking', 'dest', 'me']) {
         await m.addGeoJsonSource(id, empty);
       }
       await m.addLineLayer(
@@ -721,6 +734,32 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         ),
         belowLayerId: 'route-casing',
       );
+      // Zakázané / úzké ulice: červeně co vozidlo překračuje, oranžově těsně / jen dopravní obsluha.
+      await m.addLineLayer(
+        'restr',
+        'restr-line',
+        const ml.LineLayerProperties(
+          lineColor: [
+            'case',
+            ['get', 'bad'],
+            '#E53935',
+            '#FB8C00',
+          ],
+          lineWidth: [
+            'interpolate',
+            ['linear'],
+            ['zoom'],
+            11,
+            3,
+            16,
+            9,
+          ],
+          lineOpacity: 0.85,
+          lineCap: 'round',
+          lineJoin: 'round',
+        ),
+        belowLayerId: 'alts-casing',
+      );
       await m.addCircleLayer(
         'dest',
         'dest-circle',
@@ -761,6 +800,50 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
           textAllowOverlap: true,
           textIgnorePlacement: true,
         ),
+      );
+      // Značky omezení: přes sebe se nekreslí (mapa skryje, co by se překrývalo; červené mají přednost).
+      await m.addImage('restr-bad', await _signPng(const Color(0xFFD50000)));
+      await m.addImage('restr-tight', await _signPng(const Color(0xFFFB8C00)));
+      await m.addSymbolLayer(
+        'restrpt',
+        'restrpt-sign',
+        const ml.SymbolLayerProperties(
+          iconImage: [
+            'case',
+            ['get', 'bad'],
+            'restr-bad',
+            'restr-tight',
+          ],
+          iconSize: [
+            'interpolate',
+            ['linear'],
+            ['zoom'],
+            12,
+            0.38,
+            16,
+            0.55,
+          ],
+          iconPitchAlignment: 'viewport',
+          textField: ['get', 'l'],
+          textSize: [
+            'interpolate',
+            ['linear'],
+            ['zoom'],
+            12,
+            9,
+            16,
+            12,
+          ],
+          textColor: '#000000',
+          textFont: ['Noto Sans Bold'],
+          symbolSortKey: [
+            'case',
+            ['get', 'bad'],
+            0,
+            1,
+          ],
+        ),
+        minzoom: 12,
       );
       await m.addCircleLayer(
         'warn',
@@ -819,6 +902,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       );
       _styleReady = true;
       await _syncLayers();
+      await _syncRestr();
       await _applyInsets();
       if (_follow) _applyCamera();
     } catch (e) {
@@ -1031,6 +1115,25 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     }
   }
 
+  /// Kruhová značka omezení (bílá s barevným okrajem) pro mapu.
+  static Future<Uint8List> _signPng(Color ring) async {
+    const size = 64.0;
+    final rec = ui.PictureRecorder();
+    final c = Canvas(rec);
+    c.drawCircle(const Offset(size / 2, size / 2), size / 2 - 1, Paint()..color = Colors.white);
+    c.drawCircle(
+      const Offset(size / 2, size / 2),
+      size / 2 - 5,
+      Paint()
+        ..color = ring
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 8,
+    );
+    final img = await rec.endRecording().toImage(size.toInt(), size.toInt());
+    final data = await img.toByteData(format: ui.ImageByteFormat.png);
+    return data!.buffer.asUint8List();
+  }
+
   static Future<Uint8List> _arrowPng() async {
     const size = 120.0;
     final rec = ui.PictureRecorder();
@@ -1124,9 +1227,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
             'Zákaz předjíždění nákladních vozidel${w.note != null ? ', ${w.note!.replaceAll('–', ' až ').replaceAll(' h', ' hodin')}' : ''}.',
           );
         } else {
-          final unit = w.type == WarningType.weight || w.type == WarningType.axleLoad ? 'tun' : 'metru';
-          final v = w.value!.toStringAsFixed(1).replaceAll('.', ',');
-          _say('Pozor! $dist ${w.spokenName} $v $unit. Vaše vozidlo limit překračuje.');
+          _say('Pozor! $dist ${w.spokenValue}. Vaše vozidlo limit překračuje.');
         }
       }
     }
@@ -1221,6 +1322,65 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       if (mounted) setState(() => _routing = false);
     }
     if (retry && mounted) await _computeRoute(reroute: reroute);
+  }
+
+  // ------------------------------------------------------------ zakázané ulice v mapě
+
+  /// Načte omezení kolem [c] (po ~1,5 km pohybu / posunu mapy) a překreslí je.
+  Future<void> _loadRestr(LatLng c) async {
+    if (!_settings.showRestrictions || _restrBusy) return;
+    final last = _restrAt;
+    if (last != null && const Distance()(last, c) < 1500) return;
+    _restrBusy = true;
+    _restrAt = c;
+    try {
+      if (await _restr.loadAround(c)) await _syncRestr();
+    } catch (_) {
+      _restrAt = null; // zkusit znovu příště
+    } finally {
+      _restrBusy = false;
+    }
+  }
+
+  Future<void> _syncRestr() async {
+    final m = _map;
+    if (m == null || !_styleReady) return;
+    final (lines, points) = restrictionGeoJson(
+      _settings.showRestrictions ? _restr.ways(_settings.profile, delivery: _settings.delivery) : const [],
+    );
+    try {
+      await m.setGeoJsonSource('restr', lines);
+      await m.setGeoJsonSource('restrpt', points);
+    } catch (_) {}
+  }
+
+  /// Klepnutí na kartu výstrahy: mapa ukáže místo (most…) spolu s vlastní polohou.
+  Future<void> _showOnMap(LatLng p) async {
+    final m = _map;
+    if (m == null) return;
+    setState(() => _follow = false);
+    final me = _pos ?? p;
+    try {
+      await m.updateContentInsets(EdgeInsets.zero, false);
+      await m.moveCamera(ml.CameraUpdate.tiltTo(0));
+      await m.moveCamera(ml.CameraUpdate.bearingTo(0));
+      await m.animateCamera(
+        ml.CameraUpdate.newLatLngBounds(
+          ml.LatLngBounds(
+            southwest: ml.LatLng(math.min(me.latitude, p.latitude), math.min(me.longitude, p.longitude)),
+            northeast: ml.LatLng(math.max(me.latitude, p.latitude), math.max(me.longitude, p.longitude)),
+          ),
+          left: 70,
+          right: 140,
+          top: 220,
+          bottom: 260,
+        ),
+      );
+    } catch (_) {}
+    _meHidden = false;
+    _updateMeLayer(); // šipka vlastní polohy v mapě (pevná uprostřed teď není)
+    _restrAt = null;
+    _loadRestr(p);
   }
 
   // ------------------------------------------------------------ naučené trasy
@@ -2630,6 +2790,14 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                           () => go(_chooseLayer),
                           on: _settings.mapLayer != MapLayer.map,
                         ),
+                        quick(Icons.block, 'Zákazy', () {
+                          setState(() => _settings.showRestrictions = !_settings.showRestrictions);
+                          _settings.save();
+                          _restrAt = null;
+                          _syncRestr();
+                          if (_pos != null) _loadRestr(_pos!);
+                          setSheet(() {});
+                        }, on: _settings.showRestrictions),
                         quick(Icons.mic, 'Povely', () => go(() => _handleVoice('co umíš'))),
                         quick(
                           _rec == null ? Icons.school : Icons.save,
@@ -3059,6 +3227,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     );
     if (changed == true) {
       setState(() {});
+      _syncRestr(); // jiné vozidlo → jiné ulice jsou pro něj zakázané
       if (_dest != null) _computeRoute(reroute: _navigating);
     }
   }
@@ -3114,6 +3283,12 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     initialCameraPosition: const ml.CameraPosition(target: ml.LatLng(49.8, 15.5), zoom: 6),
                     onMapCreated: (c) => _map = c,
                     onStyleLoadedCallback: _onStyleLoaded,
+                    // Prohlížení mapy: zakázané ulice i tam, kam se díváte (od přiblížení na město).
+                    onCameraIdle: () {
+                      final cam = _map?.cameraPosition;
+                      if (cam == null || _follow || cam.zoom < 11) return;
+                      _loadRestr(LatLng(cam.target.latitude, cam.target.longitude));
+                    },
                     trackCameraPosition: true,
                     compassEnabled: false,
                     rotateGesturesEnabled: true,
@@ -3433,6 +3608,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
               key: i == 0 ? _cardKey : null,
               w: w,
               distance: math.max(0, w.atMeters - nav.traveled),
+              onTap: () => _showOnMap(w.point),
             ),
         ],
       ),
@@ -3791,6 +3967,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                           onSelected: (v) {
                             setState(() => _settings.delivery = v);
                             _settings.save();
+                            _syncRestr();
                             _excluded.clear();
                             _computeRoute();
                           },
