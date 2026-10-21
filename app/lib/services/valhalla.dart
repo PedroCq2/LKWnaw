@@ -44,6 +44,7 @@ class ValhallaClient {
     bool delivery = false,
     List<LatLng> exclude = const [],
     List<ViaPoint> via = const [],
+    RouteMode mode = RouteMode.recommended,
   }) async => (await _request(
     via: via,
     from: from,
@@ -52,9 +53,11 @@ class ValhallaClient {
     heading: heading,
     delivery: delivery,
     exclude: exclude,
+    extra: mode.costing,
   )).first;
 
-  /// Několik variant: nejrychlejší + až 3 alternativy, bez dálnic, bez mýta, nejkratší (bez duplicit).
+  /// Několik variant: hlavní podle stylu trasy [mode] + až 3 alternativy, bez dálnic, bez mýta,
+  /// nejkratší (bez duplicit), seřazené podle stylu.
   Future<List<RouteOption>> routeOptions({
     required LatLng from,
     required LatLng to,
@@ -63,6 +66,7 @@ class ValhallaClient {
     bool delivery = false,
     List<LatLng> exclude = const [],
     List<ViaPoint> via = const [],
+    RouteMode mode = RouteMode.recommended,
   }) async {
     Future<List<TruckRoute>> safe(Future<List<TruckRoute>> f) => f.catchError((_) => <TruckRoute>[]);
     final main = _request(
@@ -75,15 +79,20 @@ class ValhallaClient {
       via: via,
       // Valhalla počítá alternativy jen pro trasu bez zastávek a průjezdů.
       alternates: via.isEmpty ? 3 : 0,
+      extra: mode.costing,
     );
-    String alt(int i) => i == 0 ? 'Nejrychlejší' : (i == 1 ? 'Alternativa' : 'Alternativa $i');
+    final first = switch (mode) {
+      RouteMode.recommended || RouteMode.fastest => 'Nejrychlejší',
+      _ => mode.label,
+    };
+    String alt(int i) => i == 0 ? first : (i == 1 ? 'Alternativa' : 'Alternativa $i');
     // Zásobování: výpočet je náročnější (obec vykládky) → jen hlavní trasa a její alternativy.
     if (delivery) {
       final out = <RouteOption>[];
       for (final (i, r) in (await main).indexed) {
         out.add(RouteOption(alt(i), r));
       }
-      return _rank(out, profile);
+      return _byMode(out, profile, mode);
     }
     final noToll = safe(
       _request(
@@ -145,13 +154,40 @@ class ValhallaClient {
     for (final r in res[2].take(1)) {
       add('Nejkratší', r);
     }
-    return _rank(out, profile);
+    return _byMode(out, profile, mode);
+  }
+
+  /// Pořadí variant podle stylu trasy: doporučená / úsporná / mimo vesnice podle ekonomické doby
+  /// kamionu, hlavně dálnice – první ta po dálnici, ostatní styly mají svou trasu první už z Valhally.
+  Future<List<RouteOption>> _byMode(List<RouteOption> opts, TruckProfile profile, RouteMode mode) async {
+    switch (mode) {
+      case RouteMode.recommended:
+        return _rank(opts, profile);
+      case RouteMode.eco:
+      case RouteMode.mainRoads:
+        return _rank(opts, profile, tolerance: 1.3, label: mode.label);
+      case RouteMode.highways:
+        final hw = opts.indexWhere((o) => o.route.hasHighway);
+        if (hw <= 0) return opts;
+        return [
+          RouteOption(mode.label, opts[hw].route),
+          for (final (i, o) in opts.indexed)
+            if (i != hw) o,
+        ];
+      default:
+        return opts;
+    }
   }
 
   /// Pořadí variant: první je ta nejlepší pro kamion (ekonomická doba – třídy silnic, odbočky,
   /// vesnice), pokud není o víc než 15 % pomalejší než nejrychlejší. Nejrychlejší zůstává v nabídce.
   /// (Veltěže → Čertousy: Louny – D7 – I/16 místo III. tříd přes Slavětín a Velvary.)
-  Future<List<RouteOption>> _rank(List<RouteOption> opts, TruckProfile profile) async {
+  Future<List<RouteOption>> _rank(
+    List<RouteOption> opts,
+    TruckProfile profile, {
+    double tolerance = 1.15,
+    String label = 'Doporučená',
+  }) async {
     if (opts.length < 2) return opts;
     final scores = await Future.wait([for (final o in opts) _economy(o.route, profile)]);
     var best = 0;
@@ -159,9 +195,9 @@ class ValhallaClient {
       if (scores[i] < scores[best]) best = i;
     }
     if (best == 0 || !scores[best].isFinite) return opts;
-    if (opts[best].route.timeSec > opts.first.route.timeSec * 1.15) return opts;
+    if (opts[best].route.timeSec > opts.first.route.timeSec * tolerance) return opts;
     return [
-      RouteOption('Doporučená', opts[best].route),
+      RouteOption(label, opts[best].route),
       for (final (i, o) in opts.indexed)
         if (i != best) o,
     ];

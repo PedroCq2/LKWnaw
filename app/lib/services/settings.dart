@@ -22,6 +22,7 @@ class AppSettings {
   bool speedSound; // hlasové varování „Pozor, rychlost“
   bool bigText; // větší texty pokynů
   bool showRestrictions; // zakázané / úzké ulice pro kamion v mapě
+  RouteMode routeMode; // styl trasy (doporučená, nejrychlejší, úsporná, po okreskách…)
 
   AppSettings({
     required this.profile,
@@ -39,6 +40,7 @@ class AppSettings {
     this.speedSound = true,
     this.bigText = false,
     this.showRestrictions = true,
+    this.routeMode = RouteMode.recommended,
   });
 
   /// Noční vzhled: ručně, nebo automaticky podle západu/východu Slunce v místě.
@@ -77,6 +79,9 @@ class AppSettings {
       speedSound: p.getBool('speedSound') ?? true,
       bigText: p.getBool('bigText') ?? false,
       showRestrictions: p.getBool('showRestrictions') ?? true,
+      routeMode:
+          RouteMode.values.where((m) => m.name == p.getString('routeMode')).firstOrNull ??
+          RouteMode.recommended,
     );
   }
 
@@ -101,5 +106,6 @@ class AppSettings {
     await p.setBool('speedSound', speedSound);
     await p.setBool('bigText', bigText);
     await p.setBool('showRestrictions', showRestrictions);
+    await p.setString('routeMode', routeMode.name);
   }
 }

@@ -14,6 +14,7 @@ import 'package:speech_to_text/speech_to_text.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../models/route.dart';
+import '../models/truck_profile.dart';
 import '../navigation/nav_engine.dart';
 import '../navigation/simulator.dart';
 import '../navigation/voice_guide.dart';
@@ -28,6 +29,7 @@ import '../services/horizon.dart';
 import '../services/map_style.dart';
 import '../services/problem_reports.dart';
 import '../services/voice_commands.dart';
+import '../services/offline_routing.dart';
 import '../services/offline_search.dart';
 import '../services/ramp_finder.dart';
 import '../services/sign_camera.dart';
@@ -1277,14 +1279,18 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       return;
     }
     setState(() => _routing = true);
+    final started = DateTime.now();
     try {
       final client = ValhallaClient(_settings.valhallaUrl);
       final heading = (reroute || _speedKmh > 5) && from == _pos ? _heading : null;
-      // Při navigaci jen jedna trasa (rychlý přepočet), jinak varianty na výběr.
-      final opts = reroute || _navigating
+      // Hned jedna trasa (jeden dotaz), varianty na výběr se dopočítají na pozadí – trasa je vidět
+      // dřív. Při navigaci jen jedna trasa (rychlý přepočet). Zásobování počítá varianty najednou
+      // (dva výpočty dojezdu v obci vykládky by trvaly dvakrát).
+      final quickFirst = !reroute && !_navigating && !_settings.delivery;
+      final opts = reroute || _navigating || quickFirst
           ? [
               RouteOption(
-                'Trasa',
+                quickFirst ? _settings.routeMode.label : 'Trasa',
                 await client
                     .route(
                       from: from,
@@ -1294,6 +1300,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                       delivery: _settings.delivery,
                       exclude: _excluded,
                       via: _viaPoints(from, to),
+                      mode: _settings.routeMode,
                     )
                     .timeout(const Duration(seconds: 45)),
               ),
@@ -1307,6 +1314,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                   delivery: _settings.delivery,
                   exclude: _excluded,
                   via: _viaPoints(from, to),
+                  mode: _settings.routeMode,
                 )
                 .timeout(const Duration(seconds: 45));
       if (!mounted || opts.isEmpty) return;
@@ -1321,6 +1329,17 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       _extrasLoaded.clear();
       if (!reroute) _dlProgress = null;
       await _selectRoute(0, fit: !reroute && !_navigating);
+      if (quickFirst) _moreOptions(client, from, to, heading);
+      // Pomalý server: v telefonu (stažený balík ČR) je výpočet za zlomek sekundy a i bez signálu.
+      if (!kIsWeb &&
+          !_offlineHint &&
+          !OfflineRouting.instance.ready &&
+          DateTime.now().difference(started) > const Duration(seconds: 4)) {
+        _offlineHint = true;
+        _toast(
+          'Tip: Nastavení aplikace → Trasy v telefonu → Stáhnout ČR. Trasy se pak počítají hned a i bez signálu.',
+        );
+      }
       final miss = opts.first.route.unreachableM;
       if (miss > 60 && !reroute) {
         final msg =
@@ -1412,6 +1431,24 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     _updateMeLayer(); // šipka vlastní polohy v mapě (pevná uprostřed teď není)
     _restrAt = null;
     _loadRestr(p);
+  }
+
+  /// Styl trasy (doporučená, nejrychlejší, úsporná, po okreskách…) – volba a nový výpočet.
+  Future<void> _chooseRouteMode() async {
+    final m = await showModalBottomSheet<RouteMode>(
+      context: context,
+      backgroundColor: Lkw.panel,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: SingleChildScrollView(
+          child: RouteModePicker(selected: _settings.routeMode, onPick: (m) => Navigator.pop(ctx, m)),
+        ),
+      ),
+    );
+    if (m == null || m == _settings.routeMode) return;
+    setState(() => _settings.routeMode = m);
+    await _settings.save();
+    if (_dest != null) await _computeRoute(reroute: _navigating);
   }
 
   // ------------------------------------------------------------ naučené trasy
@@ -1525,6 +1562,55 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         ),
       ),
     );
+  }
+
+  int _optSeq = 0;
+  bool _offlineHint = false;
+
+  /// Varianty trasy na pozadí: první (už zobrazená) zůstane vybraná, pokud ji řidič mezitím nezměnil
+  /// a není mezi variantami lepší „Doporučená“.
+  Future<void> _moreOptions(ValhallaClient client, LatLng from, LatLng to, double? heading) async {
+    final seq = ++_optSeq;
+    final shown = _route;
+    List<RouteOption> opts;
+    try {
+      opts = await client
+          .routeOptions(
+            from: from,
+            to: to,
+            profile: _settings.profile,
+            heading: heading,
+            delivery: _settings.delivery,
+            exclude: _excluded,
+            via: _viaPoints(from, to),
+            mode: _settings.routeMode,
+          )
+          .timeout(const Duration(seconds: 60));
+    } catch (_) {
+      return; // zůstane jedna trasa
+    }
+    if (!mounted || seq != _optSeq || _navigating || shown == null || _route != shown || opts.isEmpty) return;
+    bool same(TruckRoute a, TruckRoute b) =>
+        (a.lengthKm - b.lengthKm).abs() < b.lengthKm * 0.01 + 0.2 &&
+        (a.timeSec - b.timeSec).abs() < b.timeSec * 0.02 + 30;
+    final k = opts.indexWhere((o) => same(o.route, shown));
+    // Zobrazená trasa je mezi variantami: nechat ji (i s načtenými omezeními a limity).
+    if (k >= 0) opts[k] = RouteOption(opts[k].label, shown);
+    final hw = opts.indexWhere((o) => o.route.hasHighway);
+    if (_preferHighway && hw > 0) {
+      final o = opts.removeAt(hw);
+      opts.insert(0, RouteOption('Po dálnici', o.route));
+    }
+    setState(() {
+      _options = opts;
+      _sel = math.max(0, opts.indexWhere((o) => identical(o.route, shown)));
+    });
+    // Lepší první (doporučená) varianta než ta zobrazená → ukázat ji.
+    if (_sel != 0) {
+      await _selectRoute(0);
+    } else {
+      await _syncLayers();
+    }
   }
 
   /// Kde se průjezd (město, dálnice) počítá za projetý: bod, kterým má trasa projet.
@@ -4009,6 +4095,12 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                             _excluded.clear();
                             _computeRoute();
                           },
+                        ),
+                        ActionChip(
+                          avatar: const Icon(Icons.tune, size: 18, color: Lkw.amber),
+                          label: Text('Styl: ${_settings.routeMode.label}'),
+                          visualDensity: VisualDensity.compact,
+                          onPressed: _chooseRouteMode,
                         ),
                         if (_usedLearned case final lr? when !_ignoreLearned)
                           InputChip(

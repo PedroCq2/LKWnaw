@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../models/route.dart';
+import '../models/truck_profile.dart';
 import '../navigation/nav_engine.dart';
 import '../theme.dart';
 
@@ -871,3 +872,46 @@ class ServiceTile extends StatelessWidget {
 }
 
 /// Bod na pruhu průběhu trasy.
+
+/// Výběr stylu trasy (nastavení vozidla i rychlá volba v panelu trasy).
+class RouteModePicker extends StatelessWidget {
+  final RouteMode selected;
+  final ValueChanged<RouteMode> onPick;
+  const RouteModePicker({super.key, required this.selected, required this.onPick});
+
+  static IconData icon(RouteMode m) => switch (m) {
+    RouteMode.recommended => Icons.local_shipping,
+    RouteMode.fastest => Icons.speed,
+    RouteMode.shortest => Icons.straighten,
+    RouteMode.eco => Icons.eco,
+    RouteMode.highways => Icons.add_road,
+    RouteMode.noHighways => Icons.alt_route,
+    RouteMode.mainRoads => Icons.holiday_village,
+  };
+
+  @override
+  Widget build(BuildContext context) => Column(
+    mainAxisSize: MainAxisSize.min,
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      const Padding(
+        padding: EdgeInsets.fromLTRB(16, 14, 16, 4),
+        child: Text(
+          'STYL TRASY',
+          style: TextStyle(color: Lkw.amber, fontWeight: FontWeight.w800),
+        ),
+      ),
+      for (final m in RouteMode.values)
+        ListTile(
+          leading: Icon(icon(m), color: m == selected ? Lkw.amber : Lkw.muted),
+          title: Text(
+            m.label,
+            style: TextStyle(fontWeight: m == selected ? FontWeight.w800 : FontWeight.w600),
+          ),
+          subtitle: Text(m.hint, style: const TextStyle(color: Lkw.muted)),
+          trailing: m == selected ? const Icon(Icons.check, color: Lkw.amber) : null,
+          onTap: () => onPick(m),
+        ),
+    ],
+  );
+}

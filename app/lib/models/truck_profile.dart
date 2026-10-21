@@ -102,3 +102,27 @@ class TruckProfile {
   String encode() => jsonEncode(toJson());
   static TruckProfile decode(String s) => TruckProfile.fromJson(jsonDecode(s) as Map<String, dynamic>);
 }
+
+/// Styl trasy (Vozidlo a trasa → Styl trasy): jak navigace vybírá a řadí trasy.
+enum RouteMode {
+  recommended('Doporučená', 'Rychlá a po hlavních silnicích, bez zbytečných kliček přes vesnice'),
+  fastest('Nejrychlejší', 'Co nejdřív v cíli'),
+  shortest('Nejkratší', 'Co nejméně kilometrů, i po menších silnicích'),
+  eco('Úsporná', 'Plynulá jízda: méně odbočování, rozjezdů a průjezdů obcemi, rychlost do 80'),
+  highways('Hlavně dálnice', 'Po dálnici, kudy to jen jde'),
+  noHighways('Po okreskách', 'Bez dálnic a mýta – po silnicích I. a II. třídy'),
+  mainRoads('Mimo vesnice', 'Jen po hlavních silnicích, co nejméně obcí a úzkých silnic');
+
+  final String label, hint;
+  const RouteMode(this.label, this.hint);
+
+  /// Úpravy kamionového profilu Valhally pro tento styl.
+  Map<String, dynamic> get costing => switch (this) {
+    RouteMode.shortest => {'shortest': true},
+    RouteMode.eco => {'top_speed': 80, 'maneuver_penalty': 20, 'low_class_penalty': 240},
+    RouteMode.highways => {'use_highways': 1.0, 'use_tolls': 1.0, 'low_class_penalty': 300},
+    RouteMode.noHighways => {'use_highways': 0.0, 'use_tolls': 0.0},
+    RouteMode.mainRoads => {'low_class_penalty': 600, 'maneuver_penalty': 15, 'service_penalty': 300},
+    _ => const {},
+  };
+}

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/truck_profile.dart';
 import '../services/settings.dart';
+import '../widgets/nav_widgets.dart';
 
 class ProfileScreen extends StatefulWidget {
   final AppSettings settings;
@@ -15,6 +16,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   final _form = GlobalKey<FormState>();
   late TruckProfile p = TruckProfile.fromJson(widget.settings.profile.toJson());
   late bool _delivery = widget.settings.delivery;
+  late RouteMode _mode = widget.settings.routeMode;
 
   Widget _num(
     String label,
@@ -45,7 +47,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
     _form.currentState!.save();
     widget.settings
       ..profile = p
-      ..delivery = _delivery;
+      ..delivery = _delivery
+      ..routeMode = _mode;
     await widget.settings.save();
     if (mounted) Navigator.pop(context, true);
   }
@@ -126,6 +129,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
               value: p.hazmat,
               onChanged: (v) => setState(() => p.hazmat = v),
             ),
+            RouteModePicker(selected: _mode, onPick: (m) => setState(() => _mode = m)),
+            const Divider(),
             SwitchListTile(
               title: const Text('Zásobování (dopravní obsluha)'),
               subtitle: const Text(
