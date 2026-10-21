@@ -129,8 +129,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
             SwitchListTile(
               title: const Text('Zásobování (dopravní obsluha)'),
               subtitle: const Text(
-                'Zákazy nad X t (mimo dopravní obsluhu) neplatí jen v obci vykládky (např. celé Teplice), '
-                'cestou tam se dodržují. Výška, šířka, délka, náprava a mosty se hlídají vždy.',
+                'Zákazy nad X t (mimo dopravní obsluhu, od 6 t) neplatí jen v obci vykládky (např. celé '
+                'Teplice), cestou tam se dodržují. Do ulic s omezením 3,5 t jen když je v nich cíl. '
+                'Výška, šířka, délka, náprava a mosty se hlídají vždy.',
               ),
               value: _delivery,
               onChanged: (v) => setState(() => _delivery = v),

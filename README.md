@@ -24,8 +24,9 @@ Flutter aplikace pro navigaci nákladních vozidel nad OpenStreetMap a routing e
 - **POI pro kamiony** – truckparky a odpočívky (kapacita, placené, hlídané, WC, sprchy…),
   truck servisy a pneuservisy, čerpací stanice pro kamiony (AdBlue, HGV nafta).
 - **Zásobování** (přepínač u trasy) – povolí vjezd do zón se zákazem nad X t
-  („mimo dopravní obsluhu“), výška, šířka, délka, náprava a ADR platí dál; mostům
-  s nižší nosností se trasa automaticky vyhne.
+  („mimo dopravní obsluhu“, od 6 t, nebo s výjimkou zapsanou v mapě) v obci vykládky; do ulic
+  s omezením 3,5 t jen tehdy, když v nich leží cíl. Výška, šířka, délka, náprava a ADR platí dál;
+  mostům s nižší nosností se trasa automaticky vyhne.
 - **Uložená místa s vjezdem pro kamiony** – u firmy zvlášť adresa a brána (dlouhé podržení
   na mapě) + poznámka („Příjezd zezadu, vrátnice u rampy 12“), přečte se před cílem.
 - **POI podél trasy** – truckparky/pumpy/servisy seřazené podle dojezdu (km, min, odbočka

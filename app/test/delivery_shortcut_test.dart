@@ -75,4 +75,26 @@ void main() {
       contains('šířka'),
     );
   });
+
+  test('ulička 3,5 t cestou k cíli: jen s výjimkou zapsanou v mapě; zóna 12 t smí', () {
+    final edges = [e(1), e(2, cls: 'residential', m: 300), e(3, m: 400)];
+    expect(
+      shortcutProblem(edges, {
+        2: {'maxweight': '3.5'},
+      }, p),
+      contains('hmotnost'),
+    );
+    expect(
+      shortcutProblem(edges, {
+        2: {'maxweight': '3.5', 'maxweight:conditional': 'none @ delivery'},
+      }, p),
+      isNull,
+    );
+    expect(
+      shortcutProblem(edges, {
+        2: {'maxweight': '12'},
+      }, p),
+      isNull,
+    );
+  });
 }

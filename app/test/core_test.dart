@@ -181,11 +181,15 @@ void main() {
     expect(m.map((e) => e.atMeters), [100, 2000]);
   });
 
-  test('delivery mode drops weight but keeps dimensions', () {
+  test('delivery mode: weight zones from 6 t exempt, 3.5 t streets not; dimensions kept', () {
     final p = TruckProfile(height: 4.1, weight: 40);
     expect(p.toValhallaCosting()['weight'], 40);
     final d = p.toValhallaCosting(delivery: true);
-    expect(d['weight'], 0);
+    // 5,9 t: zóna „12 t mimo dopravní obsluhu“ průjezdná, ulička „3,5 t“ ne.
+    expect(d['weight'], lessThan(TruckProfile.deliveryZoneMinT));
+    expect(d['weight'], greaterThan(3.5));
+    // Poslední kousek k cíli, který leží v takové uličce.
+    expect(p.toValhallaCosting(delivery: true, anyWeight: true)['weight'], 0);
     expect(d['height'], 4.1);
     expect(d['length'], p.length);
     expect(d['axle_load'], p.axleLoad);

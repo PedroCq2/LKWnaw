@@ -181,8 +181,14 @@ List<RouteWarning> _fromTags(Map<String, dynamic> tags, double at, LatLng p, Tru
     final v = parse(raw);
     if (v.isNaN || v <= 0) return;
     var violates = truckValue > v + 1e-6;
-    // Zásobování: zóny se zákazem nad X t jsou pro dopravní obsluhu průjezdné, mosty ne.
-    if (delivery && type == WarningType.weight && !bridge) violates = false;
+    // Zásobování: zóny se zákazem nad X t (od 6 t, nebo s výjimkou zapsanou v mapě) jsou pro dopravní
+    // obsluhu průjezdné; mosty a uličky „3,5 t“ ne.
+    if (delivery &&
+        type == WarningType.weight &&
+        !bridge &&
+        (v >= TruckProfile.deliveryZoneMinT || deliveryExempt(tags))) {
+      violates = false;
+    }
     final margin = type == WarningType.weight || type == WarningType.axleLoad ? 1.0 : 0.3;
     final tight = !violates && v - truckValue < margin;
     out.add(
@@ -225,6 +231,18 @@ List<RouteWarning> _fromTags(Map<String, dynamic> tags, double at, LatLng p, Tru
     );
   }
   return out;
+}
+
+/// Výjimka pro dopravní obsluhu zapsaná v mapě: `maxweight:conditional=none @ delivery`,
+/// `hgv=destination` („mimo dopravní obsluhu“) apod.
+bool deliveryExempt(Map<String, dynamic> t) {
+  final c = [
+    for (final k in const ['maxweight:conditional', 'maxweightrating:conditional', 'hgv:conditional'])
+      t[k] ?? '',
+  ].join(' ');
+  if (RegExp(r'none\s*@\s*\(?\s*(delivery|destination)').hasMatch(c)) return true;
+  return const {'delivery', 'destination'}.contains(t['hgv']) ||
+      const {'delivery', 'destination'}.contains(t['goods']);
 }
 
 /// "4.1", "4.1 m", "4,1m", "13'6\"" → metry; jinak NaN.

@@ -29,7 +29,8 @@ KEEP = set(RESTR_KEYS) | {'highway', 'bridge', 'tunnel', 'name', 'ref', 'destina
                           'supervised', 'surveillance', 'fenced', 'barrier', 'toilets', 'shower', 'showers',
                           'restaurant', 'food', 'fuel:adblue', 'fuel:HGV_diesel', 'opening_hours', 'brand',
                           'operator', 'access', 'motorroad', 'motor_vehicle', 'vehicle', 'goods',
-                          'hgv:conditional', 'turn:lanes', 'turn:lanes:forward', 'turn:lanes:backward',
+                          'hgv:conditional', 'maxweight:conditional', 'turn:lanes', 'turn:lanes:forward',
+                          'turn:lanes:backward',
                           'destination:lanes', 'destination:ref:lanes', 'destination:forward', 'oneway',
                           'lanes', 'junction:ref'}
 # Jízdní pruhy a směry na tabulích (pokyny „držte se vpravo, směr Brno“ i bez internetu).

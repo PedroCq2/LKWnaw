@@ -358,6 +358,7 @@ class ValhallaClient {
       required bool exempt,
       double? head,
       int alt = 0,
+      bool anyWeight = false,
     }) async {
       if (deadline != null && DateTime.now().isAfter(deadline)) throw TimeoutException('zásobování');
       return _routeData(
@@ -367,6 +368,7 @@ class ValhallaClient {
         profile: profile,
         heading: head,
         weightExempt: exempt,
+        anyWeight: anyWeight,
         exclude: exclude,
         alternates: alt,
         extra: extra,
@@ -424,6 +426,8 @@ class ValhallaClient {
         }
         if (leg == null) {
           leg = await raw(a, b, mid, exempt: true, head: head);
+          // Cíl v ulici s omezením do 3,5 t: jen tehdy smí trasa do ní.
+          if (!_reaches(leg, b)) leg = await raw(a, b, mid, exempt: true, head: head, anyWeight: true);
           exemptWhole.add(k);
         }
         if (legCount == 1) alternatesData = (leg['alternates'] as List?) ?? const [];
@@ -467,6 +471,17 @@ class ValhallaClient {
               exempt: true,
               head: _endHeading(endShape),
             );
+            // Cíl v ulici s omezením do 3,5 t: poslední kousek i přes ni (jen tam, kde je cíl).
+            if (!_reaches(post[k]!, pts[k + 1])) {
+              post[k] = await raw(
+                endShape.last,
+                pts[k + 1],
+                const [],
+                exempt: true,
+                head: _endHeading(endShape),
+                anyWeight: true,
+              );
+            }
           }
         } catch (_) {}
       }
@@ -556,7 +571,9 @@ class ValhallaClient {
       final r = parseAll(full);
       final end = r.first.shape.last;
       if (via.isNotEmpty || d(end, to) < 150) return r;
-      final postTrip = (await raw(end, to, const [], exempt: true))['trip'] as Map<String, dynamic>;
+      var post = await raw(end, to, const [], exempt: true);
+      if (!_reaches(post, to)) post = await raw(end, to, const [], exempt: true, anyWeight: true);
+      final postTrip = post['trip'] as Map<String, dynamic>;
       final postKm = ((postTrip['summary'] as Map)['length'] as num).toDouble();
       if (postKm < 15) {
         return [parseTrip(_joinTrips(full['trip'] as Map<String, dynamic>, postTrip))..deliveryKm = postKm];
@@ -690,6 +707,13 @@ class ValhallaClient {
     final headEnd = decodePolyline6(((headTrip['legs'] as List).last as Map)['shape'] as String).last;
     if (d(headEnd, x) > 60) return null;
     return _joinTrips(headTrip, carTrip);
+  }
+
+  /// Dojede trasa (odpověď Valhally) až k [b]? (Ne k přichycenému místu jinde.)
+  static bool _reaches(Map<String, dynamic> data, LatLng b) {
+    final legs = (data['trip'] as Map)['legs'] as List;
+    final end = decodePolyline6((legs.last as Map)['shape'] as String).last;
+    return const Distance()(end, b) < 150;
   }
 
   /// Směr jízdy na konci tvaru trasy (stupně), pro navázání další části bez otáčení.
@@ -903,6 +927,7 @@ class ValhallaClient {
     required TruckProfile profile,
     double? heading,
     bool weightExempt = false,
+    bool anyWeight = false,
     List<LatLng> exclude = const [],
     int alternates = 0,
     Map<String, dynamic> extra = const {},
@@ -921,7 +946,7 @@ class ValhallaClient {
       ],
       'costing': 'truck',
       'costing_options': {
-        'truck': {...profile.toValhallaCosting(delivery: weightExempt), ...extra},
+        'truck': {...profile.toValhallaCosting(delivery: weightExempt, anyWeight: anyWeight), ...extra},
       },
       if (alternates > 0) 'alternates': alternates,
       if (exclude.isNotEmpty)

@@ -1124,11 +1124,21 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         await enrichManeuvers(r);
         if (mounted) setState(() {});
       }
-      // Zásobování: trasa nesmí přes most s nižší nosností → vyhnout se mu a přepočítat.
-      final bridges = w.where((x) => x.onBridge && x.violates).toList();
+      // Zásobování: trasa nesmí přes most s nižší nosností ani uličkou „3,5 t“ (kromě té, kde je cíl)
+      // → vyhnout se a přepočítat.
+      final total = r.lengthKm * 1000;
+      final bridges = w
+          .where(
+            (x) => x.violates && x.type == WarningType.weight && (x.onBridge || x.atMeters < total - 400),
+          )
+          .toList();
       if (_settings.delivery && bridges.isNotEmpty && _excluded.length < 10) {
         _excluded.addAll(bridges.map((b) => b.point));
-        _toast('Vyhýbám se mostu s nosností ${bridges.first.label} – přepočítávám trasu.');
+        _toast(
+          bridges.first.onBridge
+              ? 'Vyhýbám se mostu s nosností ${bridges.first.label} – přepočítávám trasu.'
+              : 'Vyhýbám se ulici s omezením ${bridges.first.label} – přepočítávám trasu.',
+        );
         await _computeRoute(reroute: _navigating);
         return;
       }

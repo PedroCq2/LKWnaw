@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import '../models/truck_profile.dart';
 import 'restrictions.dart';
 
@@ -9,7 +11,8 @@ const _okValues = {'yes', 'designated', 'delivery', 'destination'};
 
 /// Smí kamion při zásobování projet krátkou trasou?
 /// - rozměry a náprava se dodrží vždy (výška, šířka, délka, zatížení nápravy),
-/// - hmotnost „mimo dopravní obsluhu“ a hgv=delivery v obci vykládky platí pro zásobování,
+/// - hmotnost „mimo dopravní obsluhu“ (zóny od 6 t, nebo výjimka zapsaná v mapě) a hgv=delivery
+///   v obci vykládky platí pro zásobování; ulička s omezením 3,5 t bez výjimky ne,
 /// - zákaz vjezdu kamionů (hgv=no, soukromé…) ne,
 /// - žádné příjezdy k domům a uličky (kromě posledních metrů k rampě).
 /// [tags] = štítky cest podle id. Vrací null = smí, jinak důvod.
@@ -18,6 +21,7 @@ String? shortcutProblem(List<ShortcutEdge> edges, Map<int, Map<String, dynamic>>
   var at = 0.0;
   for (final e in edges) {
     final nearEnd = total - at < 350;
+    final atEnd = total - at < 150; // ulice / dvůr, kde je cíl
     at += e.lengthM;
     if (!nearEnd && const {'driveway', 'alley', 'parking_aisle', 'track', 'living_street'}.contains(e.use)) {
       return 'úzká ulička';
@@ -32,6 +36,10 @@ String? shortcutProblem(List<ShortcutEdge> edges, Map<int, Map<String, dynamic>>
     if (num('maxlength', parseMeters) < p.length) return 'délka ${t['maxlength']}';
     if (num('maxaxleload', parseTonnes) < p.axleLoad) return 'náprava ${t['maxaxleload']}';
     if (num('maxweight:physical', parseTonnes) < p.weight) return 'nosnost ${t['maxweight:physical']}';
+    final w = num('maxweight', parseTonnes);
+    if (!atEnd && w < math.min(p.weight, TruckProfile.deliveryZoneMinT) && !deliveryExempt(t)) {
+      return 'hmotnost ${t['maxweight']}';
+    }
     final hgv = t['hgv'] as String?;
     if (_okValues.contains(hgv)) continue;
     if (_noValues.contains(hgv)) return 'zákaz vjezdu kamionů';

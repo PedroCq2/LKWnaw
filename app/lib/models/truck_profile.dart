@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 /// Parametry vozidla předávané do Valhalla `truck` costingu.
 class TruckProfile {
@@ -28,13 +29,18 @@ class TruckProfile {
     this.avoidUnpaved = true,
   });
 
-  /// [delivery] = zásobování: hmotnostní zóny („mimo dopravní obsluhu“) se ignorují,
-  /// výška/šířka/délka/náprava/ADR platí dál. Mosty hlídá aplikace zvlášť.
-  Map<String, dynamic> toValhallaCosting({bool delivery = false}) => {
+  /// Zásobování: zóny „mimo dopravní obsluhu“ bývají od 6 t (Teplice 12 t). Ulice s omezením
+  /// do 3,5 t se jim nepočítají – tam kamion jen když v ní je cíl.
+  static const deliveryZoneMinT = 6.0;
+
+  /// [delivery] = zásobování: hmotnostní zóny od [deliveryZoneMinT] („mimo dopravní obsluhu“) se
+  /// neuplatní, užší ulice s menším limitem ano; [anyWeight] = poslední kousek k cíli v takové ulici.
+  /// Výška/šířka/délka/náprava/ADR platí vždy. Mosty hlídá aplikace zvlášť.
+  Map<String, dynamic> toValhallaCosting({bool delivery = false, bool anyWeight = false}) => {
     'height': height,
     'width': width,
     'length': length,
-    'weight': delivery ? 0.0 : weight,
+    'weight': anyWeight ? 0.0 : (delivery ? math.min(weight, deliveryZoneMinT - 0.1) : weight),
     'axle_load': axleLoad,
     'axle_count': axleCount,
     'hazmat': hazmat,
