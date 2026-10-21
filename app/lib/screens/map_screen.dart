@@ -85,6 +85,41 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   double _aheadScanOdo = -1e9;
   DateTime _aheadScanAt = DateTime(2000);
   final Set<String> _aheadSpoken = {};
+
+  // Pravý sloupec tlačítek (pumpa/odpočívka, mikrofon, nabídka): výška bez okénka služby a jeho výška
+  // – značky omezení vpravo nahoře se s ním nesmí překrývat.
+  final _rightColKey = GlobalKey();
+  final _serviceKey = GlobalKey();
+  double _rightBaseH = 150;
+  double _serviceH = 110;
+  final _cardKey = GlobalKey(); // první karta výstrahy – její skutečná výška
+  double _cardH = warningCardHeight;
+
+  void _measureRight() {
+    final card = _cardKey.currentContext?.size?.height;
+    if (card != null && (card - _cardH).abs() > 2) setState(() => _cardH = card);
+    final col = _rightColKey.currentContext?.size?.height;
+    if (col == null) return;
+    final svc = _serviceKey.currentContext?.size?.height;
+    final base = col - (svc ?? 0);
+    if ((base - _rightBaseH).abs() > 2 || (svc != null && (svc - _serviceH).abs() > 2)) {
+      setState(() {
+        _rightBaseH = base;
+        if (svc != null) _serviceH = svc;
+      });
+    }
+  }
+
+  (int, bool) _warnFit(double free, int want, {double extra = 0}) => warningCardFit(
+    free: free,
+    want: want,
+    rightBase: _rightBaseH,
+    service: _nextService == null ? null : _serviceH,
+    extra: extra,
+    cardH: _cardH,
+  );
+
+  bool _hideService = false;
   bool get _driveView => _navigating || _freeDrive;
   bool get _night => _settings.nightAt(_pos?.latitude, _pos?.longitude);
   Timer? _nightTimer;
@@ -421,7 +456,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     }
   }
 
-  Widget _aheadColumn() => Padding(
+  Widget _aheadColumn(int n) => Padding(
     padding: const EdgeInsets.only(top: 10, right: 8),
     child: Column(
       children: [
@@ -435,7 +470,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
               style: const TextStyle(color: Lkw.muted, fontSize: 12, fontWeight: FontWeight.w700),
             ),
           ),
-        for (final a in _ahead.take(3)) WarningCard(w: a.w, distance: math.max(0, a.remaining(_odo))),
+        for (final (i, a) in _ahead.take(n).indexed)
+          WarningCard(key: i == 0 ? _cardKey : null, w: a.w, distance: math.max(0, a.remaining(_odo))),
       ],
     ),
   );
@@ -2875,6 +2911,9 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     final bottomPad = MediaQuery.of(context).padding.bottom;
     final pip = Pip.instance.active.value;
     final panelH = pip || route == null ? 0.0 : (_navigating ? 116.0 : 252.0);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _measureRight();
+    });
 
     return Scaffold(
       resizeToAvoidBottomInset: false,
@@ -2966,15 +3005,32 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                           ),
                         ),
                       Expanded(
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Spacer(),
-                            if (_navigating)
-                              _warningsColumn(route, nav)
-                            else if (_freeDrive && route == null && _ahead.isNotEmpty)
-                              _aheadColumn(),
-                          ],
+                        child: LayoutBuilder(
+                          builder: (ctx, c) {
+                            // Místo od tabule po spodní panel; značky se vejdou nad pravá tlačítka.
+                            final free = c.maxHeight - panelH - 16;
+                            final cards = _navigating
+                                ? _warningsAhead(route, nav)
+                                : (_freeDrive && route == null
+                                      ? [for (final a in _ahead) a.w]
+                                      : <RouteWarning>[]);
+                            final (n, hide) = _warnFit(free, cards.length, extra: _navigating ? 0 : 30);
+                            if (hide != _hideService) {
+                              WidgetsBinding.instance.addPostFrameCallback((_) {
+                                if (mounted) setState(() => _hideService = hide);
+                              });
+                            }
+                            return Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Spacer(),
+                                if (_navigating)
+                                  _warningsColumn(route, nav, n)
+                                else if (_freeDrive && route == null && _ahead.isNotEmpty)
+                                  _aheadColumn(n),
+                              ],
+                            );
+                          },
                         ),
                       ),
                     ],
@@ -2985,9 +3041,15 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                   right: 12,
                   bottom: panelH + 16 + bottomPad,
                   child: Column(
+                    key: _rightColKey,
                     children: [
-                      if (_nextService case (final svc, final ahead))
-                        ServiceTile(service: svc, aheadM: ahead, onTap: () => _showService(svc)),
+                      if (_nextService case (final svc, final ahead) when !_hideService)
+                        ServiceTile(
+                          key: _serviceKey,
+                          service: svc,
+                          aheadM: ahead,
+                          onTap: () => _showService(svc),
+                        ),
                       RoundButton(
                         icon: _listening ? Icons.mic : Icons.mic_none,
                         tooltip: 'Hlasový příkaz',
@@ -3148,21 +3210,29 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     );
   }
 
-  Widget _warningsColumn(TruckRoute? route, NavState? nav) {
-    if (route == null || nav == null) return const SizedBox.shrink();
-    final ahead = route.warnings
-        .where((w) {
-          if (!w.relevant) return false;
-          final d = w.atMeters - nav.traveled;
-          return d > -5 && d < (w.type == WarningType.speedCamera ? 1500 : 3000);
-        })
-        .take(3)
-        .toList();
+  /// Omezení a radary na trase před námi (nejbližší první).
+  List<RouteWarning> _warningsAhead(TruckRoute? route, NavState? nav) {
+    if (route == null || nav == null) return const [];
+    return route.warnings.where((w) {
+      if (!w.relevant) return false;
+      final d = w.atMeters - nav.traveled;
+      return d > -5 && d < (w.type == WarningType.speedCamera ? 1500 : 3000);
+    }).toList();
+  }
+
+  /// Značky vpravo: jen [n] nejbližších (nejvýš 2, nepřekrývají tlačítka); po projetí naskočí další.
+  Widget _warningsColumn(TruckRoute? route, NavState? nav, int n) {
+    if (route == null || nav == null || n <= 0) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.only(top: 10, right: 8),
       child: Column(
         children: [
-          for (final w in ahead) WarningCard(w: w, distance: math.max(0, w.atMeters - nav.traveled)),
+          for (final (i, w) in _warningsAhead(route, nav).take(n).indexed)
+            WarningCard(
+              key: i == 0 ? _cardKey : null,
+              w: w,
+              distance: math.max(0, w.atMeters - nav.traveled),
+            ),
         ],
       ),
     );

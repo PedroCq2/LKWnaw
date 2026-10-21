@@ -1,6 +1,12 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:latlong2/latlong.dart';
 import 'package:truck_nav/models/truck_profile.dart';
 import 'package:truck_nav/services/delivery_shortcut.dart';
+import 'package:truck_nav/services/restrictions.dart';
+import 'package:truck_nav/services/valhalla.dart';
 
 void main() {
   final p = TruckProfile(height: 4, width: 2.55, length: 16.5, weight: 40);
@@ -96,5 +102,25 @@ void main() {
       }, p),
       isNull,
     );
+  });
+
+  test('výjimka z hmotnosti jen na úsecích trasy s výjimkou (obec vykládky)', () {
+    final j = jsonDecode(File('test/fixtures/d8.json').readAsStringSync()) as Map<String, dynamic>;
+    final trip = j['trip'] as Map<String, dynamic>;
+    final leg = (trip['legs'] as List).first;
+    // Dvě etapy: první s plnou hmotností, druhá (dojezd) s výjimkou.
+    final r = ValhallaClient.parseTrip({
+      ...trip,
+      'legs': [leg, leg],
+      '_exemptLegs': [false, true],
+    });
+    final half = r.cumulative[r.legShapes[1].$2];
+    expect(r.exemptAt(half / 2), isFalse);
+    expect(r.exemptAt(half + 100), isTrue);
+    // Zóna 6 t: kamion 12 t při zásobování projede jen tam, kde trasa výjimku využívá.
+    final t = TruckProfile(weight: 12);
+    final zone = {'maxweight': '6'};
+    expect(warningsFromTags(zone, 0, const LatLng(50, 14), t, true).single.violates, isFalse);
+    expect(warningsFromTags(zone, 0, const LatLng(50, 14), t, false).single.violates, isTrue);
   });
 }

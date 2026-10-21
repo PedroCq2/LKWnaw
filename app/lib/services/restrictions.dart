@@ -83,7 +83,8 @@ Future<List<RouteWarning>> loadRouteWarnings(
           for (final g in geom) LatLng((g['lat'] as num).toDouble(), (g['lon'] as num).toDouble()),
         ], onRoute: routeWays.contains(id));
         if (on == null) continue;
-        out.addAll(warningsFromTags(tags, on.$1, on.$2, truck, delivery));
+        // Výjimka pro zásobování jen tam, kde ji trasa opravdu využívá (obec vykládky).
+        out.addAll(warningsFromTags(tags, on.$1, on.$2, truck, delivery && route.exemptAt(on.$1)));
       } else {
         if (!seenNodes.add(id)) continue;
         final p = LatLng((e['lat'] as num).toDouble(), (e['lon'] as num).toDouble());
@@ -98,7 +99,7 @@ Future<List<RouteWarning>> loadRouteWarnings(
           );
         } else if (index.locate(p, 5) != null) {
           // Značka výšky jako bod musí ležet přímo na trase, ne na souběžné cestě.
-          out.addAll(warningsFromTags(tags, at, p, truck, delivery));
+          out.addAll(warningsFromTags(tags, at, p, truck, delivery && route.exemptAt(at)));
         }
       }
     }

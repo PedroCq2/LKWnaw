@@ -10,7 +10,8 @@ Flutter aplikace pro navigaci nákladních vozidel nad OpenStreetMap a routing e
 - **Kamionové trasy** – výška, šířka, délka, hmotnost, zatížení nápravy, počet náprav,
   ADR (nebezpečný náklad), max. rychlost vozidla, vyhnutí se mýtu / trajektům.
 - **Výstrahy na trase** – omezení výšky, hmotnosti, šířky, délky a nápravy z OSM
-  (červeně, pokud je vaše vozidlo překračuje, + hlasové varování) a radary.
+  (červeně, pokud je vaše vozidlo překračuje, + hlasové varování) a radary. Vpravo nejvýš dvě
+  nejbližší značky, nikdy přes tlačítka (okénko pumpy se na chvíli schová); po projetí další.
 - **Jízda bez cíle** – aplikace pozná silnici, po které jedete (I/8, D8, ulice), a hlídá na ní
   dopředu do 30 km nízké mosty, hmotnost, šířku, délku a zákazy vjezdu kamionů: karta vpravo
   („3,3 m · 21 km“), značka v mapě a hlas („Na silnici 8 za 20 kilometrů omezení výšky 3,3 metru.
@@ -30,8 +31,9 @@ Flutter aplikace pro navigaci nákladních vozidel nad OpenStreetMap a routing e
   truck servisy a pneuservisy, čerpací stanice pro kamiony (AdBlue, HGV nafta).
 - **Zásobování** (přepínač u trasy) – povolí vjezd do zón se zákazem nad X t
   („mimo dopravní obsluhu“, od 6 t, nebo s výjimkou zapsanou v mapě) v obci vykládky; do ulic
-  s omezením 3,5 t jen tehdy, když v nich leží cíl. Výška, šířka, délka, náprava a ADR platí dál;
-  mostům s nižší nosností se trasa automaticky vyhne.
+  s omezením 3,5 t jen tehdy, když v nich leží cíl. Výjimka platí jen na úsecích, kde ji trasa
+  opravdu využívá (dojezd v obci vykládky) – jinde je zóna červeně a trasa se jí vyhne. Výška,
+  šířka, délka, náprava a ADR platí dál; mostům s nižší nosností se trasa automaticky vyhne.
 - **Uložená místa s vjezdem pro kamiony** – u firmy zvlášť adresa a brána (dlouhé podržení
   na mapě) + poznámka („Příjezd zezadu, vrátnice u rampy 12“), přečte se před cílem.
 - **POI podél trasy** – truckparky/pumpy/servisy seřazené podle dojezdu (km, min, odbočka

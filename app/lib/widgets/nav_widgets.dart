@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../models/route.dart';
@@ -416,6 +418,31 @@ class WarningSign extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Výška karty výstrahy ([WarningCard]) i s mezerou pod ní, než ji aplikace změří (telefon ~127 dp).
+const warningCardHeight = 128.0;
+
+/// Kolik značek omezení se vejde vpravo nad sloupec tlačítek (nejvýš 2) a zda kvůli nim na chvíli
+/// schovat okénko služby (pumpa / odpočívka). [free] = od tabule po spodek sloupce tlačítek,
+/// [rightBase] = výška tlačítek bez okénka služby, [service] = výška okénka (null = žádné),
+/// [extra] = další místo nad kartami (popisek silnice).
+(int, bool) warningCardFit({
+  required double free,
+  required int want,
+  required double rightBase,
+  double? service,
+  double extra = 0,
+  double cardH = warningCardHeight,
+}) {
+  want = math.min(2, want);
+  if (want <= 0) return (0, false);
+  int fit(double right) => ((free - right - 26 - extra) / cardH).floor();
+  if (service == null) return (math.max(1, math.min(want, fit(rightBase))), false);
+  if (fit(rightBase + service) >= want) return (want, false);
+  // Dvě značky omezení jsou důležitější než nejbližší pumpa – okénko služby na chvíli schovat.
+  if (fit(rightBase) >= want) return (want, true);
+  return fit(rightBase + service) >= 1 ? (1, false) : (1, true);
 }
 
 /// Karta výstrahy v pravém sloupci: značka + vzdálenost.

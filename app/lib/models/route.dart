@@ -164,6 +164,11 @@ class TruckRoute {
   /// Zásobování: kolik km trasy jede s výjimkou z hmotnostních zákazů (jen dojezd k cíli / výjezd od startu).
   double deliveryKm = 0;
 
+  /// Zásobování: úseky (m od začátku), kde trasa jede s výjimkou – výjezd ze zóny u startu a dojezd
+  /// v obci vykládky. Jinde zóna „6 t“ platí i pro zásobování (kamion jen projíždí).
+  List<(double, double)> exemptRanges = const [];
+  bool exemptAt(double m) => exemptRanges.any((r) => m >= r.$1 - 50 && m <= r.$2 + 50);
+
   /// Cíl je pro vozidlo nedostupný (výška/šířka/délka na příjezdu): trasa končí co nejblíž,
   /// tolik metrů (vzdušně) od cíle. 0 = trasa vede až do cíle.
   double unreachableM = 0;

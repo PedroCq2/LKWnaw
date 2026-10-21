@@ -505,6 +505,7 @@ class ValhallaClient {
 
       Map<String, dynamic> stitch(List<Map<String, dynamic>> legTrips) {
         final out = <Map<String, dynamic>>[];
+        final flags = <bool>[]; // část s výjimkou z hmotnosti (dojezd v obci vykládky)
         var length = 0.0, time = 0.0, exemptKm = 0.0;
         var toll = false, highway = false;
         for (var k = 0; k < legTrips.length; k++) {
@@ -523,6 +524,7 @@ class ValhallaClient {
             if (i < parts.length - 1 && ms.length > 1) ms.removeLast();
             if (i > 0 && ms.length > 1) ms.removeAt(0);
             out.add({...leg, 'maneuvers': ms});
+            flags.add(exempt);
             final sm = (leg['summary'] as Map?) ?? const {};
             final len = (sm['length'] as num?)?.toDouble() ?? 0;
             length += len;
@@ -543,6 +545,7 @@ class ValhallaClient {
             'has_highway': highway,
           },
           '_exemptKm': exemptKm,
+          '_exemptLegs': flags,
         };
       }
 
@@ -599,6 +602,7 @@ class ValhallaClient {
     final r = parseAll(await raw(from, to, via, exempt: true, head: heading));
     for (final x in r) {
       x.deliveryKm = x.lengthKm;
+      x.exemptRanges = [(0.0, x.cumulative.last)];
     }
     return r;
   }
@@ -717,7 +721,7 @@ class ValhallaClient {
     }
     if (shortcutProblem(edges, tags, profile) != null) return null;
     // Kamionem k místu odbočení (stejná trasa jako dosud), dál krátkou cestou.
-    if (xi == 0) return carTrip;
+    if (xi == 0) return {...carTrip, '_exemptLegs': List.filled((carTrip['legs'] as List).length, true)};
     final headTrip =
         (await _routeData(from: from, to: x, profile: profile, heading: heading))['trip']
             as Map<String, dynamic>;
@@ -749,6 +753,7 @@ class ValhallaClient {
   }
 
   /// Spojí dvě trasy za sebou do jedné (bez pokynu „Dorazili jste“ / „Vyjeďte“ na spoji).
+  /// Druhá je dojezd s výjimkou z hmotnosti (zásobování) – pozná se podle `_exemptLegs`.
   static Map<String, dynamic> _joinTrips(Map<String, dynamic> a, Map<String, dynamic> b) {
     final la = [...(a['legs'] as List)], lb = [...(b['legs'] as List)];
     Map<String, dynamic> trim(Object leg, {bool last = false, bool first = false}) {
@@ -766,6 +771,10 @@ class ValhallaClient {
     return {
       ...a,
       'legs': [...la, ...lb],
+      '_exemptLegs': [
+        ...((a['_exemptLegs'] as List?)?.cast<bool>() ?? List.filled(la.length, false)),
+        ...List.filled(lb.length, true),
+      ],
       'summary': {
         ...sa,
         'length': (sa['length'] as num) + (sb['length'] as num),
@@ -1208,7 +1217,7 @@ class ValhallaClient {
       }
     }
     final summary = trip['summary'] as Map<String, dynamic>;
-    return TruckRoute(
+    final route = TruckRoute(
       shape: shape,
       maneuvers: maneuvers,
       lengthKm: (summary['length'] as num).toDouble(),
@@ -1218,6 +1227,17 @@ class ValhallaClient {
       encodedShape: legShapes.length == 1 ? legShapes.first.$1 : null,
       legShapes: legShapes,
     );
+    // Zásobování: kde trasa jede s výjimkou z hmotnosti (jen tam neplatí zóny „mimo dopravní obsluhu“).
+    final flags = trip['_exemptLegs'] as List?;
+    if (flags != null && shape.isNotEmpty) {
+      final cum = route.cumulative;
+      route.exemptRanges = [
+        for (var i = 0; i < legShapes.length && i < flags.length; i++)
+          if (flags[i] == true)
+            (cum[legShapes[i].$2], i + 1 < legShapes.length ? cum[legShapes[i + 1].$2] : cum.last),
+      ];
+    }
+    return route;
   }
 }
 
