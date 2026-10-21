@@ -15,7 +15,8 @@ Flutter aplikace pro navigaci nákladních vozidel nad OpenStreetMap a routing e
   dopředu do 30 km nízké mosty, hmotnost, šířku, délku a zákazy vjezdu kamionů: karta vpravo
   („3,3 m · 21 km“), značka v mapě a hlas („Na silnici 8 za 20 kilometrů omezení výšky 3,3 metru.
   Vaše vozidlo neprojede.“), znovu kilometr před ním.
-- **Varianty tras** – nejrychlejší, alternativa, bez mýta, nejkratší (výběr kartou).
+- **Varianty tras** – nejrychlejší, až 3 alternativy, bez dálnic (po „jedničkách“), bez mýta,
+  nejkratší (výběr kartou); první „Doporučená“ pro kamion. „… a po dálnici“ hlasem dá dopředu tu po dálnici.
 - **Vyhledávání firem a skladů** (Photon/OSM) – např. „kaufland dc olomouc“.
 - **Rozdvojení dálnic a jízdní pruhy** – „Pokračujte rovně na D1 směr Vyškov“ i tam, kde
   Valhalla manévr nehlásí; pruhy z OSM (`turn:lanes`) se zvýrazněním správných pruhů.

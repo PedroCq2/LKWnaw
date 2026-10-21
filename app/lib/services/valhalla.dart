@@ -54,7 +54,7 @@ class ValhallaClient {
     exclude: exclude,
   )).first;
 
-  /// Několik variant: nejrychlejší + alternativa, bez mýta, nejkratší (bez duplicit).
+  /// Několik variant: nejrychlejší + až 3 alternativy, bez dálnic, bez mýta, nejkratší (bez duplicit).
   Future<List<RouteOption>> routeOptions({
     required LatLng from,
     required LatLng to,
@@ -73,14 +73,15 @@ class ValhallaClient {
       delivery: delivery,
       exclude: exclude,
       via: via,
-      // Valhalla počítá alternativy jen pro trasu bez zastávek.
-      alternates: via.isEmpty ? 2 : 0,
+      // Valhalla počítá alternativy jen pro trasu bez zastávek a průjezdů.
+      alternates: via.isEmpty ? 3 : 0,
     );
+    String alt(int i) => i == 0 ? 'Nejrychlejší' : (i == 1 ? 'Alternativa' : 'Alternativa $i');
     // Zásobování: výpočet je náročnější (obec vykládky) → jen hlavní trasa a její alternativy.
     if (delivery) {
       final out = <RouteOption>[];
       for (final (i, r) in (await main).indexed) {
-        out.add(RouteOption(i == 0 ? 'Nejrychlejší' : 'Alternativa', r));
+        out.add(RouteOption(alt(i), r));
       }
       return _rank(out, profile);
     }
@@ -108,7 +109,20 @@ class ValhallaClient {
         extra: {'shortest': true},
       ),
     );
-    final res = await Future.wait([main, noToll, shortest]);
+    // Po silnicích I. třídy místo dálnice (jiná cesta i se zastávkami, kde Valhalla alternativy nedá).
+    final noHighway = safe(
+      _request(
+        from: from,
+        to: to,
+        profile: profile,
+        heading: heading,
+        delivery: delivery,
+        exclude: exclude,
+        via: via,
+        extra: {'use_highways': 0.0},
+      ),
+    );
+    final res = await Future.wait([main, noToll, shortest, noHighway]);
     final out = <RouteOption>[];
     void add(String label, TruckRoute r) {
       final dup = out.any(
@@ -120,7 +134,10 @@ class ValhallaClient {
     }
 
     for (final (i, r) in res[0].indexed) {
-      add(i == 0 ? 'Nejrychlejší' : 'Alternativa', r);
+      add(alt(i), r);
+    }
+    for (final r in res[3].take(1)) {
+      add(r.hasHighway ? 'Méně dálnic' : 'Bez dálnic', r);
     }
     for (final r in res[1].take(1)) {
       if (!r.hasToll) add('Bez mýta', r);
