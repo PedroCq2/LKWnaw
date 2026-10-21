@@ -49,6 +49,10 @@ Flutter aplikace pro navigaci nákladních vozidel nad OpenStreetMap a routing e
   bez zastavení), dálnice se vynutí body na správném pásu (`road_anchors.dart`, vjezd a sjezd si
   vybere trasa). V plánu tlačítko *Průjezd*, hlasem „naviguj na Kaufland Děčín přes Neratovice,
   Mělník, pak na D8 a po dálnici“.
+- **Naučit trasu** – v nabídce *Naučit* (nebo hlasem „nauč se trasu“) se nahrává jízda; *Uložit*
+  („ulož trasu“) ji uloží. Příště k cíli u jejího konce navigace pojede přesně tudy (body podél
+  nahrané stopy, typ „via“). Když tudy kamion podle mapy nesmí, spočítá trasu bez ní; v panelu
+  trasy jde naučenou trasu pro daný cíl vypnout, v nabídce *Naučené trasy* smazat.
 - **Dlouhý úsek po dálnici** – kilometry v okénku a „Pokračujte rovně po D1 350 kilometrů“ až
   k sjezdu, kde se opravdu sjíždí; rozdvojení na téže dálnici („držte se vlevo, abyste zůstali
   na D1“) jen krátce ohlásí a ukáže pruhy, odpočet nepřeruší.

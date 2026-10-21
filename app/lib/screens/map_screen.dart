@@ -22,6 +22,7 @@ import '../services/restrictions.dart';
 import '../services/road_via.dart';
 import '../services/lanes.dart';
 import '../services/highway_services.dart';
+import '../services/learned_routes.dart';
 import '../services/horizon.dart';
 import '../services/map_style.dart';
 import '../services/problem_reports.dart';
@@ -164,6 +165,12 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
 
   List<Place> _results = [];
   SavedPlaces _saved = SavedPlaces([]);
+
+  // „Naučit trasu“: nahrávaná jízda (null = nenahrává se) a naučené trasy k cílům.
+  LearnedRoutes _learned = LearnedRoutes([]);
+  List<LatLng>? _rec;
+  LearnedRoute? _usedLearned; // trasa se počítala podél této naučené
+  bool _ignoreLearned = false; // řidič ji pro tento cíl vypnul / podle mapy tudy nejde
   List<SavedPlace> _savedResults = [];
   SavedPlace? _destSaved; // cíl je uložené místo (vjezd + poznámka)
   LatLng? _destAddr; // adresa cíle (bez vjezdu)
@@ -206,6 +213,9 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     super.initState();
     Pip.instance.active.addListener(_onPip);
     _loadStyle();
+    LearnedRoutes.load().then((v) {
+      if (mounted) setState(() => _learned = v);
+    });
     SavedPlaces.load().then((v) {
       if (mounted) setState(() => _saved = v);
     });
@@ -379,6 +389,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     }
     _odometer(pos, speed);
     if (_route == null && _freeDrive) _aheadTick(speed);
+    // Obrazovka se překreslí jednou za polohu z GPS (ne 60–120× za sekundu při animaci mapy).
+    if (mounted) setState(() {});
     _animateTo();
   }
 
@@ -387,6 +399,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     final last = _odoAt;
     if (last != null && speedKmh > 3) _odo += const Distance()(last, pos);
     _odoAt = pos;
+    final rec = _rec;
+    if (rec != null && (rec.isEmpty || const Distance()(rec.last, pos) > 12)) rec.add(pos);
     if (speedKmh < 5) return;
     if (_track.isEmpty || const Distance()(_track.last, pos) > 25) {
       _track.add(pos);
@@ -585,10 +599,16 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     if (dh > 180) dh -= 360;
     _dispHeading = (_fromHead + dh * t) % 360;
     _dispZoom = _fromZoom + (_toZoom - _fromZoom) * t;
+    // Mapa ~30× za sekundu (displej by chtěl 60–120×) – plynulé a telefon se tolik nezahřívá.
+    final now = DateTime.now();
+    if (t < 1 && now.difference(_camAt) < const Duration(milliseconds: 33)) return;
+    _camAt = now;
     if (_follow) _applyCamera();
     _updateMeLayer();
-    if (mounted) setState(() {});
   }
+
+  DateTime _camAt = DateTime(2000);
+  DateTime _headAt = DateTime(2000);
 
   void _applyCamera() {
     final map = _map;
@@ -857,6 +877,10 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   Future<void> _updateRouteHead(LatLng pos) async {
     final m = _map, r = _route;
     if (m == null || r == null || !_styleReady || _lineBusy) return;
+    // Projetá část trasy za šipkou: 5× za sekundu stačí (šipka ji zakrývá).
+    final now = DateTime.now();
+    if (now.difference(_headAt) < const Duration(milliseconds: 200)) return;
+    _headAt = now;
     if (!_trimming) {
       if (_lineRoute != null) {
         _lineRoute = null;
@@ -1111,6 +1135,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   // ------------------------------------------------------------ trasa
 
   Future<void> _computeRoute({bool reroute = false}) async {
+    var retry = false;
     // Naplánovaná trasa může začínat jinde než stojím (dokud se nevyjede).
     final from = (!_navigating ? _planStart : null) ?? _pos;
     final to = _dest;
@@ -1173,7 +1198,12 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         if (_navigating) _say(msg);
       }
     } on RoutingException catch (e) {
-      if (e.network) {
+      if (!e.network && _usedLearned != null && !_ignoreLearned) {
+        // Naučenou trasou kamion podle mapy nesmí (zákaz, omezení) – spočítat bez ní.
+        _ignoreLearned = true;
+        retry = true;
+        _toast('Naučenou trasou to podle mapy pro kamion nejde – vedu jinudy.');
+      } else if (e.network) {
         // Bez signálu: trasa zůstává, jen stav. Hlásit jednou, ne při každém pokusu.
         if (!_offline) {
           _say('Není připojení. Vedu podle uložené trasy.');
@@ -1190,6 +1220,120 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     } finally {
       if (mounted) setState(() => _routing = false);
     }
+    if (retry && mounted) await _computeRoute(reroute: reroute);
+  }
+
+  // ------------------------------------------------------------ naučené trasy
+
+  /// „Naučit trasu“: zapnout nahrávání jízdy, nebo ho ukončit a uložit.
+  Future<void> _toggleLearn({bool voice = false}) async {
+    final rec = _rec;
+    if (rec == null) {
+      setState(() => _rec = [?_pos]);
+      final msg = 'Učím se trasu. Jeďte, jak to znáte, a na konci dejte Uložit.';
+      voice ? await _answer(msg) : _toast(msg);
+      return;
+    }
+    await _saveLearned(voice: voice);
+  }
+
+  Future<void> _saveLearned({bool voice = false}) async {
+    final rec = _rec;
+    if (rec == null) return;
+    final pts = simplifyTrack(rec);
+    final len = LearnedRoute(id: '', name: '', points: pts, created: DateTime.now()).length;
+    if (pts.length < 2 || len < 200) {
+      setState(() => _rec = null);
+      _toast('Nahraná jízda je moc krátká – trasa se neuložila.');
+      return;
+    }
+    var name = _destName ?? 'Naučená trasa';
+    if (!voice) {
+      final ctrl = TextEditingController(text: name);
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Uložit naučenou trasu'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: ctrl,
+                decoration: const InputDecoration(labelText: 'Název (např. Kaufland Děčín – příjezd)'),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                '${formatDistance(len)}. Příště k místu, kde jste skončili, povedu přesně tudy.',
+                style: const TextStyle(color: Lkw.muted),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Zahodit')),
+            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Uložit')),
+          ],
+        ),
+      );
+      if (ok != true) {
+        setState(() => _rec = null);
+        return;
+      }
+      if (ctrl.text.trim().isNotEmpty) name = ctrl.text.trim();
+    }
+    final r = LearnedRoute(
+      id: '${DateTime.now().millisecondsSinceEpoch}',
+      name: name,
+      points: pts,
+      created: DateTime.now(),
+    );
+    setState(() {
+      _rec = null;
+      _learned.items.add(r);
+    });
+    await _learned.save();
+    final msg = 'Trasa naučena. Příště k tomuto místu povedu tudy.';
+    voice ? await _answer(msg) : _toast(msg);
+  }
+
+  /// Seznam naučených tras (smazání).
+  void _manageLearned() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Lkw.panel,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) => SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              const ListTile(
+                title: Text('Naučené trasy', style: TextStyle(fontWeight: FontWeight.w800)),
+                subtitle: Text('K cíli u konce naučené trasy navigace jede přesně tudy.'),
+              ),
+              if (_learned.items.isEmpty)
+                const ListTile(
+                  title: Text('Zatím žádná. V nabídce dejte „Naučit“, projeďte trasu a uložte ji.'),
+                ),
+              for (final r in [..._learned.items].reversed)
+                ListTile(
+                  leading: const Icon(Icons.school, color: Lkw.amber),
+                  title: Text(r.name),
+                  subtitle: Text(
+                    '${formatDistance(r.length)} · ${r.created.day}. ${r.created.month}. ${r.created.year}',
+                  ),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.delete_outline),
+                    onPressed: () async {
+                      setState(() => _learned.items.remove(r));
+                      setSheet(() {});
+                      await _learned.save();
+                    },
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   /// Kde se průjezd (město, dálnice) počítá za projetý: bod, kterým má trasa projet.
@@ -1216,6 +1360,10 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
           if (road.isNotEmpty) _passTarget[st] = road.last.point;
       }
     }
+    // Naučená trasa k cíli: posledních pár km přesně tak, jak to řidič zná.
+    final lr = _ignoreLearned ? null : _learned.forDest(to);
+    _usedLearned = lr;
+    if (lr != null) out.addAll(learnedVia(lr, out.isEmpty ? from : out.last.point));
     return out;
   }
 
@@ -1683,6 +1831,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     FocusScope.of(context).unfocus();
     _destAddress = address;
     _preferHighway = false;
+    _ignoreLearned = false;
     _destRamp = null;
     _excluded.clear();
     _stops
@@ -2238,6 +2387,14 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         _loadStyle();
       case VoiceAction.report:
         await _reportProblem(note: text);
+      case VoiceAction.learn:
+        await _toggleLearn(voice: true);
+      case VoiceAction.learnSave:
+        if (_rec == null) {
+          await _answer('Trasu se zrovna neučím. Řekněte: nauč se trasu.');
+        } else {
+          await _saveLearned(voice: true);
+        }
       case VoiceAction.help:
         await _answer(
           'Můžete říct: naviguj na Kaufland Děčín přes Mělník a pak po D8, přidej zastávku, '
@@ -2474,6 +2631,12 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                           on: _settings.mapLayer != MapLayer.map,
                         ),
                         quick(Icons.mic, 'Povely', () => go(() => _handleVoice('co umíš'))),
+                        quick(
+                          _rec == null ? Icons.school : Icons.save,
+                          _rec == null ? 'Naučit' : 'Uložit',
+                          () => go(_toggleLearn),
+                          on: _rec != null,
+                        ),
                         quick(Icons.videocam, 'Kamera', () => go(_toggleCamera), on: _cam != null),
                       ],
                     ),
@@ -2488,6 +2651,14 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                       subtitle: 'Dodací list, štítky, text od dispečera',
                     ),
                   ],
+                  item(
+                    Icons.school,
+                    'Naučené trasy',
+                    _manageLearned,
+                    subtitle: _learned.items.isEmpty
+                        ? 'Projeďte příjezd, jak ho znáte – příště povedu tudy'
+                        : '${_learned.items.length} uložené',
+                  ),
                   head('NA CESTĚ'),
                   item(Icons.local_parking, 'Truckparky, servisy, nafta', _choosePoi),
                   item(
@@ -3067,6 +3238,36 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     ],
                   ),
                 ),
+                // Nahrávání naučené trasy: ujetá vzdálenost, Uložit / Zrušit.
+                if (_rec case final rec? when !pip)
+                  Positioned(
+                    left: 12,
+                    bottom: panelH + 16 + bottomPad + (_navigating ? 160 : 0),
+                    child: Material(
+                      color: Lkw.panel,
+                      borderRadius: BorderRadius.circular(16),
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.fiber_manual_record, color: Lkw.danger, size: 16),
+                            const SizedBox(width: 6),
+                            Text(
+                              'Učím trasu · ${formatDistance(LearnedRoute(id: '', name: '', points: rec, created: DateTime(2000)).length)}',
+                              style: const TextStyle(fontWeight: FontWeight.w700),
+                            ),
+                            TextButton(onPressed: _saveLearned, child: const Text('Uložit')),
+                            IconButton(
+                              icon: const Icon(Icons.close),
+                              tooltip: 'Zrušit nahrávání',
+                              onPressed: () => setState(() => _rec = null),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
                 if (_listening)
                   Positioned(
                     left: 16,
@@ -3594,6 +3795,16 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                             _computeRoute();
                           },
                         ),
+                        if (_usedLearned case final lr? when !_ignoreLearned)
+                          InputChip(
+                            avatar: const Icon(Icons.school, size: 18, color: Lkw.amber),
+                            label: Text('Naučená trasa: ${lr.name}', overflow: TextOverflow.ellipsis),
+                            visualDensity: VisualDensity.compact,
+                            onDeleted: () {
+                              setState(() => _ignoreLearned = true);
+                              _computeRoute(reroute: _navigating);
+                            },
+                          ),
                         for (final st in _stops)
                           InputChip(
                             avatar: Icon(

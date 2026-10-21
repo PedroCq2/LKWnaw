@@ -17,6 +17,8 @@ enum VoiceAction {
   aerial,
   normalMap,
   report,
+  learn, // „nauč se trasu“ – nahrávat jízdu
+  learnSave, // „ulož trasu“
   help,
   unknown,
 }
@@ -92,6 +94,12 @@ VoiceCommand parseCommand(String text) {
 
   if (has(r'(zrus|ukonci|ukoncit|konec|zastav) (navigac|trasu|jizdu)')) {
     return const VoiceCommand(VoiceAction.stop);
+  }
+  if (has(r'(uloz|ukonci nahravani|konec nahravani)\w*( naucenou)? (trasu|cestu|nahravani)|^uloz$')) {
+    return const VoiceCommand(VoiceAction.learnSave);
+  }
+  if (has(r'(nauc|naucit|nahravej|nahrat|zapamatuj)\w*( se| si)? (trasu|cestu)')) {
+    return const VoiceCommand(VoiceAction.learn);
   }
   if (has(r'(spatne|chyba|nahlas|nahlasit|zaznamenej)')) {
     return const VoiceCommand(VoiceAction.report);

@@ -19,18 +19,23 @@ class ViaPoint {
   final bool mainRoad;
   final double? heading;
 
+  /// Hustší body (naučená trasa): Valhalla typ „via“ – u „through“ padá, když jich víc leží na jednom
+  /// úseku silnice („leg_shape_index not set for intermediate location“).
+  final bool dense;
+
   const ViaPoint(
     this.point, {
     this.through = false,
     this.motorway = false,
     this.mainRoad = false,
     this.heading,
+    this.dense = false,
   });
 
   Map<String, dynamic> toJson() => {
     'lat': point.latitude,
     'lon': point.longitude,
-    'type': through ? 'through' : 'break',
+    'type': through ? (dense ? 'via' : 'through') : 'break',
     if (heading != null) 'heading': heading!.round(),
     if (heading != null) 'heading_tolerance': 45,
     // Ne na přívoz / lodní linku (Mělník: „T91 Litoměřice – Mělník“ po Labi je nejblíž náměstí).

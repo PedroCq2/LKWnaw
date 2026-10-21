@@ -24,6 +24,9 @@ void main() {
     expect(parseCommand('start').action, VoiceAction.start);
     expect(parseCommand('letecká mapa').action, VoiceAction.aerial);
     expect(parseCommand('ahoj').action, VoiceAction.unknown);
+    expect(parseCommand('nauč se trasu').action, VoiceAction.learn);
+    expect(parseCommand('zapamatuj si cestu').action, VoiceAction.learn);
+    expect(parseCommand('ulož trasu').action, VoiceAction.learnSave);
   });
 
   test('cíl přes města a po dálnici', () {
