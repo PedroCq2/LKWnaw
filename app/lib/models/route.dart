@@ -229,6 +229,64 @@ class TruckRoute {
     return (national.isNotEmpty ? national : out).take(3).toList();
   }
 
+  /// Manévr, při kterém se jen jede dál po téže dálnici (rovně, jiné jméno, „držte se vlevo, abyste
+  /// zůstali na D1“): odpočet v okénku i „Pokračujte rovně X km“ počítají až k dalšímu opravdovému
+  /// manévru (sjezd, odbočka, přejezd na jinou dálnici). Jinak „200 km rovně“ ukazuje jen kilometry
+  /// k nejbližší křižovatce a za ní znovu „Pokračujte rovně…“.
+  bool isPassThrough(int i) {
+    if (!identical(_passEdges, edges) || _pass.length != maneuvers.length) {
+      _passEdges = edges;
+      _pass = List<bool?>.filled(maneuvers.length, null);
+    }
+    return _pass[i] ??= _isPassThrough(maneuvers[i]);
+  }
+
+  List<EdgeAttr>? _passEdges;
+  List<bool?> _pass = const [];
+
+  static final _ref = RegExp(r'^([DEARS])\s?(\d+)$');
+
+  bool _isPassThrough(Maneuver m) {
+    if (m.synthetic) return true;
+    if (!const {7, 8, 22, 23, 24}.contains(m.type)) return false;
+    EdgeAttr? at(int idx) {
+      for (final e in edges) {
+        if (e.begin <= idx && idx < e.end) return e;
+      }
+      return null;
+    }
+
+    final after = at(m.beginShapeIndex);
+    if (after == null) {
+      // Bez atributů silnic (ještě se načítají): podle jména za manévrem.
+      final ref = m.streetNames.any((n) => _ref.hasMatch(n.trim()));
+      return ref && (m.type < 23 || m.instruction.contains('zůstali'));
+    }
+    if (!(after.roadClass == 'motorway' || after.roadClass == 'trunk') || after.use == 'ramp') return false;
+    if (m.type < 23) return true;
+    // Rozdvojení: jen když se zůstává na téže dálnici (D1 → D1), ne D1 → D46.
+    final before = at(m.beginShapeIndex - 1);
+    if (before == null) return false;
+    Set<String> refs(EdgeAttr e, bool national) => {
+      for (final n in e.names)
+        if (_ref.firstMatch(n.trim()) case final r? when (r[1] != 'E') == national) '${r[1]}${r[2]}',
+    };
+    // Národní čísla (D1, A4); evropská (E 65 vede po D1 i D2) jen když národní chybí.
+    final nb = refs(before, true), na = refs(after, true);
+    if (nb.isNotEmpty && na.isNotEmpty) return nb.intersection(na).isNotEmpty;
+    return refs(before, false).intersection(refs(after, false)).isNotEmpty;
+  }
+
+  /// Nejbližší opravdový manévr od indexu [i] (sám [i], když není průjezdný); -1 = žádný.
+  int actionFrom(int i) {
+    if (i < 0) return -1;
+    var k = i;
+    while (k < maneuvers.length - 1 && isPassThrough(k)) {
+      k++;
+    }
+    return k < maneuvers.length ? k : -1;
+  }
+
   int? speedLimitAt(int seg) => seg >= 0 && seg < speedLimits.length ? speedLimits[seg] : null;
   String? roadNameAt(int seg) => seg >= 0 && seg < roadNames.length ? roadNames[seg] : null;
 

@@ -1,3 +1,4 @@
+import 'road_via.dart';
 import 'search_fold.dart';
 
 /// Co řidič hlasem chce.
@@ -23,7 +24,64 @@ enum VoiceAction {
 class VoiceCommand {
   final VoiceAction action;
   final String? arg; // cíl / zastávka („Kaufland Olomouc“)
-  const VoiceCommand(this.action, [this.arg]);
+
+  /// Kudy jet: města („Neratovice“) a dálnice („D8“) v pořadí, jak je řidič řekl.
+  final List<String> via;
+
+  /// „… a po dálnici“: přednostně varianta po dálnici.
+  final bool highway;
+  const VoiceCommand(this.action, [this.arg, this.via = const [], this.highway = false]);
+}
+
+final _highwayWords = RegExp(
+  r'^(?:(?:dal|dale|pak|potom) )?(?:po dalnici|po dalnicich|dalnici|dalnicemi|po dalnicni)$',
+);
+
+/// „Kaufland Děčín přes Neratovice, Mělník, pak na D8 a po dálnici“ →
+/// cíl „Kaufland Děčín“, průjezdy [Neratovice, Mělník, D8], po dálnici.
+VoiceCommand _withVia(String raw) {
+  var dest = raw, rest = '';
+  final t = fold(raw);
+  final i = t.indexOf(' pres ');
+  if (t.startsWith('pres ')) {
+    // „přes Mělník do Děčína“
+    final d = t.lastIndexOf(' do ');
+    if (d < 0) return VoiceCommand(VoiceAction.navigate, raw);
+    rest = raw.substring(5, d);
+    dest = raw.substring(d + 4);
+  } else if (i > 0) {
+    dest = raw.substring(0, i);
+    rest = raw.substring(i + 6);
+  }
+  final via = <String>[];
+  var highway = false;
+  final parts = rest.split(
+    RegExp(
+      r'\s*,\s*|\s+(?:a pak|a potom|a dál|a dále|a zpět|a|pak|potom|dál|dále|zpět|zpátky|přes)\s+',
+      caseSensitive: false,
+    ),
+  );
+  for (var p in parts) {
+    p = p.trim().replaceAll(RegExp(r'[.!?]+$'), '');
+    if (p.isEmpty) continue;
+    final road = roadRef(p);
+    if (road != null) {
+      via.add(road);
+    } else if (_highwayWords.hasMatch(fold(p))) {
+      highway = true;
+    } else {
+      // „na Mělník“, „kolem Neratovic“ → jen jméno.
+      final name = p.replaceFirst(
+        RegExp(
+          r'^(?:(?:a|pak|potom|zpět|zpátky)\s+)*(?:(?:na|do|kolem|okolo|přes|pres)\s+)?',
+          caseSensitive: false,
+        ),
+        '',
+      );
+      if (name.length > 1) via.add(name);
+    }
+  }
+  return VoiceCommand(VoiceAction.navigate, dest.trim(), via, highway);
 }
 
 /// Hlasový příkaz z rozpoznaného textu („naviguj na Kaufland Olomouc“, „najdi parkoviště“, „kolik zbývá“).
@@ -86,7 +144,7 @@ VoiceCommand parseCommand(String text) {
     r'^(?:naviguj|navigovat|navigace|ved me|vez me|jed|jedeme|jedu|chci jet|cil|trasa|trasu|najdi cestu)\s+(?:me\s+)?(?:na |do |k |ke |ku |za |u )?(.+)$',
   ).firstMatch(t);
   if (nav != null && nav.group(1)!.trim().length > 1) {
-    return VoiceCommand(VoiceAction.navigate, _original(raw, nav.group(1)!));
+    return _withVia(_original(raw, nav.group(1)!));
   }
   return const VoiceCommand(VoiceAction.unknown);
 }

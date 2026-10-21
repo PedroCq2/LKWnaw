@@ -102,21 +102,55 @@ Future<List<Place>> _photon(String q, LatLng? near) async {
     final c = (f['geometry']['coordinates'] as List).cast<num>();
     final street = [p['street'], p['housenumber']].whereType<String>().join(' ');
     final city = (p['city'] ?? p['town'] ?? p['village'] ?? p['county']) as String?;
-    final address = [
-      if (street.isNotEmpty) street,
-      if (p['postcode'] != null) '${p['postcode']} ${city ?? ''}'.trim() else ?city,
-    ].join(', ');
     final name = (p['name'] as String?) ?? (street.isNotEmpty ? street : (city ?? q));
     out.add(
       Place(
         name,
         LatLng(c[1].toDouble(), c[0].toDouble()),
         kind: _photonKind(p['osm_key'] as String?, p['osm_value'] as String?),
-        address: address.isEmpty ? null : address,
+        address: _photonAddress(p),
       ),
     );
   }
   return out;
+}
+
+/// „Všebořická 2789/2a, 400 01 Ústí nad Labem“ z vlastností Photonu.
+String? _photonAddress(Map<String, dynamic> p) {
+  final street = [p['street'], p['housenumber']].whereType<String>().join(' ');
+  final city = (p['city'] ?? p['town'] ?? p['village'] ?? p['county']) as String?;
+  final address = [
+    if (street.isNotEmpty) street,
+    if (p['postcode'] != null) '${p['postcode']} ${city ?? ''}'.trim() else ?city,
+  ].join(', ');
+  return address.isEmpty ? null : address;
+}
+
+final _addressCache = <String, String>{};
+
+/// Adresa místa (ulice, číslo, PSČ, obec) – pro přehled zastávek v plánu.
+/// Bez internetu jen obec z rejstříku v telefonu; null = nezjištěno.
+Future<String?> addressAt(LatLng p) async {
+  final key = '${p.latitude.toStringAsFixed(5)},${p.longitude.toStringAsFixed(5)}';
+  final known = _addressCache[key];
+  if (known != null) return known;
+  try {
+    final uri = Uri.parse(
+      'https://photon.komoot.io/reverse?lat=${p.latitude.toStringAsFixed(6)}'
+      '&lon=${p.longitude.toStringAsFixed(6)}&limit=3&lang=default',
+    );
+    final res = await http.get(uri, headers: uaHeaders()).timeout(const Duration(seconds: 8));
+    if (res.statusCode == 200) {
+      final feats = jsonDecode(utf8.decode(res.bodyBytes))['features'] as List;
+      // Přednostně výsledek s číslem domu (budova obchodu bývá bez adresy, vedlejší vchod s ní).
+      final props = [for (final f in feats) Map<String, dynamic>.from(f['properties'] as Map)];
+      final best = props.where((x) => x['housenumber'] != null).firstOrNull ?? props.firstOrNull;
+      final a = best == null ? null : _photonAddress(best);
+      if (a != null) return _addressCache[key] = a;
+    }
+  } catch (_) {}
+  final off = OfflineSearch.instance;
+  return off.ready ? off.nearestTown(p) : null;
 }
 
 String? _photonKind(String? key, String? value) {

@@ -5,6 +5,7 @@ import 'package:latlong2/latlong.dart';
 
 import '../services/geocoding.dart';
 import '../services/plans.dart';
+import '../services/road_via.dart';
 import '../services/saved_places.dart';
 import '../services/settings.dart';
 import '../theme.dart';
@@ -44,13 +45,40 @@ class _PlannerScreenState extends State<PlannerScreen> {
       ..clear()
       ..addAll(p.stops);
     _dest = p.dest;
+    _fillAddresses();
   }
 
-  Future<PlanPoint?> _pick(String title) => showModalBottomSheet<PlanPoint>(
-    context: context,
-    isScrollControlled: true,
-    builder: (_) => _PlaceSearch(title: title, saved: widget.saved, near: widget.myPosition),
-  );
+  final _looking = <PlanPoint>{};
+
+  /// Adresy bodů bez adresy (nebo jen s obcí) dohledat – podle nich se zastávky řadí.
+  Future<void> _fillAddresses() async {
+    bool needs(PlanPoint? p) =>
+        p != null && p.kind != PlanKind.road && (p.address == null || !p.address!.contains(RegExp(r'\d')));
+    for (final p in [..._stops, ?_dest]) {
+      if (!needs(p) || !_looking.add(p)) continue;
+      final a = await addressAt(p.point);
+      if (!mounted) return;
+      setState(() {
+        _looking.remove(p);
+        if (a == null || a == p.address) return;
+        final q = p.withAddress(a);
+        final i = _stops.indexOf(p);
+        if (i >= 0) _stops[i] = q;
+        if (identical(_dest, p)) _dest = q;
+      });
+    }
+  }
+
+  Future<PlanPoint?> _pick(String title, {bool via = false}) async {
+    final p = await showModalBottomSheet<PlanPoint>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _PlaceSearch(title: title, saved: widget.saved, near: widget.myPosition, via: via),
+    );
+    // Až po přidání do seznamu (volající ho přidá hned po návratu).
+    if (p != null) Future.delayed(Duration.zero, _fillAddresses);
+    return p;
+  }
 
   /// Vyfocené adresy: seřazené zastávky nahradí plán (start zůstane), pořadí lze dál měnit tažením.
   Future<void> _scan() async {
@@ -67,6 +95,7 @@ class _PlannerScreenState extends State<PlannerScreen> {
         ..addAll(plan.stops);
       _dest = plan.dest;
     });
+    _fillAddresses();
   }
 
   Future<void> _savePlan() async {
@@ -114,18 +143,37 @@ class _PlannerScreenState extends State<PlannerScreen> {
     VoidCallback? onDelete,
     bool reorder = false,
     int index = 0,
+    String? address,
+    int? number,
   }) => Material(
     key: key,
     color: Lkw.panel,
     child: ListTile(
-      leading: Icon(icon, color: color),
+      leading: number == null
+          ? Icon(icon, color: color)
+          : CircleAvatar(
+              radius: 15,
+              backgroundColor: color,
+              child: Text(
+                '$number',
+                style: const TextStyle(color: Colors.black, fontWeight: FontWeight.w900),
+              ),
+            ),
       title: Text(
         value ?? label,
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
         style: TextStyle(color: value == null ? Lkw.muted : Lkw.text, fontWeight: FontWeight.w700),
       ),
-      subtitle: value == null ? null : Text(label, style: const TextStyle(color: Lkw.muted)),
+      // Adresa místo „Zastávka 2“ – podle ní se zastávky řadí.
+      subtitle: value == null
+          ? null
+          : Text(
+              address == null || address == value ? label : address,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: address == null ? Lkw.muted : Lkw.text.withValues(alpha: 0.8)),
+            ),
       onTap: onTap,
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
@@ -136,6 +184,35 @@ class _PlannerScreenState extends State<PlannerScreen> {
       ),
     ),
   );
+
+  /// Řádek zastávky / průjezdu: zastávky číslované, průjezd městem a dálnice s vlastní ikonou.
+  Widget _stopRow(int i, PlanPoint s, int? number) {
+    final (icon, label, value) = switch (s.kind) {
+      PlanKind.stop => (Icons.add_location_alt, 'Zastávka $number', s.name),
+      PlanKind.town => (Icons.location_city, 'Průjezd', 'Přes ${s.name}'),
+      PlanKind.road => (Icons.add_road, 'Dálnice – vjezd a výjezd podle trasy', 'Po ${s.name}'),
+    };
+    return _row(
+      key: ValueKey('stop$i${s.name}${s.kind.name}'),
+      icon: icon,
+      color: Lkw.amber,
+      label: label,
+      value: value,
+      address: switch (s.kind) {
+        PlanKind.stop => s.address ?? (_looking.contains(s) ? 'hledám adresu…' : null),
+        PlanKind.town => s.address == null ? 'Průjezd' : 'Průjezd · ${s.address}',
+        PlanKind.road => null,
+      },
+      number: number,
+      reorder: true,
+      index: i,
+      onTap: () async {
+        final p = await _pick(s.isStop ? 'Zastávka $number' : 'Průjezd', via: !s.isStop);
+        if (p != null) setState(() => _stops[i] = p);
+      },
+      onDelete: () => setState(() => _stops.removeAt(i)),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -171,31 +248,35 @@ class _PlannerScreenState extends State<PlannerScreen> {
             onReorderItem: (a, b) => setState(() => _stops.insert(b, _stops.removeAt(a))),
             children: [
               for (final (i, s) in _stops.indexed)
-                _row(
-                  key: ValueKey('stop$i${s.name}'),
-                  icon: Icons.add_location_alt,
-                  color: Lkw.amber,
-                  label: 'Zastávka ${i + 1}',
-                  value: s.name,
-                  reorder: true,
-                  index: i,
-                  onTap: () async {
-                    final p = await _pick('Zastávka ${i + 1}');
-                    if (p != null) setState(() => _stops[i] = p);
-                  },
-                  onDelete: () => setState(() => _stops.removeAt(i)),
-                ),
+                _stopRow(i, s, s.isStop ? _stops.take(i + 1).where((x) => x.isStop).length : null),
             ],
           ),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-            child: OutlinedButton.icon(
-              icon: const Icon(Icons.add),
-              label: const Text('Přidat zastávku'),
-              onPressed: () async {
-                final p = await _pick('Nová zastávka');
-                if (p != null) setState(() => _stops.add(p));
-              },
+            child: Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.add),
+                    label: const Text('Zastávka'),
+                    onPressed: () async {
+                      final p = await _pick('Nová zastávka');
+                      if (p != null) setState(() => _stops.add(p));
+                    },
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.alt_route),
+                    label: const Text('Průjezd'),
+                    onPressed: () async {
+                      final p = await _pick('Přes město nebo po dálnici', via: true);
+                      if (p != null) setState(() => _stops.add(p));
+                    },
+                  ),
+                ),
+              ],
             ),
           ),
           _row(
@@ -204,6 +285,7 @@ class _PlannerScreenState extends State<PlannerScreen> {
             color: Lkw.danger,
             label: 'Cíl',
             value: _dest?.name,
+            address: _dest?.address == null ? null : 'Cíl · ${_dest!.address}',
             onTap: () async {
               final p = await _pick('Cíl trasy');
               if (p != null) setState(() => _dest = p);
@@ -222,7 +304,11 @@ class _PlannerScreenState extends State<PlannerScreen> {
                 leading: const Icon(Icons.route, color: Lkw.amber),
                 title: Text(p.name),
                 subtitle: Text(
-                  [p.start?.name ?? 'Moje poloha', ...p.stops.map((s) => s.name), p.dest.name].join(' → '),
+                  [
+                    p.start?.name ?? 'Moje poloha',
+                    ...p.stops.map((s) => s.isStop ? s.name : 'přes ${s.name}'),
+                    p.dest.name,
+                  ].join(' → '),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -263,7 +349,8 @@ class _PlaceSearch extends StatefulWidget {
   final String title;
   final SavedPlaces saved;
   final LatLng? near;
-  const _PlaceSearch({required this.title, required this.saved, this.near});
+  final bool via; // průjezd: město („přes Mělník“) nebo dálnice („D8“)
+  const _PlaceSearch({required this.title, required this.saved, this.near, this.via = false});
 
   @override
   State<_PlaceSearch> createState() => _PlaceSearchState();
@@ -302,6 +389,8 @@ class _PlaceSearchState extends State<_PlaceSearch> {
   @override
   Widget build(BuildContext context) {
     final saved = widget.saved.search(_q.text).take(6).toList();
+    final road = widget.via ? roadRef(_q.text) : null;
+    final kind = widget.via ? PlanKind.town : PlanKind.stop;
     return Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
       child: SizedBox(
@@ -316,7 +405,7 @@ class _PlaceSearchState extends State<_PlaceSearch> {
                 autofocus: true,
                 onChanged: _changed,
                 decoration: InputDecoration(
-                  hintText: 'Firma, sklad, adresa…',
+                  hintText: widget.via ? 'Město (Mělník) nebo dálnice (D8)…' : 'Firma, sklad, adresa…',
                   prefixIcon: const Icon(Icons.search, color: Lkw.amber),
                   suffixIcon: _busy
                       ? const Padding(
@@ -334,6 +423,16 @@ class _PlaceSearchState extends State<_PlaceSearch> {
             Expanded(
               child: ListView(
                 children: [
+                  if (road != null)
+                    ListTile(
+                      leading: const Icon(Icons.add_road, color: Lkw.amber),
+                      title: Text('Po dálnici $road'),
+                      subtitle: const Text('Najede na ni co nejdřív a sjede co nejblíž dalšímu bodu'),
+                      onTap: () {
+                        final a = roadAnchors(road);
+                        Navigator.pop(context, PlanPoint(road, a[a.length ~/ 2], kind: PlanKind.road));
+                      },
+                    ),
                   for (final s in saved)
                     ListTile(
                       leading: Icon(s.gate != null ? Icons.local_shipping : Icons.star, color: Lkw.amber),
@@ -341,7 +440,7 @@ class _PlaceSearchState extends State<_PlaceSearch> {
                       subtitle: s.note == null
                           ? null
                           : Text(s.note!, maxLines: 1, overflow: TextOverflow.ellipsis),
-                      onTap: () => Navigator.pop(context, PlanPoint(s.name, s.target)),
+                      onTap: () => Navigator.pop(context, PlanPoint(s.name, s.target, kind: kind)),
                     ),
                   for (final r in _results)
                     ListTile(
@@ -352,7 +451,8 @@ class _PlaceSearchState extends State<_PlaceSearch> {
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),
-                      onTap: () => Navigator.pop(context, PlanPoint(r.name, r.point)),
+                      onTap: () =>
+                          Navigator.pop(context, PlanPoint(r.name, r.point, address: r.address, kind: kind)),
                     ),
                 ],
               ),

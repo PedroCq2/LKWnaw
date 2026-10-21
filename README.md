@@ -35,7 +35,15 @@ Flutter aplikace pro navigaci nákladních vozidel nad OpenStreetMap a routing e
 - **Klidné přepočítávání** – krátký výkyv GPS nespouští novou trasu; bez internetu vede dál
   po uložené trase a ukazuje stav.
 - **Plán trasy** – začátek (moje poloha / jiné místo), více zastávek (přeřazení tažením), cíl;
-  uložené plány. Zastávku lze přidat i za jízdy z hledání parkovišť/pump.
+  uložené plány. Zastávky číslované a s adresou (ulice, číslo, PSČ, obec) – podle ní se řadí.
+  Zastávku lze přidat i za jízdy z hledání parkovišť/pump.
+- **Průjezdy** – „přes Neratovice, Mělník a pak po D8“: města se jen projedou (po hlavní silnici,
+  bez zastavení), dálnice se vynutí body na správném pásu (`road_anchors.dart`, vjezd a sjezd si
+  vybere trasa). V plánu tlačítko *Průjezd*, hlasem „naviguj na Kaufland Děčín přes Neratovice,
+  Mělník, pak na D8 a po dálnici“.
+- **Dlouhý úsek po dálnici** – kilometry v okénku a „Pokračujte rovně po D1 350 kilometrů“ až
+  k sjezdu, kde se opravdu sjíždí; rozdvojení na téže dálnici („držte se vlevo, abyste zůstali
+  na D1“) jen krátce ohlásí a ukáže pruhy, odpočet nepřeruší.
 - **Obnovení navigace** po restartu aplikace.
 - **Hlas** – nejlepší český hlas v telefonu (volba + rychlost v Nastavení), navigační zvuk
   ztlumí hudbu, hlášky se nepřekrývají; čísla silnic česky („dé čtyřicet šest“, „E čtyři sta
@@ -93,6 +101,8 @@ a v aplikaci (ikona kamionu → *Valhalla server*) zadejte `http://<IP-serveru>:
 | `app/lib/navigation/simulator.dart` | simulace jízdy |
 | `app/lib/screens/map_screen.dart` | mapa, navigační UI, hlasové pokyny |
 | `app/lib/screens/profile_screen.dart` | profil vozidla a nastavení |
+| `app/lib/services/road_via.dart` | průjezdy městy a po dálnici („přes Mělník, pak po D8“) |
+| `backend/roads/build_road_anchors.py` | body na českých dálnicích → `road_anchors.dart` |
 | `backend/docker-compose.yml` | vlastní Valhalla server |
 
 ## Plán dalšího vývoje

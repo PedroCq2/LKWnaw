@@ -3,14 +3,33 @@ import 'dart:convert';
 import 'package:latlong2/latlong.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-class PlanPoint {
-  final String name;
-  final LatLng point;
-  PlanPoint(this.name, this.point);
+/// Druh bodu na trase: zastávka (zastavit), průjezd městem („přes Mělník“), dálnice („pak po D8“).
+enum PlanKind { stop, town, road }
 
-  Map<String, dynamic> toJson() => {'name': name, 'lat': point.latitude, 'lon': point.longitude};
-  static PlanPoint fromJson(Map<String, dynamic> j) =>
-      PlanPoint(j['name'] as String, LatLng((j['lat'] as num).toDouble(), (j['lon'] as num).toDouble()));
+class PlanPoint {
+  final String name; // u dálnice její označení („D8“)
+  final LatLng point; // u dálnice jen orientačně – vjezd a výjezd se určí podle sousedních bodů
+  final String? address; // „Všebořická 2789/2a, 400 01 Ústí nad Labem“
+  final PlanKind kind;
+  PlanPoint(this.name, this.point, {this.address, this.kind = PlanKind.stop});
+
+  bool get isStop => kind == PlanKind.stop;
+
+  PlanPoint withAddress(String? a) => PlanPoint(name, point, address: a, kind: kind);
+
+  Map<String, dynamic> toJson() => {
+    'name': name,
+    'lat': point.latitude,
+    'lon': point.longitude,
+    if (address != null) 'addr': address,
+    if (kind != PlanKind.stop) 'kind': kind.name,
+  };
+  static PlanPoint fromJson(Map<String, dynamic> j) => PlanPoint(
+    j['name'] as String,
+    LatLng((j['lat'] as num).toDouble(), (j['lon'] as num).toDouble()),
+    address: j['addr'] as String?,
+    kind: PlanKind.values.where((k) => k.name == j['kind']).firstOrNull ?? PlanKind.stop,
+  );
 }
 
 /// Naplánovaná trasa: začátek (null = moje poloha), zastávky, cíl.

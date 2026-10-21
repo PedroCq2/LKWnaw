@@ -12,6 +12,10 @@ class NavState {
   final double remaining; // m do cíle
   final int nextManeuverIndex; // -1 = žádný
   final double distanceToNextManeuver; // m
+
+  /// Další opravdový manévr (sjezd, odbočka) – průjezdné „rovně“ na dálnici přeskočené.
+  final int nextActionIndex;
+  final double distanceToNextAction; // m
   final bool arrived;
 
   NavState({
@@ -22,8 +26,11 @@ class NavState {
     required this.remaining,
     required this.nextManeuverIndex,
     required this.distanceToNextManeuver,
+    int? nextActionIndex,
+    double? distanceToNextAction,
     required this.arrived,
-  });
+  }) : nextActionIndex = nextActionIndex ?? nextManeuverIndex,
+       distanceToNextAction = distanceToNextAction ?? distanceToNextManeuver;
 }
 
 /// Přichycení polohy k trase, výpočet postupu a detekce sjetí z trasy.
@@ -124,6 +131,10 @@ class NavEngine {
     final toNext = next >= 0
         ? math.max(0.0, cum[route.maneuvers[next].beginShapeIndex] - traveled)
         : remaining;
+    final action = route.actionFrom(next);
+    final toAction = action >= 0
+        ? math.max(0.0, cum[route.maneuvers[action].beginShapeIndex] - traveled)
+        : remaining;
 
     return NavState(
       snapped: snapped,
@@ -133,6 +144,8 @@ class NavEngine {
       remaining: remaining,
       nextManeuverIndex: next,
       distanceToNextManeuver: toNext,
+      nextActionIndex: action,
+      distanceToNextAction: toAction,
       arrived: remaining < 30,
     );
   }

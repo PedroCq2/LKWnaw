@@ -10,6 +10,7 @@ import 'http_headers.dart';
 import 'offline_search.dart';
 import 'offline_routing.dart';
 import 'restrictions.dart';
+import 'road_via.dart';
 import 'route_economy.dart';
 import 'town.dart';
 
@@ -42,7 +43,7 @@ class ValhallaClient {
     double? heading,
     bool delivery = false,
     List<LatLng> exclude = const [],
-    List<LatLng> via = const [],
+    List<ViaPoint> via = const [],
   }) async => (await _request(
     via: via,
     from: from,
@@ -61,7 +62,7 @@ class ValhallaClient {
     double? heading,
     bool delivery = false,
     List<LatLng> exclude = const [],
-    List<LatLng> via = const [],
+    List<ViaPoint> via = const [],
   }) async {
     Future<List<TruckRoute>> safe(Future<List<TruckRoute>> f) => f.catchError((_) => <TruckRoute>[]);
     final main = _request(
@@ -196,7 +197,7 @@ class ValhallaClient {
     List<LatLng> exclude = const [],
     int alternates = 0,
     Map<String, dynamic> extra = const {},
-    List<LatLng> via = const [],
+    List<ViaPoint> via = const [],
   }) async {
     List<TruckRoute> r;
     try {
@@ -212,6 +213,20 @@ class ValhallaClient {
         via: via,
       );
     } on RoutingException catch (e) {
+      // Průjezd městem: hlavní silnice nejblíž středu může být pro kamion neprůjezdná → kterákoli.
+      if (!e.network && via.any((v) => v.mainRoad)) {
+        return _request(
+          from: from,
+          to: to,
+          profile: profile,
+          heading: heading,
+          delivery: delivery,
+          exclude: exclude,
+          alternates: alternates,
+          extra: extra,
+          via: [for (final v in via) v.mainRoad ? ViaPoint(v.point, through: true) : v],
+        );
+      }
       // Cíl je pro kamion fyzicky nedostupný (výška, šířka, délka na příjezdu): navést co nejblíž.
       if (e.network || via.isNotEmpty) rethrow;
       final near = await _nearestReachable(from, to, profile, heading, delivery, exclude, extra);
@@ -333,13 +348,13 @@ class ValhallaClient {
     List<LatLng> exclude = const [],
     int alternates = 0,
     Map<String, dynamic> extra = const {},
-    List<LatLng> via = const [],
+    List<ViaPoint> via = const [],
   }) async {
     DateTime? deadline; // zásobování: časový limit, ať výpočet nikdy neviset
     Future<Map<String, dynamic>> raw(
       LatLng a,
       LatLng b,
-      List<LatLng> mid, {
+      List<ViaPoint> mid, {
       required bool exempt,
       double? head,
       int alt = 0,
@@ -370,7 +385,21 @@ class ValhallaClient {
       // (např. Teplice), ne pro tranzit (zóna 12 t v Praze). Každá etapa: s plnou hmotností k vjezdu
       // do obce cíle, odtud s výjimkou.
       const d = Distance();
-      final pts = [from, ...via, to];
+      // Etapy končí na zastávkách; průjezdy (města, dálnice) jedou v etapě s plnou hmotností.
+      final pts = [
+        from,
+        for (final v in via)
+          if (!v.through) v.point,
+        to,
+      ];
+      final mids = <List<ViaPoint>>[[]];
+      for (final v in via) {
+        if (v.through) {
+          mids.last.add(v);
+        } else {
+          mids.add([]);
+        }
+      }
       final legCount = pts.length - 1;
       final fullLegs = <Map<String, dynamic>>[]; // etapy s plnou hmotností (do vjezdu do obce cíle)
       final exemptWhole = <int>{}; // etapy celé s výjimkou (celé v obci cíle / jinak nelze)
@@ -381,18 +410,20 @@ class ValhallaClient {
         final alt = legCount == 1 ? alternates : 0;
         // Menší zlo: 1) s plnou hmotností až do cíle (žádná výjimka), 2) s plnou hmotností co nejblíž
         // cíli a s výjimkou jen nezbytný kousek, 3) teprve pak výjimka od vjezdu do obce vykládky.
-        var leg = await _reachable(raw, a, b, head, alt) ?? await _closestReachable(raw, a, b, head);
+        final mid = mids[k];
+        var leg =
+            await _reachable(raw, a, b, head, alt, mid) ?? await _closestReachable(raw, a, b, head, mid);
         if (leg == null) {
           try {
             final ex = parseTrip(
-              (await raw(a, b, const [], exempt: true, head: head))['trip'] as Map<String, dynamic>,
+              (await raw(a, b, mid, exempt: true, head: head))['trip'] as Map<String, dynamic>,
             );
             final entry = await _townEntry(ex).timeout(const Duration(seconds: 8));
-            if (entry != null) leg = await _reachable(raw, a, entry, head, alt);
+            if (entry != null) leg = await _reachable(raw, a, entry, head, alt, mid);
           } catch (_) {}
         }
         if (leg == null) {
-          leg = await raw(a, b, const [], exempt: true, head: head);
+          leg = await raw(a, b, mid, exempt: true, head: head);
           exemptWhole.add(k);
         }
         if (legCount == 1) alternatesData = (leg['alternates'] as List?) ?? const [];
@@ -419,7 +450,7 @@ class ValhallaClient {
               fullLegs[k] = await raw(
                 shape.first,
                 lastShape.last,
-                const [],
+                mids[k],
                 exempt: false,
                 head: _endHeading(pShape),
               );
@@ -709,7 +740,7 @@ class ValhallaClient {
     Future<Map<String, dynamic>> Function(
       LatLng,
       LatLng,
-      List<LatLng>, {
+      List<ViaPoint>, {
       required bool exempt,
       double? head,
       int alt,
@@ -718,10 +749,11 @@ class ValhallaClient {
     LatLng a,
     LatLng b,
     double? head,
-    int alt,
-  ) async {
+    int alt, [
+    List<ViaPoint> mid = const [],
+  ]) async {
     try {
-      final r = await raw(a, b, const [], exempt: false, head: head, alt: alt);
+      final r = await raw(a, b, mid, exempt: false, head: head, alt: alt);
       final legs = ((r['trip'] as Map)['legs'] as List);
       final end = decodePolyline6((legs.last as Map)['shape'] as String).last;
       return const Distance()(end, b) < 150 ? r : null;
@@ -738,7 +770,7 @@ class ValhallaClient {
     Future<Map<String, dynamic>> Function(
       LatLng,
       LatLng,
-      List<LatLng>, {
+      List<ViaPoint>, {
       required bool exempt,
       double? head,
       int alt,
@@ -746,18 +778,17 @@ class ValhallaClient {
     raw,
     LatLng a,
     LatLng b,
-    double? head,
-  ) async {
+    double? head, [
+    List<ViaPoint> via = const [],
+  ]) async {
     final key = '${b.latitude.toStringAsFixed(4)},${b.longitude.toStringAsFixed(4)}';
     final known = _closestCache[key];
     if (known != null) {
-      final r = await _reachable(raw, a, known, head, 0);
+      final r = await _reachable(raw, a, known, head, 0, via);
       if (r != null) return r;
     }
     try {
-      final ex = parseTrip(
-        (await raw(a, b, const [], exempt: true, head: head))['trip'] as Map<String, dynamic>,
-      );
+      final ex = parseTrip((await raw(a, b, via, exempt: true, head: head))['trip'] as Map<String, dynamic>);
       final cum = ex.cumulative;
       LatLng at(double back) {
         final i = cum.indexWhere((c) => c >= cum.last - back);
@@ -767,7 +798,7 @@ class ValhallaClient {
       Map<String, dynamic>? best;
       double? okBack, failBack = 0;
       for (var back = 500.0; back < cum.last * 0.95; back *= 2) {
-        final r = await _reachable(raw, a, at(back), head, 0);
+        final r = await _reachable(raw, a, at(back), head, 0, via);
         if (r != null) {
           best = r;
           okBack = back;
@@ -778,7 +809,7 @@ class ValhallaClient {
       }
       for (var i = 0; okBack != null && failBack != null && i < 3; i++) {
         final mid = (okBack + failBack) / 2;
-        final r = await _reachable(raw, a, at(mid), head, 0);
+        final r = await _reachable(raw, a, at(mid), head, 0, via);
         if (r != null) {
           best = r;
           okBack = mid;
@@ -875,7 +906,7 @@ class ValhallaClient {
     List<LatLng> exclude = const [],
     int alternates = 0,
     Map<String, dynamic> extra = const {},
-    List<LatLng> via = const [],
+    List<ViaPoint> via = const [],
   }) async {
     final origin = <String, dynamic>{'lat': from.latitude, 'lon': from.longitude};
     if (heading != null && heading >= 0) {
@@ -885,7 +916,7 @@ class ValhallaClient {
     final body = {
       'locations': [
         origin,
-        for (final v in via) {'lat': v.latitude, 'lon': v.longitude, 'type': 'break'},
+        for (final v in via) v.toJson(),
         {'lat': to.latitude, 'lon': to.longitude},
       ],
       'costing': 'truck',

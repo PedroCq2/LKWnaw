@@ -19,6 +19,7 @@ import '../navigation/simulator.dart';
 import '../navigation/voice_guide.dart';
 import '../services/geocoding.dart';
 import '../services/restrictions.dart';
+import '../services/road_via.dart';
 import '../services/lanes.dart';
 import '../services/highway_services.dart';
 import '../services/map_style.dart';
@@ -92,6 +93,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
 
   LatLng? _dest;
   String? _destName;
+  String? _destAddress; // adresa cíle z hledání / plánu (do přehledu v plánu trasy)
+  bool _preferHighway = false; // „… a po dálnici“: první varianta ta po dálnici
   TruckRoute? _route;
   List<RouteOption> _options = [];
   int _sel = 0;
@@ -126,7 +129,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   bool _sttReady = false;
   bool _listening = false;
   String _heard = '';
-  final List<(LatLng, String)> _stops = []; // zastávky po cestě (průjezdní body)
+  final List<PlanPoint> _stops = []; // zastávky a průjezdy (města, dálnice) po cestě
   LatLng? _planStart; // začátek naplánované trasy (null = moje poloha)
   String? _planStartName;
   double? _dlProgress; // stahování mapy trasy (0–1), null = nestahuje se
@@ -282,12 +285,14 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         _voiceGuidance(nav);
         _warningVoice(nav);
         _speedWarning(nav, speed);
-        // Projetá zastávka: odebrat (při přepočtu se už nepoužije).
+        // Projetá zastávka / průjezd: odebrat (při přepočtu se už nepoužije).
         for (final st in [..._stops]) {
-          if (const Distance()(pos, st.$1) < 80) {
+          final at = st.isStop ? st.point : _passAt[st];
+          if (at != null && const Distance()(pos, at) < (st.isStop ? 80 : 150)) {
             _stops.remove(st);
+            _passAt.remove(st);
             _saveTrip();
-            _say('Zastávka ${st.$2}.');
+            if (st.isStop) _say('Zastávka ${st.name}.');
             _syncLayers();
           }
         }
@@ -824,7 +829,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
           // Obchod / adresa, když se jede k rampě jinam.
           if (_destAddr != null && _dest != null && const Distance()(_destAddr!, _dest!) > 25)
             (_destAddr!, {'stop': true}),
-          for (final st in _stops) (st.$1, {'stop': true}),
+          for (final st in _stops)
+            if (st.kind != PlanKind.road) (st.point, {'stop': true}),
         ]),
       );
       await _updateMeLayer();
@@ -985,7 +991,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                       heading: heading,
                       delivery: _settings.delivery,
                       exclude: _excluded,
-                      via: [for (final st in _stops) st.$1],
+                      via: _viaPoints(from, to),
                     )
                     .timeout(const Duration(seconds: 45)),
               ),
@@ -998,10 +1004,16 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                   heading: heading,
                   delivery: _settings.delivery,
                   exclude: _excluded,
-                  via: [for (final st in _stops) st.$1],
+                  via: _viaPoints(from, to),
                 )
                 .timeout(const Duration(seconds: 45));
       if (!mounted || opts.isEmpty) return;
+      // „… a po dálnici“: varianta po dálnici dopředu.
+      final hw = opts.indexWhere((o) => o.route.hasHighway);
+      if (_preferHighway && hw > 0) {
+        final o = opts.removeAt(hw);
+        opts.insert(0, RouteOption('Po dálnici', o.route));
+      }
       _offline = false;
       _options = opts;
       _extrasLoaded.clear();
@@ -1035,9 +1047,50 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     }
   }
 
+  /// Kde se průjezd (město, dálnice) počítá za projetý: bod, kterým má trasa projet.
+  final Map<PlanPoint, LatLng> _passTarget = {};
+
+  /// Totéž, přichycené na vybranou trasu (projetím tohoto místa průjezd zmizí).
+  final Map<PlanPoint, LatLng> _passAt = {};
+
+  /// Body mezi startem a cílem pro Valhallu: zastávky, průjezdy městy (po hlavní silnici, ne uličkami)
+  /// a dálnice („pak po D8“: vjezd co nejblíž předchozímu bodu, výjezd co nejblíž dalšímu).
+  List<ViaPoint> _viaPoints(LatLng from, LatLng to) {
+    final out = <ViaPoint>[];
+    for (final (i, st) in _stops.indexed) {
+      switch (st.kind) {
+        case PlanKind.stop:
+          out.add(ViaPoint(st.point));
+        case PlanKind.town:
+          out.add(ViaPoint(st.point, through: true, mainRoad: true));
+          _passTarget[st] = st.point;
+        case PlanKind.road:
+          final next = _stops.skip(i + 1).where((x) => x.kind != PlanKind.road).firstOrNull?.point ?? to;
+          final road = roadVia(st.name, out.isEmpty ? from : out.last.point, next);
+          out.addAll(road);
+          if (road.isNotEmpty) _passTarget[st] = road.last.point;
+      }
+    }
+    return out;
+  }
+
   Future<void> _selectRoute(int i, {bool fit = false}) async {
     if (i >= _options.length) return;
     final r = _options[i].route;
+    _passAt.clear();
+    for (final MapEntry(key: st, value: p) in _passTarget.entries) {
+      if (!_stops.contains(st)) continue;
+      var best = r.shape.first;
+      var bestD = double.infinity;
+      for (final q in r.shape) {
+        final d = const Distance()(p, q);
+        if (d < bestD) {
+          bestD = d;
+          best = q;
+        }
+      }
+      _passAt[st] = best;
+    }
     setState(() {
       _sel = i;
       _route = r;
@@ -1215,7 +1268,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     label: const Text('Přidat jako průjezdní bod'),
                     onPressed: () async {
                       Navigator.pop(ctx);
-                      setState(() => _stops.add((s.point, s.name)));
+                      setState(() => _stops.add(PlanPoint(s.name, s.point)));
                       _say('Přidána zastávka ${s.name}.');
                       _saveTrip();
                       await _syncLayers();
@@ -1318,9 +1371,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
           'lon': d.longitude,
           'name': _destName,
           'saved': _destSaved?.id,
-          'stops': [
-            for (final st in _stops) {'lat': st.$1.latitude, 'lon': st.$1.longitude, 'name': st.$2},
-          ],
+          'stops': [for (final st in _stops) st.toJson()],
           'at': DateTime.now().millisecondsSinceEpoch,
         }),
       );
@@ -1366,7 +1417,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     final saved = _saved.items.where((e) => e.id == t!['saved']).firstOrNull;
     _setDestination(LatLng((t['lat'] as num).toDouble(), (t['lon'] as num).toDouble()), name, saved: saved);
     for (final st in (t['stops'] as List? ?? const [])) {
-      _stops.add((LatLng((st['lat'] as num).toDouble(), (st['lon'] as num).toDouble()), '${st['name']}'));
+      _stops.add(PlanPoint.fromJson(Map<String, dynamic>.from(st as Map)));
     }
     // Počkat na trasu a rovnou jet.
     for (var i = 0; i < 60 && (_route == null || _routing); i++) {
@@ -1464,11 +1515,23 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     _applyCamera();
   }
 
-  void _setDestination(LatLng p, String name, {SavedPlace? saved, bool compute = true, bool ramp = true}) {
+  void _setDestination(
+    LatLng p,
+    String name, {
+    SavedPlace? saved,
+    bool compute = true,
+    bool ramp = true,
+    String? address,
+    List<PlanPoint> stops = const [],
+  }) {
     FocusScope.of(context).unfocus();
+    _destAddress = address;
+    _preferHighway = false;
     _destRamp = null;
     _excluded.clear();
-    _stops.clear();
+    _stops
+      ..clear()
+      ..addAll(stops);
     _planStart = null;
     final sp = saved ?? _saved.near(p);
     setState(() {
@@ -1590,8 +1653,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
             : TripPlan(
                 name: _destName ?? 'Cíl',
                 start: _planStart == null ? null : PlanPoint(_planStartName ?? 'Začátek', _planStart!),
-                stops: [for (final st in _stops) PlanPoint(st.$2, st.$1)],
-                dest: PlanPoint(_destName ?? 'Cíl', _dest!),
+                stops: [..._stops],
+                dest: PlanPoint(_destName ?? 'Cíl', _dest!, address: _destAddress),
               ));
     final plan = await Navigator.push<TripPlan>(
       context,
@@ -1600,7 +1663,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       ),
     );
     if (plan == null || !mounted) return;
-    _setDestination(plan.dest.point, plan.dest.name, compute: false, ramp: false);
+    _setDestination(plan.dest.point, plan.dest.name, compute: false, ramp: false, address: plan.dest.address);
     // Zastávky a cíl: k rampám (uložený vjezd, jinak předpočítaná rampa z rejstříku).
     Future<LatLng> toRamp(LatLng p) async {
       final sp = _saved.near(p);
@@ -1609,7 +1672,9 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       return r != null && const Distance()(r.point, p) > 25 ? r.point : p;
     }
 
-    final stops = [for (final s in plan.stops) (await toRamp(s.point), s.name)];
+    final stops = [
+      for (final s in plan.stops) s.isStop ? PlanPoint(s.name, await toRamp(s.point), address: s.address) : s,
+    ];
     final destRamp = OfflineSearch.instance.hasRamps && _destSaved?.gate == null
         ? await rampFor(plan.dest.point)
         : null;
@@ -1659,7 +1724,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       _setDestination(p, name);
       if (_navigating) _say('Naviguji na $name.');
     } else if (choice == 'stop') {
-      setState(() => _stops.add((p, name)));
+      setState(() => _stops.add(PlanPoint(name, p)));
       if (_navigating) {
         _say('Přidána zastávka $name.');
         _saveTrip();
@@ -1890,6 +1955,33 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     await Voice.instance.say(text, force: true);
   }
 
+  /// Průjezd z hlasu: dálnice („D8“), nebo město. Rozpoznaná řeč bývá bez čárek („Neratovice Mělník“)
+  /// – když se celé jméno nenajde, zkusí jednotlivá slova.
+  Future<List<PlanPoint>> _resolveVia(String v) async {
+    if (roadAnchors(v).isNotEmpty) {
+      final a = roadAnchors(v);
+      return [PlanPoint(v, a[a.length ~/ 2], kind: PlanKind.road)];
+    }
+    Future<Place?> town(String q) async {
+      try {
+        final r = await searchPlaces(q, near: _pos);
+        bool isTown(Place p) => p.kind == 'Město' || p.kind == 'Obec';
+        final exact = r.where((p) => fold(p.name) == fold(q)).toList();
+        return exact.where(isTown).firstOrNull ?? exact.firstOrNull ?? r.where(isTown).firstOrNull;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    PlanPoint point(Place p) => PlanPoint(p.name, p.point, address: p.address, kind: PlanKind.town);
+    final whole = await town(v);
+    if (whole != null) return [point(whole)];
+    final words = v.split(RegExp(r'\s+')).where((w) => w.length > 2).toList();
+    if (words.length < 2) return [];
+    final each = [for (final w in words) await town(w)];
+    return each.contains(null) ? [] : [for (final p in each) point(p!)];
+  }
+
   Future<void> _handleVoice(String text) async {
     if (text.trim().isEmpty) return;
     final c = parseCommand(text);
@@ -1909,13 +2001,32 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         }
         final p = found.first;
         if (c.action == VoiceAction.addStop && _dest != null) {
-          setState(() => _stops.add((p.point, p.name)));
+          setState(() => _stops.add(PlanPoint(p.name, p.point, address: p.address)));
           await _answer('Přidávám zastávku ${p.name}.');
           await _syncLayers();
           await _computeRoute(reroute: _navigating);
         } else {
-          await _answer('Hledám trasu na ${p.name}${p.address != null ? ', ${p.address}' : ''}.');
-          _setDestination(p.point, p.name);
+          // „… přes Neratovice, Mělník, pak na D8“: průjezdy v pořadí, jak zazněly.
+          final via = <PlanPoint>[];
+          final missing = <String>[];
+          for (final v in c.via) {
+            final found = await _resolveVia(v);
+            if (found.isEmpty) missing.add(v);
+            via.addAll(found);
+          }
+          final how = [
+            if (via.any((v) => v.kind == PlanKind.town))
+              'přes ${via.where((v) => v.kind == PlanKind.town).map((v) => v.name).join(', ')}',
+            for (final v in via.where((v) => v.kind == PlanKind.road)) 'po ${v.name}',
+            if (c.highway && !via.any((v) => v.kind == PlanKind.road)) 'po dálnici',
+          ];
+          await _answer(
+            'Hledám trasu na ${p.name}${p.address != null ? ', ${p.address}' : ''}'
+            '${how.isEmpty ? '' : ' ${how.join(' a ')}'}.'
+            '${missing.isEmpty ? '' : ' Nenašla jsem ${missing.join(', ')}.'}',
+          );
+          _setDestination(p.point, p.name, address: p.address, stops: via);
+          _preferHighway = c.highway;
         }
       case VoiceAction.start:
         if (_route != null && !_navigating) {
@@ -1973,7 +2084,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         await _reportProblem(note: text);
       case VoiceAction.help:
         await _answer(
-          'Můžete říct: naviguj na Kaufland Olomouc, přidej zastávku, najdi parkoviště, kolik zbývá, '
+          'Můžete říct: naviguj na Kaufland Děčín přes Mělník a pak po D8, přidej zastávku, '
+          'najdi parkoviště, kolik zbývá, '
           'přepočítej, zruš navigaci, nebo tady navigovala špatně.',
         );
       case VoiceAction.unknown:
@@ -2829,7 +2941,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
 
   /// Malé okénko (obraz v obraze): jen mapa, šipka s dálkou a rychlost.
   Widget _pipOverlay(TruckRoute? route, NavState? nav, int? limit) {
-    final i = nav?.nextManeuverIndex ?? -1;
+    final i = nav?.nextActionIndex ?? -1;
     final m = route != null && i >= 0 ? route.maneuvers[i] : null;
     return Stack(
       children: [
@@ -2852,7 +2964,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      formatDistance(nav.distanceToNextManeuver),
+                      formatDistance(nav.distanceToNextAction),
                       maxLines: 1,
                       style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: Lkw.amber),
                     ),
@@ -2885,18 +2997,25 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   }
 
   Widget _banner(TruckRoute route, NavState? nav) {
-    final i = nav?.nextManeuverIndex ?? -1;
+    // Kilometry k opravdovému manévru (sjezd, odbočka); křižovatky „rovně“ po cestě jen pod ním.
+    final i = nav?.nextActionIndex ?? -1;
     final m = i >= 0 ? route.maneuvers[i] : null;
     Maneuver? then;
-    if (m != null && i + 1 < route.maneuvers.length) {
-      final gap =
-          route.cumulative[route.maneuvers[i + 1].beginShapeIndex] - route.cumulative[m.beginShapeIndex];
-      if (gap < 500) then = route.maneuvers[i + 1];
+    final n = m != null && i + 1 < route.maneuvers.length ? route.actionFrom(i + 1) : -1;
+    if (m != null && n >= 0) {
+      final gap = route.cumulative[route.maneuvers[n].beginShapeIndex] - route.cumulative[m.beginShapeIndex];
+      if (gap < 500) then = route.maneuvers[n];
     }
+    final p = nav?.nextManeuverIndex ?? -1;
+    final passing = nav != null && p >= 0 && p != i && nav.distanceToNextManeuver < 3000
+        ? route.maneuvers[p]
+        : null;
     final road = nav == null ? null : route.roadNameAt(nav.segmentIndex);
     return ManeuverBanner(
       maneuver: m,
-      distance: nav?.distanceToNextManeuver ?? 0,
+      distance: nav?.distanceToNextAction ?? 0,
+      passing: passing,
+      passingDistance: nav?.distanceToNextManeuver ?? 0,
       then: then,
       road: road == null || road.isEmpty ? null : road,
       roadKm: road == null || nav == null ? null : route.kilometerAt(nav.traveled, road),
@@ -3281,8 +3400,20 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                         ),
                         for (final st in _stops)
                           InputChip(
-                            avatar: const Icon(Icons.add_location_alt, size: 18, color: Lkw.amber),
-                            label: Text('Zastávka: ${st.$2}', overflow: TextOverflow.ellipsis),
+                            avatar: Icon(
+                              switch (st.kind) {
+                                PlanKind.stop => Icons.add_location_alt,
+                                PlanKind.town => Icons.location_city,
+                                PlanKind.road => Icons.add_road,
+                              },
+                              size: 18,
+                              color: Lkw.amber,
+                            ),
+                            label: Text(switch (st.kind) {
+                              PlanKind.stop => 'Zastávka: ${st.name}',
+                              PlanKind.town => 'Přes ${st.name}',
+                              PlanKind.road => 'Po ${st.name}',
+                            }, overflow: TextOverflow.ellipsis),
                             visualDensity: VisualDensity.compact,
                             onDeleted: () {
                               setState(() => _stops.remove(st));

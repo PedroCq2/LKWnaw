@@ -57,7 +57,21 @@ class ManeuverBanner extends StatelessWidget {
   /// Aktuální silnice a staničení (zobrazí se v liště tabule).
   final String? road;
   final double? roadKm;
-  const ManeuverBanner({super.key, this.maneuver, required this.distance, this.then, this.road, this.roadKm});
+
+  /// Křižovatka před manévrem, kterou se jen projede rovně (dálniční rozdvojení): pruhy a směr,
+  /// kilometry nahoře ale počítají až k [maneuver].
+  final Maneuver? passing;
+  final double passingDistance;
+  const ManeuverBanner({
+    super.key,
+    this.maneuver,
+    required this.distance,
+    this.then,
+    this.road,
+    this.roadKm,
+    this.passing,
+    this.passingDistance = 0,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -135,7 +149,44 @@ class ManeuverBanner extends StatelessWidget {
               ],
             ),
           ),
-          if (m?.lanes != null && distance < 2500)
+          if (passing case final p?)
+            Container(
+              color: Lkw.graphite,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
+              child: Row(
+                children: [
+                  Text(
+                    formatDistance(passingDistance),
+                    style: const TextStyle(color: Lkw.amber, fontSize: 15, fontWeight: FontWeight.w800),
+                  ),
+                  const SizedBox(width: 10),
+                  const Icon(Icons.straight, color: Lkw.text, size: 22),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      [
+                        'rovně',
+                        if (p.streetNames.isNotEmpty) p.streetNames.first,
+                        if (p.exitToward.isNotEmpty) 'směr ${p.exitToward.take(2).join(', ')}',
+                      ].join(' · '),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: Lkw.text, fontSize: 16),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          if (passing?.lanes != null && passingDistance < 2500)
+            Container(
+              color: Lkw.graphite,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: LaneRow(lanes: passing!.lanes!),
+              ),
+            )
+          else if (m?.lanes != null && distance < 2500)
             Container(
               color: Lkw.graphite,
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),

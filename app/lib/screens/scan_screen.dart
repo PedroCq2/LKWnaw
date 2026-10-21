@@ -264,7 +264,11 @@ class _ScanScreenState extends State<ScanScreen> {
       final order = bestOrder(m, returnToStart: _roundTrip);
       final points = [
         for (final k in order)
-          PlanPoint(stops[k - 1].addr.name ?? stops[k - 1].addr.label, stops[k - 1].place!.point),
+          PlanPoint(
+            stops[k - 1].addr.name ?? stops[k - 1].addr.label,
+            stops[k - 1].place!.point,
+            address: stops[k - 1].addr.name != null ? stops[k - 1].addr.label : null,
+          ),
       ];
       final plan = _roundTrip && widget.start != null
           ? TripPlan(name: 'Rozvoz', stops: points, dest: PlanPoint('Zpět na start', widget.start!))

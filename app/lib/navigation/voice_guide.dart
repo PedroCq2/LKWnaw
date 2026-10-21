@@ -42,28 +42,51 @@ class VoiceGuide {
   /// nechají předchozí doznít.
   List<String> _update(NavState nav, double speedKmh, DateTime now, DateTime lastSpokenAt) {
     final out = <String>[];
-    final i = nav.nextManeuverIndex;
-    if (i < 0) return out;
     final r = route, e = engine;
-    final m = r.maneuvers[i];
-    final d = nav.distanceToNextManeuver;
-    final key = m.beginShapeIndex;
     final mps = speedKmh / 3.6;
+    // Průjezdné „rovně“ (křižovatka s jinou dálnicí): jedna krátká hláška těsně před ní, bez odpočtu –
+    // kilometry se počítají až k sjezdu, kde se opravdu sjíždí.
+    final p = nav.nextManeuverIndex;
+    if (p >= 0 && p != nav.nextActionIndex) {
+      final pm = r.maneuvers[p];
+      final pd = nav.distanceToNextManeuver;
+      // Rozdvojení (držte se vlevo) dřív – je třeba zařadit se do pruhu.
+      final fork = pm.type == 23 || pm.type == 24;
+      if ((pm.synthetic || pm.type == 22 || fork) &&
+          pd <= (fork ? math.max(800.0, mps * 30) : math.max(500.0, mps * 25)) &&
+          pd > 30 &&
+          e.preSpoken.add(pm.beginShapeIndex) &&
+          // Sjezd hned za křižovatkou má přednost – zazní v odpočtu.
+          nav.distanceToNextAction - pd > 1500) {
+        out.add('${_capital(phrase(pm))}.');
+        return out;
+      }
+    }
+    final i = nav.nextActionIndex;
+    if (i < 0) return out;
+    final m = r.maneuvers[i];
+    final d = nav.distanceToNextAction;
+    final key = m.beginShapeIndex;
     final roundaboutExit = m.type == 27;
     // „Teď“: ~4 s před manévrem, nejméně 50 m. Výjezd z kruháče až těsně u něj –
     // 50 m před ním je v kruhovém objezdu ještě předchozí výjezd.
     final nowDist = roundaboutExit ? math.max(8.0, mps * 1.2) : math.max(50.0, mps * 4);
 
-    // Po manévru: dlouhý úsek bez pokynu → „Pokračujte rovně (po D1) 12 kilometrů.“
+    // Po manévru: dlouhý úsek bez pokynu → „Pokračujte rovně (po D1) 120 kilometrů“ – až k sjezdu,
+    // ne k nejbližší křižovatce, kterou se jen projede (a po ní se to znovu neříká).
     if (i > 0 && d > 3000 && !e.preSpoken.contains(key) && !e.continueSpoken.contains(key)) {
-      final prev = r.maneuvers[i - 1];
+      var pi = i - 1;
+      while (pi > 0 && r.isPassThrough(pi)) {
+        pi--;
+      }
+      final prev = r.maneuvers[pi];
       final passed = nav.traveled - r.cumulative[prev.beginShapeIndex.clamp(0, r.shape.length - 1)];
       if (passed > 900) {
         e.continueSpoken.add(key);
       } else if (now.difference(lastSpokenAt) > const Duration(seconds: 7)) {
         // Až předchozí pokyn dozní – ne „Najeďte na nájezd.“ a hned „Pokračujte 7 km.“
         e.continueSpoken.add(key);
-        final road = roadAhead(prev);
+        final road = _motorwayAfter(prev) ?? roadAhead(prev);
         out.add('Pokračujte rovně${road == null ? '' : _po(road)} ${kmWords(d)}.');
       }
     }
@@ -150,6 +173,8 @@ class VoiceGuide {
       }
     }
     if (i < 0) return fallback;
+    i = r.actionFrom(i);
+    if (i < 0) return fallback;
     final m = r.maneuvers[i];
     final d = _at(m) - traveled;
     if (d > 600) return fallback;
@@ -177,6 +202,20 @@ class VoiceGuide {
     } else if (gap < 350 && n.type != 27 && !const {4, 5, 6}.contains(n.type)) {
       engine.chained[n.beginShapeIndex] = gap;
     }
+  }
+
+  /// Číslo dálnice za manévrem z atributů silnic („D1“) – Valhalla u nájezdu často uvede jen „E 55“.
+  String? _motorwayAfter(Maneuver m) {
+    final from = _at(m);
+    for (final e in route.edges) {
+      if (e.end <= m.beginShapeIndex) continue;
+      if (route.cumulative[e.begin.clamp(0, route.cumulative.length - 1)] - from > 3000) break;
+      if (e.use == 'ramp') continue;
+      for (final n in e.names) {
+        if (RegExp(r'^D\d+$').hasMatch(n.trim())) return n.trim();
+      }
+    }
+    return null;
   }
 
   double _at(Maneuver m) => route.cumulative[m.beginShapeIndex.clamp(0, route.cumulative.length - 1)];
@@ -215,7 +254,7 @@ class VoiceGuide {
     return text;
   }
 
-  static bool _isStreet(String road) => !RegExp(r'^(D\d|I+/|E\d|silnici )').hasMatch(road);
+  static bool _isStreet(String road) => !RegExp(r'^(D\d|I+/|E ?\d|silnici )').hasMatch(road);
   // Ulice: „do ulice Na Stínadlech“, „po ulici …“; silnice: „na D1“, „po silnici 13“.
   static String _on(String road) => _isStreet(road) ? ' do ulice $road' : ' na $road';
   static String _po(String road) => _isStreet(road) ? ' po ulici $road' : ' po $road';
