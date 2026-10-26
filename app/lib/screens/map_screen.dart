@@ -21,6 +21,7 @@ import '../services/geocoding.dart';
 import '../services/restrictions.dart';
 import '../services/lanes.dart';
 import '../services/highway_services.dart';
+import '../services/ignored_restrictions.dart';
 import '../services/map_style.dart';
 import '../services/problem_reports.dart';
 import '../services/voice_commands.dart';
@@ -111,6 +112,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   RouteSimulator? _sim;
   final Set<RouteWarning> _warnSpoken = {};
   final List<LatLng> _excluded = []; // mosty, kterým se trasa vyhýbá (zásobování)
+  final Set<String> _detourAnnounced = {}; // objížďky už ohlášené za jízdy
 
   List<Place> _results = [];
   SavedPlaces _saved = SavedPlaces([]);
@@ -159,6 +161,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     SavedPlaces.load().then((v) {
       if (mounted) setState(() => _saved = v);
     });
+    IgnoredRestrictions.instance.load();
     // Den/noc podle Slunce – kontrola jednou za minutu.
     _nightTimer = Timer.periodic(const Duration(minutes: 1), (_) {
       if (mounted && _styleNight != _night) setState(() {});
@@ -972,6 +975,10 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     try {
       final client = ValhallaClient(_settings.valhallaUrl);
       final heading = (reroute || _speedKmh > 5) && from == _pos ? _heading : null;
+      await IgnoredRestrictions.instance.load();
+      final ignored = IgnoredRestrictions.instance.items.isEmpty
+          ? null
+          : IgnoredRestrictions.instance.isIgnored;
       // Při navigaci jen jedna trasa (rychlý přepočet), jinak varianty na výběr.
       final opts = reroute || _navigating
           ? [
@@ -986,6 +993,9 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                       delivery: _settings.delivery,
                       exclude: _excluded,
                       via: [for (final st in _stops) st.$1],
+                      // Přepočet za jízdy: vysvětlení objížďky jen když už je vidět (neplatná omezení).
+                      explain: !reroute,
+                      ignored: ignored,
                     )
                     .timeout(const Duration(seconds: 45)),
               ),
@@ -999,6 +1009,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                   delivery: _settings.delivery,
                   exclude: _excluded,
                   via: [for (final st in _stops) st.$1],
+                  ignored: ignored,
                 )
                 .timeout(const Duration(seconds: 45));
       if (!mounted || opts.isEmpty) return;
@@ -1007,6 +1018,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       _extrasLoaded.clear();
       if (!reroute) _dlProgress = null;
       await _selectRoute(0, fit: !reroute && !_navigating);
+      _announceDetour(opts.first.route);
       final miss = opts.first.route.unreachableM;
       if (miss > 60 && !reroute) {
         final msg =
@@ -1062,7 +1074,12 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       if (mounted) setState(() {});
     } catch (_) {}
     try {
-      final w = await loadRouteWarnings(r, _settings.profile, delivery: _settings.delivery);
+      final w = await loadRouteWarnings(
+        r,
+        _settings.profile,
+        delivery: _settings.delivery,
+        ignored: IgnoredRestrictions.instance.isIgnored,
+      );
       if (!mounted || _route != r) return;
       setState(() => r.warnings = w);
       await _syncLayers();
@@ -1468,6 +1485,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     FocusScope.of(context).unfocus();
     _destRamp = null;
     _excluded.clear();
+    _detourAnnounced.clear();
     _stops.clear();
     _planStart = null;
     final sp = saved ?? _saved.near(p);
@@ -1667,6 +1685,131 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       await _syncLayers();
       await _computeRoute(reroute: _navigating);
     }
+  }
+
+  /// Za jízdy: nová trasa jede oklikou kvůli omezení → jednou říct proč (s možností „neplatí“).
+  void _announceDetour(TruckRoute r) {
+    final d = r.detour;
+    if (!_navigating || d == null || d.viaIgnored) return;
+    final key = d.causes.map((c) => c.title).join('|');
+    if (!_detourAnnounced.add(key)) return;
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(d.short),
+          duration: const Duration(seconds: 8),
+          action: SnackBarAction(label: 'PROČ?', onPressed: () => _showDetour(r)),
+        ),
+      );
+  }
+
+  /// Proč trasa jede oklikou – omezení na kratší cestě a „Omezení tu neplatí“ / „Zase platí“.
+  Future<void> _showDetour(TruckRoute r) async {
+    final d = r.detour;
+    if (d == null) return;
+    final causes = <String, RouteWarning>{for (final c in d.causes) c.title: c}.values.toList();
+    final action = await showModalBottomSheet<(String, RouteWarning)>(
+      context: context,
+      backgroundColor: Lkw.panel,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                d.viaIgnored ? 'Trasa přes neplatné omezení' : 'Proč tudy?',
+                style: const TextStyle(color: Lkw.amber, fontSize: 20, fontWeight: FontWeight.w900),
+              ),
+              const SizedBox(height: 8),
+              Text(d.explanation, style: const TextStyle(color: Lkw.text, fontSize: 16)),
+              const SizedBox(height: 8),
+              for (final c in causes)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(c.onBridge ? Icons.landscape : Icons.scale, color: Lkw.amber),
+                  title: Text(
+                    c.title,
+                    style: const TextStyle(color: Lkw.text, fontWeight: FontWeight.w700),
+                  ),
+                  subtitle: const Text('Klepněte – ukázat na mapě', style: TextStyle(color: Lkw.muted)),
+                  onTap: () => Navigator.pop(ctx, ('show', c)),
+                  trailing: d.viaIgnored
+                      ? TextButton(
+                          onPressed: () => Navigator.pop(ctx, ('restore', c)),
+                          child: const Text('ZASE PLATÍ'),
+                        )
+                      : TextButton(
+                          onPressed: () => Navigator.pop(ctx, ('ignore', c)),
+                          child: const Text('NEPLATÍ'),
+                        ),
+                ),
+              if (!d.viaIgnored)
+                const Text(
+                  '„Neplatí“ použijte, jen když značka na místě opravdu není (např. most po opravě, '
+                  'zastaralý údaj v mapě). Za dodržení dopravních značek odpovídá řidič.',
+                  style: TextStyle(color: Lkw.muted, fontSize: 13),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (action == null || !mounted) return;
+    final (what, c) = action;
+    switch (what) {
+      case 'show':
+        await _showPoint(c.point);
+      case 'ignore':
+        final ok = await showDialog<bool>(
+          context: context,
+          builder: (dc) => AlertDialog(
+            title: Text('${c.title} – omezení tu neplatí?'),
+            content: const Text(
+              'Navigace pak povede přes toto místo. Uloží se jen v tomto telefonu; zrušit jde v Nastavení '
+              '→ Omezení, která neplatí. Hlášení se uloží i k opravě mapy.',
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(dc, false), child: const Text('Zrušit')),
+              FilledButton(onPressed: () => Navigator.pop(dc, true), child: const Text('Neplatí – jet tudy')),
+            ],
+          ),
+        );
+        if (ok != true) return;
+        await IgnoredRestrictions.instance.add(c);
+        // Most, kterému se trasa dřív vyhnula (zásobování), už neobjíždět.
+        _excluded.removeWhere((p) => const Distance()(p, c.point) < 150);
+        await ProblemReports.add({
+          'type': 'omezení neplatí',
+          'time': DateTime.now().toIso8601String(),
+          'note': c.title,
+          'pos': [c.point.latitude, c.point.longitude],
+          if (c.wayId != null) 'osmWay': c.wayId,
+          'profile': _settings.profile.toJson(),
+        });
+        _toast('Označeno: ${c.title} neplatí. Přepočítávám trasu.');
+        await _computeRoute(reroute: _navigating);
+      case 'restore':
+        await IgnoredRestrictions.instance.restore(c);
+        _toast('${c.title} zase platí. Přepočítávám trasu.');
+        await _computeRoute(reroute: _navigating);
+    }
+  }
+
+  /// Přiblíží mapu na místo (omezení na kratší cestě).
+  Future<void> _showPoint(LatLng p) async {
+    setState(() => _follow = false);
+    try {
+      await _map?.updateContentInsets(EdgeInsets.zero, false);
+      await _map?.animateCamera(
+        ml.CameraUpdate.newCameraPosition(ml.CameraPosition(target: _ml(p), zoom: 16, tilt: 0, bearing: 0)),
+        duration: const Duration(milliseconds: 600),
+      );
+    } catch (_) {}
   }
 
   /// Dlouhé podržení: vjezd pro kamiony / objet místo na trase / nový cíl.
@@ -2399,8 +2542,14 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   }
 
   Future<void> _openSettings() async {
+    final ignored = IgnoredRestrictions.instance.items.length;
     await Navigator.push(context, MaterialPageRoute(builder: (_) => SettingsScreen(settings: _settings)));
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    setState(() {});
+    // Omezení zase platí → trasa znovu kolem.
+    if (IgnoredRestrictions.instance.items.length != ignored && _dest != null) {
+      _computeRoute(reroute: _navigating);
+    }
   }
 
   Future<void> _chooseLayer() async {
@@ -3295,6 +3444,17 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                             avatar: const Icon(Icons.warning, size: 16, color: Lkw.danger),
                             label: Text('$bad omezení'),
                             visualDensity: VisualDensity.compact,
+                          ),
+                        if (route.detour case final d?)
+                          ActionChip(
+                            avatar: Icon(
+                              d.viaIgnored ? Icons.check_circle_outline : Icons.alt_route,
+                              size: 18,
+                              color: Lkw.amber,
+                            ),
+                            label: Text(d.short, maxLines: 1, overflow: TextOverflow.ellipsis),
+                            visualDensity: VisualDensity.compact,
+                            onPressed: () => _showDetour(route),
                           ),
                         if (_settings.simulate)
                           const Chip(

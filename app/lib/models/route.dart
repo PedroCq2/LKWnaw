@@ -106,6 +106,24 @@ class Maneuver {
   static List<String> _signTexts(Map? sign, String key) =>
       ((sign?[key] as List?) ?? const []).map((e) => '${(e as Map)['text']}').toList();
 
+  /// Stejný pokyn s indexy posunutými o [offset] (spojení dvou tras za sebou).
+  Maneuver shifted(int offset) => Maneuver(
+    type: type,
+    instruction: instruction,
+    alertInstruction: alertInstruction,
+    preInstruction: preInstruction,
+    postInstruction: postInstruction,
+    streetNames: streetNames,
+    beginShapeIndex: beginShapeIndex + offset,
+    endShapeIndex: endShapeIndex + offset,
+    lengthKm: lengthKm,
+    exitNumber: exitNumber,
+    exitBranch: exitBranch,
+    exitToward: exitToward,
+    synthetic: synthetic,
+    roundaboutExit: roundaboutExit,
+  );
+
   factory Maneuver.fromJson(Map<String, dynamic> j) => Maneuver(
     type: (j['type'] as num).toInt(),
     instruction: j['instruction'] as String? ?? '',
@@ -177,6 +195,9 @@ class TruckRoute {
   /// Kamionová omezení a radary podél trasy (doplňuje se na pozadí).
   List<RouteWarning> warnings = const [];
 
+  /// Proč trasa jede oklikou (kratší cesta vede přes omezení hmotnosti), nebo null.
+  RouteDetour? detour;
+
   /// Exity dálnic na trase: (vzdálenost po trase m, kilometr dálnice, silnice).
   /// V ČR je číslo exitu = kilometr dálnice → staničení se dopočítá mezi nimi.
   List<(double, double, String?)> kmPoints = const [];
@@ -229,6 +250,46 @@ class TruckRoute {
     return (national.isNotEmpty ? national : out).take(3).toList();
   }
 
+  /// Spojí trasy za sebou (konec jedné = začátek další) do jedné – bez „Dorazili jste“ / „Vyjeďte“
+  /// na spojích.
+  static TruckRoute concat(List<TruckRoute> parts) {
+    if (parts.length == 1) return parts.first;
+    final shape = <LatLng>[];
+    final maneuvers = <Maneuver>[];
+    final legShapes = <(String, int)>[];
+    var length = 0.0, time = 0.0, deliveryKm = 0.0;
+    var toll = false, highway = false;
+    for (final (i, p) in parts.indexed) {
+      // Poslední bod předchozí části = první bod další, nezdvojovat.
+      final offset = shape.isEmpty ? 0 : shape.length - 1;
+      shape.addAll(shape.isEmpty ? p.shape : p.shape.skip(1));
+      final legs = p.legShapes.isNotEmpty ? p.legShapes : [if (p.encodedShape != null) (p.encodedShape!, 0)];
+      for (final (enc, o) in legs) {
+        legShapes.add((enc, o + offset));
+      }
+      var ms = p.maneuvers;
+      if (i < parts.length - 1 && ms.length > 1) ms = ms.sublist(0, ms.length - 1);
+      if (i > 0 && ms.length > 1) ms = ms.sublist(1);
+      maneuvers.addAll(ms.map((m) => m.shifted(offset)));
+      length += p.lengthKm;
+      time += p.timeSec;
+      deliveryKm += p.deliveryKm;
+      toll |= p.hasToll;
+      highway |= p.hasHighway;
+    }
+    return TruckRoute(
+        shape: shape,
+        maneuvers: maneuvers,
+        lengthKm: length,
+        timeSec: time,
+        hasToll: toll,
+        hasHighway: highway,
+        legShapes: legShapes,
+      )
+      ..deliveryKm = deliveryKm
+      ..unreachableM = parts.last.unreachableM;
+  }
+
   int? speedLimitAt(int seg) => seg >= 0 && seg < speedLimits.length ? speedLimits[seg] : null;
   String? roadNameAt(int seg) => seg >= 0 && seg < roadNames.length ? roadNames[seg] : null;
 
@@ -255,11 +316,22 @@ class RouteWarning {
   /// Stojí za zobrazení řidiči: radar, zákaz předjíždění, překročený nebo těsný limit.
   /// (Např. „4,8 m“ po celé D8 přes tunely kamion 4 m nijak neomezuje – neukazovat.)
   bool get relevant =>
-      violates || tight || type == WarningType.speedCamera || type == WarningType.noOvertakingHgv;
+      violates ||
+      tight ||
+      overridden ||
+      type == WarningType.speedCamera ||
+      type == WarningType.noOvertakingHgv;
   final bool onBridge; // omezení je na mostě (fyzická nosnost)
 
   /// Doplňující text (např. časové omezení „6–22 h“).
   final String? note;
+
+  /// Silnice / ulice (z OSM) a id cesty v OSM – pro „most 12 t (Ve Žlíbku)“ a „omezení neplatí“.
+  final String? road;
+  final int? wayId;
+
+  /// Řidič označil omezení jako neplatné (značka na místě není) – nepočítá se jako porušení.
+  final bool overridden;
 
   RouteWarning({
     required this.type,
@@ -270,7 +342,38 @@ class RouteWarning {
     required this.violates,
     this.tight = false,
     this.onBridge = false,
+    this.road,
+    this.wayId,
+    this.overridden = false,
   });
+
+  /// Krátký popis pro řidiče: „most 12 t (Ve Žlíbku)“, „zákaz nad 6 t (Náchodská)“.
+  String get title {
+    final what = switch (type) {
+      WarningType.weight => onBridge ? 'most $label' : 'zákaz nad $label',
+      WarningType.axleLoad => 'náprava $label',
+      WarningType.height => 'výška $label',
+      WarningType.width => 'šířka $label',
+      WarningType.length => 'délka $label',
+      WarningType.speedCamera => 'radar',
+      WarningType.noOvertakingHgv => 'zákaz předjíždění',
+    };
+    return road == null || road!.isEmpty ? what : '$what (${roadLabel(road!)})';
+  }
+
+  /// Stejné omezení označené jako neplatné.
+  RouteWarning asOverridden() => RouteWarning(
+    type: type,
+    value: value,
+    note: note,
+    atMeters: atMeters,
+    point: point,
+    violates: false,
+    onBridge: onBridge,
+    road: road,
+    wayId: wayId,
+    overridden: true,
+  );
 
   String get label {
     final v = value;
@@ -311,4 +414,41 @@ class RouteWarning {
         return 'zákaz předjíždění nákladních vozidel';
     }
   }
+}
+
+/// Název silnice pro řidiče: číslo z OSM (`ref` = „16“) jako „silnice 16“, jinak jméno ulice.
+String roadLabel(String road) => RegExp(r'^\d+$').hasMatch(road) ? 'silnice $road' : road;
+
+/// Proč trasa kamionu jede oklikou: kratší cesta (bez hmotnostních zákazů) vede přes omezení,
+/// které vozidlo překračuje – most 12 t, zákaz nad 6 t…
+class RouteDetour {
+  /// O kolik je objížďka delší (km, min) než kratší cesta přes omezení.
+  final double extraKm;
+  final double extraMin;
+
+  /// Omezení na kratší cestě (most 12 t…), kvůli kterým trasa objíždí.
+  final List<RouteWarning> causes;
+
+  /// Trasa jede kratší cestou přes [causes], protože je řidič označil jako neplatná.
+  final bool viaIgnored;
+
+  const RouteDetour({
+    required this.extraKm,
+    required this.extraMin,
+    required this.causes,
+    this.viaIgnored = false,
+  });
+
+  String get _what => causes.length == 1 ? causes.first.title : '${causes.first.title} a další';
+  String get _km => extraKm.round() < 1 ? '1' : '${extraKm.round()}';
+
+  /// Text do panelu: „Objížďka +14 km: most 12 t (Ve Žlíbku)“ / „Přes most 12 t (Ve Žlíbku) – neplatí“.
+  String get short => viaIgnored ? 'Přes $_what – neplatí' : 'Objížďka +$_km km: $_what';
+
+  /// Celé vysvětlení.
+  String get explanation => viaIgnored
+      ? 'Trasa jede přes $_what – omezení je v telefonu označené jako neplatné. '
+            'Ušetří asi $_km km (${extraMin.round()} min).'
+      : 'Kratší cesta vede přes $_what. Vaše vozidlo limit překračuje, proto navigace jede jinudy: '
+            '+$_km km, +${extraMin.round()} min.';
 }

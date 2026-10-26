@@ -389,6 +389,11 @@ class WarningCard extends StatelessWidget {
                 color: bad ? Colors.white : Lkw.muted,
               ),
             ),
+          if (w.overridden)
+            const Text(
+              'NEPLATÍ',
+              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: Lkw.amber),
+            ),
           const SizedBox(height: 4),
           Text(
             formatDistance(distance),

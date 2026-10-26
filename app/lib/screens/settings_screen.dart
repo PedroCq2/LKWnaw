@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
 
+import '../services/ignored_restrictions.dart';
 import '../services/problem_reports.dart';
 import '../services/settings.dart';
 import '../services/sign_store.dart';
@@ -266,6 +267,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 );
               },
             ),
+            _head('OMEZENÍ, KTERÁ NEPLATÍ'),
+            if (IgnoredRestrictions.instance.items.isEmpty)
+              const ListTile(
+                leading: Icon(Icons.check_circle_outline),
+                title: Text('Žádná'),
+                subtitle: Text(
+                  'Když navigace objíždí kvůli omezení, které na místě neplatí (most po opravě…), '
+                  'klepněte u trasy na „Objížďka“ → „Neplatí“.',
+                ),
+              ),
+            for (final r in IgnoredRestrictions.instance.items)
+              ListTile(
+                leading: Icon(r.bridge ? Icons.landscape : Icons.scale),
+                title: Text(r.title),
+                subtitle: Text(
+                  'Označeno ${r.added.day}. ${r.added.month}. ${r.added.year} – navigace tudy jezdí',
+                ),
+                trailing: IconButton(
+                  tooltip: 'Zase platí',
+                  icon: const Icon(Icons.delete_outline),
+                  onPressed: () async {
+                    await IgnoredRestrictions.instance.remove(r);
+                    setState(() {});
+                  },
+                ),
+              ),
             _head('POKROČILÉ'),
             SwitchListTile(
               title: const Text('Simulace jízdy (demo)'),
