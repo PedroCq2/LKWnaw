@@ -20,11 +20,13 @@ const _overpassMirrors = [
 /// Stáhne z OSM kamionová omezení (maxheight/maxweight/…) a radary podél trasy.
 ///
 /// Při [delivery] (zásobování) se hmotnostní limit počítá jako porušení jen na mostě.
+/// Omezení, která řidič označil jako neplatná ([ignored]), se ukážou, ale nepočítají jako porušení.
 Future<List<RouteWarning>> loadRouteWarnings(
   TruckRoute route,
   TruckProfile truck, {
   double maxMeters = 300000,
   bool delivery = false,
+  bool Function(RouteWarning)? ignored,
 }) async {
   final index = RouteIndex(route);
   final routeWays = {for (final e in route.edges) ?e.wayId};
@@ -83,7 +85,7 @@ Future<List<RouteWarning>> loadRouteWarnings(
           for (final g in geom) LatLng((g['lat'] as num).toDouble(), (g['lon'] as num).toDouble()),
         ], onRoute: routeWays.contains(id));
         if (on == null) continue;
-        out.addAll(_fromTags(tags, on.$1, on.$2, truck, delivery));
+        out.addAll(_fromTags(tags, on.$1, on.$2, truck, delivery, wayId: id));
       } else {
         if (!seenNodes.add(id)) continue;
         final p = LatLng((e['lat'] as num).toDouble(), (e['lon'] as num).toDouble());
@@ -101,6 +103,11 @@ Future<List<RouteWarning>> loadRouteWarnings(
           out.addAll(_fromTags(tags, at, p, truck, delivery));
         }
       }
+    }
+  }
+  if (ignored != null) {
+    for (var i = 0; i < out.length; i++) {
+      if (out[i].type == WarningType.weight && ignored(out[i])) out[i] = out[i].asOverridden();
     }
   }
   out.sort((a, b) => a.atMeters.compareTo(b.atMeters));
@@ -172,9 +179,17 @@ Future<List<dynamic>?> overpassQuery(String q) async {
   return null;
 }
 
-List<RouteWarning> _fromTags(Map<String, dynamic> tags, double at, LatLng p, TruckProfile t, bool delivery) {
+List<RouteWarning> _fromTags(
+  Map<String, dynamic> tags,
+  double at,
+  LatLng p,
+  TruckProfile t,
+  bool delivery, {
+  int? wayId,
+}) {
   final out = <RouteWarning>[];
   final bridge = tags['bridge'] != null && tags['bridge'] != 'no';
+  final road = (tags['name'] ?? tags['ref']) as String?;
   void add(String key, WarningType type, double Function(String) parse, double truckValue) {
     final raw = tags[key] ?? tags['$key:physical'];
     if (raw is! String) return;
@@ -194,6 +209,8 @@ List<RouteWarning> _fromTags(Map<String, dynamic> tags, double at, LatLng p, Tru
         violates: violates,
         tight: tight,
         onBridge: bridge,
+        road: road,
+        wayId: wayId,
       ),
     );
   }

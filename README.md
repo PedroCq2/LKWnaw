@@ -31,6 +31,11 @@ Flutter aplikace pro navigaci nákladních vozidel nad OpenStreetMap a routing e
 - **POI podél trasy** – truckparky/pumpy/servisy seřazené podle dojezdu (km, min, odbočka
   od trasy) s filtry WC, sprchy, jídlo, zdarma, hlídané.
 - **Objet toto místo** – dlouhé podržení na trase → trasa se přepočítá kolem.
+- **Proč objížďka** – když trasa jede oklikou kvůli omezení hmotnosti, u trasy je napsáno proč
+  („Objížďka +14 km: most 12 t (Ve Žlíbku)“) a omezení jde ukázat na mapě.
+- **Omezení, která neplatí** – most po opravě nebo zastaralý údaj v mapě: řidič omezení označí jako
+  neplatné a navigace tudy pojede (výjimka jen na tom úseku, jinde platí vše dál). Seznam a zrušení
+  v Nastavení; uloží se i do hlášení k opravě mapy.
 - **Mapa offline** – stažení mapy podél trasy (MapLibre offline regiony, zoom 8–14).
 - **Klidné přepočítávání** – krátký výkyv GPS nespouští novou trasu; bez internetu vede dál
   po uložené trase a ukazuje stav.

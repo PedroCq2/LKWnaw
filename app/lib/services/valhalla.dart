@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 
 import 'delivery_shortcut.dart';
+import 'detour.dart';
 import 'http_headers.dart';
 import 'offline_search.dart';
 import 'offline_routing.dart';
@@ -35,6 +36,8 @@ class ValhallaClient {
   final String baseUrl;
   ValhallaClient(this.baseUrl);
 
+  /// [explain] = zjistit, proč trasa objíždí ([TruckRoute.detour]); [ignored] = omezení, která řidič
+  /// označil jako neplatná – trasa přes ně smí vést.
   Future<TruckRoute> route({
     required LatLng from,
     required LatLng to,
@@ -43,15 +46,31 @@ class ValhallaClient {
     bool delivery = false,
     List<LatLng> exclude = const [],
     List<LatLng> via = const [],
-  }) async => (await _request(
-    via: via,
-    from: from,
-    to: to,
-    profile: profile,
-    heading: heading,
-    delivery: delivery,
-    exclude: exclude,
-  )).first;
+    bool explain = true,
+    bool Function(RouteWarning)? ignored,
+  }) async {
+    final r = (await _request(
+      via: via,
+      from: from,
+      to: to,
+      profile: profile,
+      heading: heading,
+      delivery: delivery,
+      exclude: exclude,
+    )).first;
+    if (!explain && ignored == null) return r;
+    return _detour(
+      r,
+      from: from,
+      to: to,
+      profile: profile,
+      heading: heading,
+      delivery: delivery,
+      exclude: exclude,
+      via: via,
+      ignored: ignored,
+    );
+  }
 
   /// Několik variant: nejrychlejší + alternativa, bez mýta, nejkratší (bez duplicit).
   Future<List<RouteOption>> routeOptions({
@@ -62,19 +81,38 @@ class ValhallaClient {
     bool delivery = false,
     List<LatLng> exclude = const [],
     List<LatLng> via = const [],
+    bool Function(RouteWarning)? ignored,
   }) async {
     Future<List<TruckRoute>> safe(Future<List<TruckRoute>> f) => f.catchError((_) => <TruckRoute>[]);
-    final main = _request(
-      from: from,
-      to: to,
-      profile: profile,
-      heading: heading,
-      delivery: delivery,
-      exclude: exclude,
-      via: via,
-      // Valhalla počítá alternativy jen pro trasu bez zastávek.
-      alternates: via.isEmpty ? 2 : 0,
-    );
+    final main =
+        _request(
+          from: from,
+          to: to,
+          profile: profile,
+          heading: heading,
+          delivery: delivery,
+          exclude: exclude,
+          via: via,
+          // Valhalla počítá alternativy jen pro trasu bez zastávek.
+          alternates: via.isEmpty ? 2 : 0,
+        ).then(
+          (list) async => [
+            // Proč nejrychlejší trasa objíždí (most 12 t…) – souběžně s ostatními variantami.
+            if (list.isNotEmpty)
+              await _detour(
+                list.first,
+                from: from,
+                to: to,
+                profile: profile,
+                heading: heading,
+                delivery: delivery,
+                exclude: exclude,
+                via: via,
+                ignored: ignored,
+              ),
+            ...list.skip(1),
+          ],
+        );
     // Zásobování: výpočet je náročnější (obec vykládky) → jen hlavní trasa a její alternativy.
     if (delivery) {
       final out = <RouteOption>[];
@@ -128,6 +166,207 @@ class ValhallaClient {
       add('Nejkratší', r);
     }
     return _rank(out, profile);
+  }
+
+  /// Proč trasa objíždí: trasa bez hmotnostních zákazů je znatelně kratší → které omezení na ní vozidlo
+  /// překračuje (P3 Horní Počernice → D11: most Ve Žlíbku 12 t → po D10 na sjezd 10 a zpět, +14 km).
+  /// Vyplní [TruckRoute.detour]. Když řidič všechna omezení na zkratce označil jako neplatná ([ignored]),
+  /// vrátí trasu přes ně (výjimka z hmotnosti jen na tom úseku), jinak [main].
+  Future<TruckRoute> _detour(
+    TruckRoute main, {
+    required LatLng from,
+    required LatLng to,
+    required TruckProfile profile,
+    double? heading,
+    bool delivery = false,
+    List<LatLng> exclude = const [],
+    List<LatLng> via = const [],
+    bool Function(RouteWarning)? ignored,
+  }) async {
+    Future<TruckRoute> run() async {
+      final ref = parseTrip(
+        (await _routeData(
+              from: from,
+              to: to,
+              via: via,
+              profile: profile,
+              heading: heading,
+              weightExempt: true,
+              exclude: exclude,
+            ))['trip']
+            as Map<String, dynamic>,
+      );
+      if (!significantDetour(main, ref)) return main;
+      final sections = divergentSections(ref, main);
+      final causes = <(RouteWarning, int)>[]; // omezení a úsek zkratky, na kterém leží
+      for (final (k, (a, b)) in sections.indexed) {
+        final part = TruckRoute(
+          shape: ref.shape.sublist(a, b + 1),
+          maneuvers: const [],
+          lengthKm: 0,
+          timeSec: 0,
+          hasToll: false,
+          hasHighway: false,
+        );
+        for (final w in await loadRouteWarnings(part, profile, maxMeters: double.infinity)) {
+          if (w.violates && w.type == WarningType.weight) causes.add((w, k));
+        }
+      }
+      if (causes.isEmpty) return main;
+      main.detour = RouteDetour(
+        extraKm: main.lengthKm - ref.lengthKm,
+        extraMin: (main.timeSec - ref.timeSec) / 60,
+        causes: [for (final c in causes) c.$1],
+      );
+      if (ignored == null) return main;
+      // Úseky zkratky, kde řidič označil jako neplatná všechna omezení → jet tudy.
+      final open = [
+        for (final (k, sec) in sections.indexed)
+          if (causes.any((c) => c.$2 == k) && causes.where((c) => c.$2 == k).every((c) => ignored(c.$1))) sec,
+      ];
+      if (open.isEmpty) return main;
+      final r = await _throughSections(
+        ref,
+        main,
+        open,
+        from: from,
+        to: to,
+        profile: profile,
+        heading: heading,
+        delivery: delivery,
+        exclude: exclude,
+        via: via,
+        ignored: ignored,
+      );
+      if (r == null || r.timeSec > main.timeSec - 60) return main;
+      r.detour = RouteDetour(
+        extraKm: main.lengthKm - r.lengthKm,
+        extraMin: (main.timeSec - r.timeSec) / 60,
+        causes: [
+          for (final c in causes)
+            if (open.contains(sections[c.$2])) c.$1.asOverridden(),
+        ],
+        viaIgnored: true,
+      );
+      return r;
+    }
+
+    // Vysvětlení je doplněk – při pomalém spojení / chybě zůstane původní trasa.
+    try {
+      return await run().timeout(const Duration(seconds: 20));
+    } catch (_) {
+      return main;
+    }
+  }
+
+  /// Trasa po zkratce [ref] přes úseky [sections] (s výjimkou z hmotnosti jen na nich, ±100–150 m),
+  /// jinde s plnou hmotností. Části navazují směrem jízdy; null = nepodařilo se navázat / otáčení.
+  Future<TruckRoute?> _throughSections(
+    TruckRoute ref,
+    TruckRoute main,
+    List<(int, int)> sections, {
+    required LatLng from,
+    required LatLng to,
+    required TruckProfile profile,
+    double? heading,
+    bool delivery = false,
+    List<LatLng> exclude = const [],
+    List<LatLng> via = const [],
+    required bool Function(RouteWarning) ignored,
+  }) async {
+    const d = Distance();
+    final cum = ref.cumulative;
+    final total = cum.last;
+    // Zastávky = konce etap trasy ref.
+    final stopAt = [for (var k = 1; k < ref.legShapes.length; k++) cum[ref.legShapes[k].$2]];
+    if (stopAt.length != via.length) return null;
+    final windows = <(double, double)>[];
+    for (final (a, b) in sections) {
+      var s = cum[a] - 100, e = cum[b] + 150;
+      if (s < 150) s = 0;
+      if (total - e < 150) e = total;
+      // Zastávka uprostřed zkratky – raději původní trasa.
+      if (stopAt.any((x) => x > s - 50 && x < e + 50)) return null;
+      if (windows.isNotEmpty && s <= windows.last.$2) {
+        windows.last = (windows.last.$1, e);
+      } else {
+        windows.add((s, e));
+      }
+    }
+
+    Future<TruckRoute> leg(
+      LatLng a,
+      LatLng b, {
+      required bool exempt,
+      double? head,
+      double? toHead,
+      List<LatLng> mid = const [],
+    }) async => parseTrip(
+      (await _routeData(
+            from: a,
+            to: b,
+            via: mid,
+            profile: profile,
+            heading: head,
+            toHeading: toHead,
+            weightExempt: exempt,
+            exclude: exclude,
+          ))['trip']
+          as Map<String, dynamic>,
+    );
+
+    final parts = <TruckRoute>[];
+    var cur = from;
+    var head = heading;
+    var stop = 0;
+    var pos = 0.0;
+    for (final (s, e) in windows) {
+      final a = s == 0 ? from : pointAlong(ref, s);
+      final hA = s == 0 ? heading : headingAlong(ref, s);
+      if (s > 0) {
+        final mid = <LatLng>[];
+        while (stop < via.length && stopAt[stop] < s) {
+          mid.add(via[stop++]);
+        }
+        final p = await leg(cur, a, exempt: false, head: head, toHead: hA, mid: mid);
+        if (d(p.shape.last, a) > 60) return null;
+        parts.add(p);
+      }
+      final b = e >= total ? to : pointAlong(ref, e);
+      final hB = e >= total ? null : headingAlong(ref, e);
+      final x = await leg(a, b, exempt: true, head: hA, toHead: hB);
+      if (d(x.shape.last, b) > (e >= total ? 150 : 60)) return null;
+      // Bez hmotnostních zákazů smí úsek projet jen přes omezení označená jako neplatná.
+      final ws = await loadRouteWarnings(x, profile, maxMeters: double.infinity, ignored: ignored);
+      if (ws.any((w) => w.violates && w.type == WarningType.weight)) return null;
+      parts.add(x);
+      cur = b;
+      head = hB;
+      pos = e;
+    }
+    if (pos < total) {
+      // Zbytek k cíli jako obvykle (zásobování v obci vykládky, bez otáčení).
+      parts.add(
+        (await _request(
+          from: cur,
+          to: to,
+          profile: profile,
+          heading: head,
+          delivery: delivery,
+          exclude: exclude,
+          via: via.sublist(stop),
+        )).first,
+      );
+    }
+    if (d(parts.first.shape.first, from) > 150) return null;
+    for (var i = 0; i + 1 < parts.length; i++) {
+      if (d(parts[i].shape.last, parts[i + 1].shape.first) > 60) return null;
+    }
+    final r = TruckRoute.concat(parts);
+    // Napojení částí nesmí přidat „otočte se“.
+    int uturns(TruckRoute t) => t.maneuvers.where((m) => m.type == 12 || m.type == 13).length;
+    if (uturns(r) > uturns(main)) return null;
+    return r;
   }
 
   /// Pořadí variant: první je ta nejlepší pro kamion (ekonomická doba – třídy silnic, odbočky,
@@ -871,6 +1110,7 @@ class ValhallaClient {
     required LatLng to,
     required TruckProfile profile,
     double? heading,
+    double? toHeading, // směr jízdy v cíli (napojení další části trasy bez otáčení)
     bool weightExempt = false,
     List<LatLng> exclude = const [],
     int alternates = 0,
@@ -882,11 +1122,16 @@ class ValhallaClient {
       origin['heading'] = heading.round();
       origin['heading_tolerance'] = 45;
     }
+    final dest = <String, dynamic>{'lat': to.latitude, 'lon': to.longitude};
+    if (toHeading != null && toHeading >= 0) {
+      dest['heading'] = toHeading.round();
+      dest['heading_tolerance'] = 45;
+    }
     final body = {
       'locations': [
         origin,
         for (final v in via) {'lat': v.latitude, 'lon': v.longitude, 'type': 'break'},
-        {'lat': to.latitude, 'lon': to.longitude},
+        dest,
       ],
       'costing': 'truck',
       'costing_options': {
