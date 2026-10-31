@@ -35,11 +35,94 @@ class SearchException implements Exception {
   String toString() => message;
 }
 
+/// Druh výsledku „souřadnice“ – naviguje se přesně na bod (bez hledání rampy).
+const coordinatesKind = 'Souřadnice';
+
+/// Souřadnice z textu nebo odkazu: „50.0054241, 14.4723392“, „50,00542 14,47234“, „50.00542N, 14.47234E“,
+/// „50°0'19.5"N 14°28'20.4"E“, odkazy z Google / Apple Map a Mapy.cz. null = nejsou to souřadnice.
+LatLng? parseCoordinates(String text) {
+  var t = text.trim();
+  try {
+    t = Uri.decodeFull(t);
+  } catch (_) {}
+  double n(String s) => double.parse(s.replaceAll(',', '.'));
+  LatLng? ok(double lat, double lon) =>
+      lat.abs() <= 90 && lon.abs() <= 180 && (lat != 0 || lon != 0) ? LatLng(lat, lon) : null;
+  // Mapy.cz: x = zeměpisná délka, y = šířka.
+  final mapy = RegExp(r'[?&]x=(-?\d+\.\d+)&(?:.*&)?y=(-?\d+\.\d+)').firstMatch(t);
+  if (mapy != null) return ok(n(mapy[2]!), n(mapy[1]!));
+  final link = RegExp(
+    r'(?:@|[?&](?:q|ll|query|center|daddr|destination|sll)=)(-?\d{1,2}\.\d+),\s*(-?\d{1,3}\.\d+)',
+  ).firstMatch(t);
+  if (link != null) return ok(n(link[1]!), n(link[2]!));
+  final dms = RegExp(
+    r'''(\d{1,2})\s*°\s*(\d{1,2})\s*['′]\s*(\d{1,2}(?:[.,]\d+)?)\s*(?:["″]|'')?\s*([NS])[\s,;]+'''
+    r'''(\d{1,3})\s*°\s*(\d{1,2})\s*['′]\s*(\d{1,2}(?:[.,]\d+)?)\s*(?:["″]|'')?\s*([EW])''',
+    caseSensitive: false,
+  ).firstMatch(t);
+  if (dms != null) {
+    double deg(int i) => n(dms[i]!) + n(dms[i + 1]!) / 60 + n(dms[i + 2]!) / 3600;
+    final lat = deg(1) * (dms[4]!.toUpperCase() == 'S' ? -1 : 1);
+    final lon = deg(5) * (dms[8]!.toUpperCase() == 'W' ? -1 : 1);
+    return ok(lat, lon);
+  }
+  // Celý text = dvojice čísel (desetinná tečka i čárka), případně s N/S/E/W.
+  final dec = RegExp(
+    r'^([NS])?\s*(-?\d{1,2}[.,]\d{3,})\s*°?\s*([NS])?\s*[,;\s]\s*([EW])?\s*(-?\d{1,3}[.,]\d{3,})\s*°?\s*([EW])?$',
+    caseSensitive: false,
+  ).firstMatch(t);
+  if (dec == null) return null;
+  final south = (dec[1] ?? dec[3] ?? '').toUpperCase() == 'S';
+  final west = (dec[4] ?? dec[6] ?? '').toUpperCase() == 'W';
+  return ok(n(dec[2]!) * (south ? -1 : 1), n(dec[5]!) * (west ? -1 : 1));
+}
+
+/// Text bez úlomků souřadnic a dlouhých čísel (vložené „50.0054241, 14, SAPA, 148 00 4723392-Praha-Libuš“
+/// → „14 SAPA 148 00 Praha-Libuš“).
+String cleanSearchQuery(String q) => q
+    .replaceAll(RegExp(r'-?\d{1,3}\.\d{4,}'), ' ')
+    .replaceAll(RegExp(r'\d{6,}'), ' ')
+    .split(RegExp(r'[\s,;]+'))
+    .map((w) => w.replaceAll(RegExp(r'^[-.]+|[-.]+$'), ''))
+    .where((w) => w.isNotEmpty)
+    .join(' ');
+
+/// Když server na celý dotaz nic nenajde: bez čísel (číslo popisné, PSČ), pak bez posledních slov
+/// („tamda foods libušská 319“ → „tamda foods libušská“ → „tamda foods“).
+List<String> relaxedQueries(String q) {
+  final words = q.split(RegExp(r'[\s,]+')).where((w) => w.isNotEmpty).toList();
+  final noNum = words.where((w) => !RegExp(r'\d').hasMatch(w)).toList();
+  final out = <String>[];
+  void add(List<String> ws) {
+    final s = ws.join(' ');
+    if (ws.isNotEmpty && s != words.join(' ') && !out.contains(s)) out.add(s);
+  }
+
+  add(noNum);
+  for (var n = noNum.length - 1; n >= 2; n--) {
+    add(noNum.sublist(0, n));
+  }
+  return out.take(3).toList();
+}
+
+/// Výsledky dál než 2 500 km (Florida, Filipíny…) kamionu v Evropě k ničemu nejsou.
+const _maxResultKm = 2500;
+
 /// Vyhledávání míst: Photon (OSM, toleruje názvy firem jako „kaufland dc olomouc“),
 /// záložně Nominatim. Bez internetu (nebo když servery nic nenajdou) hledá
-/// ve staženém rejstříku ČR v telefonu ([OfflineSearch]).
+/// ve staženém rejstříku ČR v telefonu ([OfflineSearch]). Souřadnice a odkazy z map vedou rovnou na bod.
 Future<List<Place>> searchPlaces(String query, {LatLng? near}) async {
-  final q = query.trim();
+  final at = parseCoordinates(query);
+  if (at != null) {
+    return [
+      Place(
+        '${at.latitude.toStringAsFixed(6)}, ${at.longitude.toStringAsFixed(6)}',
+        at,
+        kind: coordinatesKind,
+      ),
+    ];
+  }
+  final q = cleanSearchQuery(query.trim());
   if (q.isEmpty) return [];
   final local = OfflineSearch.instance.ready ? OfflineSearch.instance.search(q) : <Place>[];
   // Řidičský slang → jak bývá místo pojmenované v OSM.
@@ -53,17 +136,28 @@ Future<List<Place>> searchPlaces(String query, {LatLng? near}) async {
   final results = <Place>[];
   final seen = <String>{};
   var online = false;
-  try {
+  const dist = Distance();
+  final from = near ?? const LatLng(49.8, 15.5);
+  Future<void> photon(Iterable<String> qs) async {
     final lists = await Future.wait(
-      variants.map((v) => _photon(v, near).timeout(Duration(seconds: local.isEmpty ? 12 : 6))),
+      qs.map((v) => _photon(v, near).timeout(Duration(seconds: local.isEmpty ? 12 : 6))),
     );
     online = true;
     for (final list in lists) {
       for (final p in list) {
+        if (dist(from, p.point) > _maxResultKm * 1000) continue;
         final key =
             '${p.name}|${p.point.latitude.toStringAsFixed(3)}|${p.point.longitude.toStringAsFixed(3)}';
         if (seen.add(key)) results.add(p);
       }
+    }
+  }
+
+  try {
+    await photon(variants);
+    for (final v in relaxedQueries(q)) {
+      if (results.isNotEmpty) break;
+      await photon([v]);
     }
   } catch (_) {}
   if (results.isNotEmpty) return _withLocal(rankPlaces(results, low).take(12).toList(), local);
@@ -95,7 +189,8 @@ List<Place> _withLocal(List<Place> online, List<Place> local) {
 const _skipValues = {'bus_stop', 'tram_stop', 'stop_position', 'platform', 'station', 'halt'};
 
 Future<List<Place>> _photon(String q, LatLng? near) async {
-  final params = {'q': q, 'limit': '10'};
+  // Jen Evropa – ať místa výsledků nezaberou firmy z Floridy a Filipín.
+  final params = {'q': q, 'limit': '10', 'bbox': '-25,34,45,72'};
   if (near != null) {
     params['lat'] = near.latitude.toStringAsFixed(4);
     params['lon'] = near.longitude.toStringAsFixed(4);
@@ -110,7 +205,12 @@ Future<List<Place>> _photon(String q, LatLng? near) async {
     if (_skipValues.contains(p['osm_value'])) continue;
     final c = (f['geometry']['coordinates'] as List).cast<num>();
     final street = [p['street'], p['housenumber']].whereType<String>().join(' ');
-    final city = (p['city'] ?? p['town'] ?? p['village'] ?? p['county']) as String?;
+    var city = (p['city'] ?? p['town'] ?? p['village'] ?? p['county']) as String?;
+    // Část města jako na poště: „Praha-Libuš“, „Brno-Černovice“.
+    final district = p['district'] as String?;
+    if (city != null && district != null && district != city && !district.contains(city)) {
+      city = '$city-$district';
+    }
     final address = [
       if (street.isNotEmpty) street,
       if (p['postcode'] != null) '${p['postcode']} ${city ?? ''}'.trim() else ?city,
@@ -192,9 +292,26 @@ List<Place> rankPlaces(List<Place> list, String q) {
   final words = _fold(q).split(RegExp(r'[\s,.-]+')).where((w) => w.length > 1).toSet();
   final key = words.where((w) => !_genericWords.contains(w)).toList();
   final wantsDepot = words.any(_genericWords.contains);
-  int match(Place p) {
-    final hay = _fold('${p.name} ${p.address ?? ''}');
-    return key.where(hay.contains).length;
+  // Slovo v názvu váží víc než v adrese, číslo (popisné, PSČ) jen celé a málo. Slovo, které má
+  // většina výsledků (obec „Praha-Libuš“), rozhoduje méně než slovo jen u jednoho („SAPA“, „Tamda“).
+  final folded = {for (final p in list) p: (_fold(p.name), _fold(p.address ?? ''))};
+  bool isNum(String w) => RegExp(r'^\d+$').hasMatch(w);
+  bool has(String hay, String w) =>
+      isNum(w) ? RegExp(r'\d+').allMatches(hay).any((m) => m[0] == w) : hay.contains(w);
+  final df = {
+    for (final w in key) w: list.where((p) => has('${folded[p]!.$1} ${folded[p]!.$2}', w)).length,
+  };
+  double match(Place p) {
+    final (name, addr) = folded[p]!;
+    var s = 0.0;
+    for (final w in key) {
+      if (df[w] == 0) continue;
+      final weight = isNum(w)
+          ? (has('$name $addr', w) ? 0.5 : 0.0)
+          : (has(name, w) ? 2.0 : (has(addr, w) ? 1.0 : 0.0));
+      s += weight / df[w]!;
+    }
+    return s;
   }
 
   final idx = {for (var i = 0; i < list.length; i++) list[i]: i};

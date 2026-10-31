@@ -41,15 +41,16 @@ jobs:
           fi
       # Server sítě parkovišť: projekt Supabase „LKWnav“ (backend/network/schema.sql). Veřejný klíč patří
       # do aplikace (data chrání pravidla serveru); jiný server = proměnné repozitáře NET_URL / NET_KEY.
+      # Jedno APK jen pro 64bitové ARM telefony (Samsung S24 Ultra a všechny novější Androidy).
       - run: >-
-          flutter build apk --release --split-per-abi
+          flutter build apk --release --target-platform android-arm64
           --dart-define=NET_URL=${{ vars.NET_URL || 'https://mpaiwlcjupqnipgrxetw.supabase.co/rest/v1' }}
           --dart-define=NET_KEY=${{ vars.NET_KEY || 'sb_publishable_NfwvhvQeN2wh-LQe-OzEiQ_UgWxBRlc' }}
       - uses: actions/upload-artifact@v4
         with:
           name: lkwnav-apk
-          path: app/build/app/outputs/flutter-apk/app-*-release.apk
+          path: app/build/app/outputs/flutter-apk/app-release.apk
       - if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: app/build/app/outputs/flutter-apk/app-*-release.apk
+          files: app/build/app/outputs/flutter-apk/app-release.apk

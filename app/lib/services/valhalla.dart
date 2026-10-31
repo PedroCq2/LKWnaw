@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 
@@ -15,6 +16,17 @@ import 'town.dart';
 
 import '../models/route.dart';
 import '../models/truck_profile.dart';
+
+/// Jeden dotaz na trasu (s plnou hmotností, nebo s výjimkou pro zásobování).
+typedef RawRoute =
+    Future<Map<String, dynamic>> Function(
+      LatLng a,
+      LatLng b,
+      List<LatLng> via, {
+      required bool exempt,
+      double? head,
+      int alt,
+    });
 
 class RouteOption {
   final String label;
@@ -379,9 +391,18 @@ class ValhallaClient {
         final a = pts[k], b = pts[k + 1];
         final head = k == 0 ? heading : null;
         final alt = legCount == 1 ? alternates : 0;
-        // Menší zlo: 1) s plnou hmotností až do cíle (žádná výjimka), 2) s plnou hmotností co nejblíž
+        // Menší zlo: 1) s plnou hmotností až do cíle (žádná výjimka) – pokud to není oklika, jinak
+        // s plnou hmotností k vjezdu do obce vykládky a dál s výjimkou, 2) s plnou hmotností co nejblíž
         // cíli a s výjimkou jen nezbytný kousek, 3) teprve pak výjimka od vjezdu do obce vykládky.
-        var leg = await _reachable(raw, a, b, head, alt) ?? await _closestReachable(raw, a, b, head);
+        var leg = await _reachable(raw, a, b, head, alt);
+        if (leg != null) {
+          final better = await shorterViaTown(raw, a, b, head, alt, leg);
+          if (better != null) {
+            leg = better.leg;
+            if (better.whole) exemptWhole.add(k);
+          }
+        }
+        leg ??= await _closestReachable(raw, a, b, head);
         if (leg == null) {
           try {
             final ex = parseTrip(
@@ -725,6 +746,46 @@ class ValhallaClient {
       final legs = ((r['trip'] as Map)['legs'] as List);
       final end = decodePolyline6((legs.last as Map)['shape'] as String).last;
       return const Distance()(end, b) < 150 ? r : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Zásobování: s plnou hmotností do cíle jde dojet, ale oklikou? Výjimka „mimo dopravní obsluhu“
+  /// platí v obci vykládky – když je s plnou hmotností jen k vjezdu do obce a dál s výjimkou výrazně
+  /// rychlejší (SAPA Praha-Libuš: 160 m „3,5 t“ v Cholupicích místo okliky přes Vestec), vrátí etapu
+  /// k vjezdu (dojezd s výjimkou se doplní potom). `whole` = celá trasa vede obcí cíle → celá
+  /// s výjimkou. null = zůstává plná hmotnost až do cíle.
+  @visibleForTesting
+  static Future<({Map<String, dynamic> leg, bool whole})?> shorterViaTown(
+    RawRoute raw,
+    LatLng a,
+    LatLng b,
+    double? head,
+    int alt,
+    Map<String, dynamic> full, {
+    Future<LatLng?> Function(TruckRoute) entryOf = _townEntry,
+  }) async {
+    double time(Map<String, dynamic> r) => (((r['trip'] as Map)['summary'] as Map)['time'] as num).toDouble();
+    // Výjimku jen když se vyplatí: o víc než 10 % a 2 minuty rychlejší.
+    bool muchFaster(double t) => time(full) > t * 1.1 + 120;
+    try {
+      final exData = await raw(a, b, const [], exempt: true, head: head, alt: alt);
+      if (!muchFaster(time(exData))) return null;
+      final ex = parseTrip(exData['trip'] as Map<String, dynamic>);
+      final entry = await entryOf(ex).timeout(const Duration(seconds: 8));
+      if (entry == null) return (leg: exData, whole: true);
+      final toEntry = await _reachable(raw, a, entry, head, alt);
+      if (toEntry == null) return null;
+      // Zbytek od vjezdu do obce s výjimkou: poměrná část času trasy s výjimkou.
+      const d = Distance();
+      var i = 0;
+      for (var j = 1; j < ex.shape.length; j++) {
+        if (d(ex.shape[j], entry) < d(ex.shape[i], entry)) i = j;
+      }
+      final cum = ex.cumulative;
+      final rest = cum.last <= 0 ? 0.0 : time(exData) * (cum.last - cum[i]) / cum.last;
+      return muchFaster(time(toEntry) + rest) ? (leg: toEntry, whole: false) : null;
     } catch (_) {
       return null;
     }

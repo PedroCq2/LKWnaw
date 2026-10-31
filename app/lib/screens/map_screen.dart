@@ -3575,7 +3575,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                         formatDistance(dist(_pos!, r.point)),
                         style: const TextStyle(color: Lkw.muted, fontSize: 13),
                       ),
-                onTap: () => _setDestination(r.point, r.name),
+                // Souřadnice: přesně na bod, bez hledání rampy u budovy.
+                onTap: () => _setDestination(r.point, r.name, ramp: r.kind != coordinatesKind),
               );
             },
           ),
