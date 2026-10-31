@@ -62,7 +62,9 @@ Flutter aplikace pro navigaci nákladních vozidel nad OpenStreetMap a routing e
 ## Instalace APK
 
 1. Stáhněte `app-release.apk` z GitHub Actions (záložka **Actions → Build APK → Artifacts**)
-   nebo z **Releases** (při vydání tagu `v*`).
+   nebo z **Releases** (při vydání tagu `v*`). APK vzniká po sloučení do hlavní větve
+   (`claude/friendly-curie-fceifd`); pro jinou větev **Actions → Build APK → Run workflow**.
+   Pull request dostane jen kontrolu (analyze + testy), bez APK.
 2. V telefonu povolte instalaci z neznámých zdrojů a APK nainstalujte.
 3. Povolte přístup k poloze a notifikacím. Pro české hlasové pokyny musí být v telefonu
    nainstalován český hlas (Nastavení → Převod textu na řeč).
