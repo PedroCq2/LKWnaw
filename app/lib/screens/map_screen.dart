@@ -31,6 +31,7 @@ import '../services/sign_parse.dart';
 import 'scan_screen.dart';
 import '../services/pip.dart';
 import '../services/offline_maps.dart';
+import '../services/parking_network.dart';
 import '../services/plans.dart';
 import '../services/saved_places.dart';
 import '../services/settings.dart';
@@ -38,6 +39,7 @@ import '../services/voice.dart';
 import '../services/valhalla.dart';
 import '../theme.dart';
 import '../widgets/nav_widgets.dart';
+import 'net_place_screen.dart';
 import 'planner_screen.dart';
 import 'profile_screen.dart';
 import 'settings_screen.dart';
@@ -133,6 +135,15 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   List<Place> _parking = [];
   PoiKind _poiKind = PoiKind.parking;
   bool _searching = false;
+  // Síť parkovišť: kamion stojí → „Je tu místo?“ / „Chybí tu parkoviště?“.
+  DateTime? _stillSince;
+  bool _stopChecked = false;
+  bool _stopNear = false; // stojí u známého parkoviště
+  bool _missingChecked = false;
+  Place? _parkPrompt; // stojím na známém parkovišti
+  LatLng? _missingPrompt; // stojím dlouho na místě, které v síti není
+  final Map<String, DateTime> _asked = {}; // kdy jsme se u místa naposledy ptali
+  List<LatLng> _declined = []; // „tady parkoviště není“ – už se neptat
 
   AppSettings get _settings => widget.settings;
 
@@ -158,6 +169,13 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     _loadStyle();
     SavedPlaces.load().then((v) {
       if (mounted) setState(() => _saved = v);
+    });
+    ParkingNetwork.instance.load().then((_) => ParkingNetwork.instance.flush());
+    SharedPreferences.getInstance().then((p) {
+      _declined = [
+        for (final e in p.getStringList('net.declined') ?? const <String>[])
+          if (e.split(',') case [final a, final b]) LatLng(double.parse(a), double.parse(b)),
+      ];
     });
     // Den/noc podle Slunce – kontrola jednou za minutu.
     _nightTimer = Timer.periodic(const Duration(minutes: 1), (_) {
@@ -325,6 +343,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         }
       }
     }
+    _watchParked(pos, speed, simulated);
     _animateTo();
   }
 
@@ -577,7 +596,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         'parking-circle',
         const ml.CircleLayerProperties(
           circleRadius: 13,
-          circleColor: '#1565C0',
+          // Barva podle obsazenosti ze sítě (volno / omezeno / plno), jinak modrá.
+          circleColor: ['get', 'c'],
           circleStrokeColor: '#FFFFFF',
           circleStrokeWidth: 2,
         ),
@@ -811,10 +831,21 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         PoiKind.service => 'S',
         PoiKind.fuel => 'D',
       };
+      final net = ParkingNetwork.instance;
       await m.setGeoJsonSource(
         'parking',
         _points([
-          for (final p in _parking) (p.point, {'l': letter}),
+          for (final p in _parking)
+            (
+              p.point,
+              {
+                'l': letter,
+                'c': switch (net.statusOf(p.id)?.level) {
+                  final o? => _occColor(o),
+                  null => '#1565C0',
+                },
+              },
+            ),
         ]),
       );
       await m.setGeoJsonSource(
@@ -1669,43 +1700,53 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     }
   }
 
-  /// Dlouhé podržení: vjezd pro kamiony / objet místo na trase / nový cíl.
+  /// Dlouhé podržení: vjezd pro kamiony / objet místo na trase / nový cíl / přidat parkoviště.
   Future<void> _onLongPress(LatLng p) async {
     if (_pickGate) {
       await _setGate(p);
       return;
     }
     final r = _route;
-    if (r != null && RouteIndex(r).locate(p, 80) != null) {
-      final choice = await showModalBottomSheet<String>(
-        context: context,
-        builder: (ctx) => SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
+    final onRoute = r != null && RouteIndex(r).locate(p, 80) != null;
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (onRoute)
               ListTile(
                 leading: const Icon(Icons.block, color: Lkw.danger),
                 title: const Text('Objet toto místo'),
                 subtitle: const Text('Neprůjezdné, uzavírka, nízký most… – trasa se přepočítá kolem'),
                 onTap: () => Navigator.pop(ctx, 'avoid'),
               ),
-              ListTile(
-                leading: const Icon(Icons.flag, color: Lkw.amber),
-                title: const Text('Navigovat sem'),
-                onTap: () => Navigator.pop(ctx, 'dest'),
-              ),
-            ],
-          ),
+            ListTile(
+              leading: const Icon(Icons.flag, color: Lkw.amber),
+              title: const Text('Navigovat sem'),
+              onTap: () => Navigator.pop(ctx, 'dest'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.add_location_alt, color: Lkw.amber),
+              title: const Text('Přidat parkoviště sem'),
+              subtitle: const Text('Do sítě parkovišť LKWnav'),
+              onTap: () => Navigator.pop(ctx, 'park'),
+            ),
+          ],
         ),
-      );
-      if (choice == 'avoid') {
-        _excluded.add(p);
-        _say('Objíždím označené místo.');
-        await _computeRoute(reroute: _navigating);
-        return;
-      }
-      if (choice != 'dest') return;
+      ),
+    );
+    if (choice == 'avoid') {
+      _excluded.add(p);
+      _say('Objíždím označené místo.');
+      await _computeRoute(reroute: _navigating);
+      return;
     }
+    if (choice == 'park') {
+      await _addParking(at: p);
+      return;
+    }
+    if (choice != 'dest') return;
     _setDestination(p, '${p.latitude.toStringAsFixed(5)}, ${p.longitude.toStringAsFixed(5)}', ramp: false);
   }
 
@@ -2223,6 +2264,12 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                   head('NA CESTĚ'),
                   item(Icons.local_parking, 'Truckparky, servisy, nafta', _choosePoi),
                   item(
+                    Icons.add_location_alt,
+                    'Přidat parkoviště',
+                    _addParking,
+                    subtitle: 'Truckpark, odpočívka, místo k přespání – do sítě LKWnav',
+                  ),
+                  item(
                     Icons.campaign,
                     'Nahlásit',
                     _quickReport,
@@ -2526,15 +2573,23 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
 
   static const _poiFilters = ['WC', 'sprchy', 'jídlo', 'zdarma', 'hlídané/kamery', 'AdBlue'];
 
+  static const _notFull = 'není plno';
+
   void _showPoiSheet(List<RoutePoi> items, PoiKind kind, {required bool alongRoute}) {
     final active = <String>{};
+    final net = ParkingNetwork.instance;
+    bool ok(RoutePoi e, String f) =>
+        f == _notFull ? net.statusOf(e.place.id)?.level != Occupancy.full : e.place.features.contains(f);
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setSheet) {
-          final shown = items.where((e) => active.every(e.place.features.contains)).take(40).toList();
-          final filters = _poiFilters.where((f) => items.any((e) => e.place.features.contains(f))).toList();
+          final shown = items.where((e) => active.every((f) => ok(e, f))).take(40).toList();
+          final filters = [
+            if (kind == PoiKind.parking && items.any((e) => net.statusOf(e.place.id) != null)) _notFull,
+            ..._poiFilters.where((f) => items.any((e) => e.place.features.contains(f))),
+          ];
           return DraggableScrollableSheet(
             expand: false,
             initialChildSize: 0.6,
@@ -2563,11 +2618,22 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                   ),
                 for (final e in shown)
                   ListTile(
-                    leading: CircleAvatar(child: Icon(_poiIcon(kind), size: 20)),
+                    leading: CircleAvatar(
+                      backgroundColor: switch (net.statusOf(e.place.id)?.level) {
+                        final o? => _occUi(o),
+                        null => null,
+                      },
+                      child: Icon(_poiIcon(kind), size: 20),
+                    ),
                     title: Text(e.place.name, maxLines: 1, overflow: TextOverflow.ellipsis),
                     subtitle: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        if (net.statusOf(e.place.id) case final st?)
+                          Text(
+                            '${st.level.label} · ${netAgo(st.at, DateTime.now())}',
+                            style: TextStyle(color: _occUi(st.level), fontWeight: FontWeight.w800),
+                          ),
                         Text(
                           [
                             if (alongRoute) 'za ${formatDistance(e.aheadM)}' else formatDistance(e.aheadM),
@@ -2575,6 +2641,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                               '~${formatDuration(Duration(seconds: e.etaSec.round()))}',
                             if (alongRoute && e.offM > 150) '${formatDistance(e.offM)} od trasy',
                             if (e.place.kind != null) e.place.kind!,
+                            if (e.place.id?.startsWith('u:') ?? false) 'síť LKWnav',
                           ].join(' · '),
                         ),
                         if (e.place.features.isNotEmpty)
@@ -2598,17 +2665,469 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                           ),
                       ],
                     ),
-                    isThreeLine: e.place.features.isNotEmpty,
+                    isThreeLine: e.place.features.isNotEmpty || net.statusOf(e.place.id) != null,
                     onTap: () {
                       Navigator.pop(ctx);
-                      _pickTarget(e.place.point, e.place.name);
+                      if (kind == PoiKind.parking) {
+                        _showParkingCard(e.place);
+                      } else {
+                        _pickTarget(e.place.point, e.place.name);
+                      }
                     },
                   ),
                 if (shown.isEmpty) const ListTile(title: Text('Žádné místo neodpovídá filtru.')),
+                if (kind == PoiKind.parking)
+                  ListTile(
+                    leading: const Icon(Icons.add_location_alt, color: Lkw.amber),
+                    title: const Text('Chybí tu parkoviště? Přidejte ho'),
+                    subtitle: const Text('Do sítě parkovišť LKWnav'),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _addParking();
+                    },
+                  ),
               ],
             ),
           );
         },
+      ),
+    );
+  }
+
+  // ------------------------------------------------------------ síť parkovišť
+
+  static String _occColor(Occupancy o) => switch (o) {
+    Occupancy.free => '#43C46B',
+    Occupancy.limited => '#F29900',
+    Occupancy.full => '#E53935',
+  };
+
+  static Color _occUi(Occupancy o) => switch (o) {
+    Occupancy.free => Lkw.ok,
+    Occupancy.limited => const Color(0xFFF29900),
+    Occupancy.full => Lkw.danger,
+  };
+
+  Widget _occButton(Occupancy o, VoidCallback? onTap) => FilledButton(
+    style: FilledButton.styleFrom(
+      backgroundColor: _occUi(o),
+      foregroundColor: Colors.black,
+      padding: const EdgeInsets.symmetric(vertical: 14),
+    ),
+    onPressed: onTap,
+    child: Text(o.label),
+  );
+
+  /// Klepnutí na bod v mapě: nejbližší místo z ukázaného seznamu.
+  void _onFeatureTap(math.Point<double> _, ml.LatLng c, String id, String layer, ml.Annotation? ann) {
+    if (!layer.startsWith('parking') || _parking.isEmpty) return;
+    const d = Distance();
+    final at = LatLng(c.latitude, c.longitude);
+    final p = _parking.reduce((a, b) => d(a.point, at) <= d(b.point, at) ? a : b);
+    if (_poiKind == PoiKind.parking) {
+      _showParkingCard(p);
+    } else {
+      _pickTarget(p.point, p.name);
+    }
+  }
+
+  /// Karta parkoviště: obsazenost, vybavení, „Je tu místo?“, navigace, úprava údajů.
+  Future<void> _showParkingCard(Place place) async {
+    final net = ParkingNetwork.instance;
+    await net.load();
+    if (!mounted) return;
+    const d = Distance();
+    final here = _pos != null && d(_pos!, place.point) < 1500;
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        final st = net.statusOf(place.id);
+        final np = place.id == null ? null : net.places[place.id];
+        return SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  place.name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  [
+                    ?place.kind,
+                    if (_pos != null) formatDistance(d(_pos!, place.point)),
+                    if (place.id?.startsWith('u:') ?? false)
+                      'přidali řidiči LKWnav'
+                    else if (np != null)
+                      'údaje doplnili řidiči',
+                  ].join(' · '),
+                  style: const TextStyle(color: Lkw.muted),
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: st == null ? Lkw.panelHi : _occUi(st.level),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    st == null
+                        ? 'Obsazenost zatím nikdo nenahlásil'
+                        : '${st.level.label} · nahlášeno ${netAgo(st.at, DateTime.now())}',
+                    style: TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w800,
+                      color: st == null ? Lkw.text : Colors.black,
+                    ),
+                  ),
+                ),
+                if (place.features.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  Wrap(spacing: 6, runSpacing: 6, children: [for (final f in place.features) Chip(label: Text(f))]),
+                ],
+                if (np?.note case final note? when note.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  Text(note, style: const TextStyle(fontSize: 16)),
+                ],
+                const SizedBox(height: 16),
+                const Text(
+                  'JE TU TEĎ MÍSTO?',
+                  style: TextStyle(color: Lkw.muted, fontWeight: FontWeight.w800, letterSpacing: 1),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    for (final o in Occupancy.values)
+                      Expanded(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                          child: _occButton(o, here ? () => Navigator.pop(ctx, 'occ:${o.code}') : null),
+                        ),
+                      ),
+                  ],
+                ),
+                if (!here)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 6),
+                    child: Text(
+                      'Obsazenost jde nahlásit jen na místě (do 1,5 km).',
+                      style: TextStyle(color: Lkw.muted),
+                    ),
+                  ),
+                const SizedBox(height: 16),
+                FilledButton.icon(
+                  onPressed: () => Navigator.pop(ctx, 'go'),
+                  icon: const Icon(Icons.navigation),
+                  label: Text(_dest == null ? 'Navigovat sem' : 'Zastávka nebo nový cíl'),
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextButton.icon(
+                        onPressed: () => Navigator.pop(ctx, 'edit'),
+                        icon: const Icon(Icons.edit),
+                        label: const Text('Upravit údaje'),
+                      ),
+                    ),
+                    Expanded(
+                      child: TextButton.icon(
+                        onPressed: () => Navigator.pop(ctx, 'gone'),
+                        icon: const Icon(Icons.delete_outline),
+                        label: const Text('Už neexistuje'),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    if (!mounted || choice == null) return;
+    if (choice == 'go') {
+      await _pickTarget(place.point, place.name);
+    } else if (choice == 'edit') {
+      await _editParking(place);
+    } else if (choice == 'gone') {
+      await _reportGone(place);
+    } else if (choice.startsWith('occ:')) {
+      final o = occupancyOf(choice.substring(4));
+      if (o != null) await _reportOccupancy(place, o);
+    }
+  }
+
+  /// Id místa v síti; místo z mapy bez id se nejdřív do sítě uloží.
+  Future<String> _netIdFor(Place p) async {
+    if (p.id != null) return p.id!;
+    final np = NetPlace.fromPlace(p);
+    await ParkingNetwork.instance.save(np);
+    _replaceParking(p, np.toPlace());
+    return np.id;
+  }
+
+  void _replaceParking(Place old, Place now) {
+    final i = _parking.indexWhere((x) => (old.id != null && x.id == old.id) || x.point == old.point);
+    setState(() {
+      if (i >= 0) {
+        _parking[i] = now;
+      } else if (_poiKind == PoiKind.parking) {
+        _parking = [..._parking, now];
+      } else {
+        _parking = [now];
+        _poiKind = PoiKind.parking;
+      }
+    });
+  }
+
+  Future<void> _reportOccupancy(Place p, Occupancy o) async {
+    final net = ParkingNetwork.instance;
+    final id = await _netIdFor(p);
+    await net.report(id, p.point, o);
+    _asked[id] = DateTime.now();
+    if (!mounted) return;
+    setState(() => _parkPrompt = null);
+    await _syncLayers();
+    _toast(net.shared ? 'Díky! „${o.label}“ teď uvidí ostatní řidiči.' : 'Uloženo: ${o.label}.');
+  }
+
+  Future<void> _reportGone(Place p) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Místo už neexistuje?'),
+        content: Text('${p.name}\nV telefonu se skryje. Z mapy pro všechny zmizí po třech hlášeních.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Ne')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Neexistuje')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    // Místo z mapy bez id nemá v síti co skrývat – stačí ho vyřadit ze seznamu.
+    if (p.id != null) await ParkingNetwork.instance.reportGone(p.id!, p.point);
+    if (!mounted) return;
+    setState(() => _parking = _parking.where((x) => x.point != p.point).toList());
+    await _syncLayers();
+    _toast('Díky, místo je nahlášené.');
+  }
+
+  Future<void> _editParking(Place p) async {
+    final net = ParkingNetwork.instance;
+    final base = (p.id == null ? null : net.places[p.id]) ?? NetPlace.fromPlace(p);
+    final saved = await Navigator.push<NetPlace>(
+      context,
+      MaterialPageRoute(builder: (_) => NetPlaceScreen(place: base)),
+    );
+    if (saved == null || !mounted) return;
+    _replaceParking(p, saved.toPlace());
+    await _syncLayers();
+    _toast(net.shared ? 'Uloženo. Díky – údaje uvidí ostatní řidiči.' : 'Uloženo do sítě v telefonu.');
+  }
+
+  /// Přidá parkoviště do sítě: na místě, kde stojím, nebo na podrženém bodu mapy.
+  /// Když tam už nějaké je, nabídne doplnění jeho údajů místo duplicity.
+  Future<void> _addParking({LatLng? at}) async {
+    final p = at ?? _pos;
+    if (p == null) {
+      _toast('Čekám na GPS polohu…');
+      return;
+    }
+    final net = ParkingNetwork.instance;
+    await net.load();
+    const d = Distance();
+    Place? existing = net.near(p, maxM: 80)?.toPlace();
+    existing ??= _parking.where((x) => d(x.point, p) < 80).firstOrNull;
+    if (existing == null) {
+      try {
+        existing = (await findTruckPois(p, PoiKind.parking, radiusM: 120).timeout(const Duration(seconds: 8)))
+            .where((x) => d(x.point, p) < 80)
+            .firstOrNull;
+      } catch (_) {}
+    }
+    if (!mounted) return;
+    if (existing != null) {
+      final found = existing;
+      final edit = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Tady už parkoviště je'),
+          content: Text('${found.name}\nDoplnit nebo opravit jeho údaje?'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Přidat nové')),
+            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Upravit')),
+          ],
+        ),
+      );
+      if (edit == null || !mounted) return;
+      if (edit) {
+        await _editParking(found);
+        return;
+      }
+    }
+    final saved = await Navigator.push<NetPlace>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => NetPlaceScreen(
+          place: NetPlace(id: newDriverId(), name: '', point: p),
+          isNew: true,
+        ),
+      ),
+    );
+    if (saved == null || !mounted) return;
+    setState(() => _missingPrompt = null);
+    _replaceParking(saved.toPlace(), saved.toPlace());
+    await _syncLayers();
+    _toast(net.shared ? 'Parkoviště je v síti LKWnav. Díky!' : 'Parkoviště uloženo do sítě v telefonu.');
+  }
+
+  /// Kamion stojí: po 3 min na známém parkovišti „Je tu místo?“, po 10 min jinde „Chybí tu parkoviště?“.
+  void _watchParked(LatLng pos, double speedKmh, bool simulated) {
+    if (simulated) return;
+    if (speedKmh > 6) {
+      _stillSince = null;
+      _stopChecked = false;
+      _stopNear = false;
+      _missingChecked = false;
+      if (speedKmh > 15 && (_parkPrompt != null || _missingPrompt != null)) {
+        setState(() {
+          _parkPrompt = null;
+          _missingPrompt = null;
+        });
+      }
+      return;
+    }
+    final still = DateTime.now().difference(_stillSince ??= DateTime.now());
+    if (!_stopChecked && still > const Duration(minutes: 3)) {
+      _stopChecked = true;
+      _checkParked(pos);
+    }
+    if (!_missingChecked && still > const Duration(minutes: 10)) {
+      _missingChecked = true;
+      _checkMissing(pos);
+    }
+  }
+
+  Future<void> _checkParked(LatLng pos) async {
+    const d = Distance();
+    Place? p = ParkingNetwork.instance.near(pos)?.toPlace();
+    p ??= _parking.where((x) => d(x.point, pos) < 150).firstOrNull;
+    if (p == null) {
+      try {
+        p = (await findTruckPois(pos, PoiKind.parking, radiusM: 200).timeout(const Duration(seconds: 10)))
+            .where((x) => d(x.point, pos) < 150)
+            .firstOrNull;
+      } catch (_) {}
+    }
+    if (!mounted || _stillSince == null || p == null) return;
+    _stopNear = true;
+    final key = p.id ?? '${p.point}';
+    final last = _asked[key];
+    if (last != null && DateTime.now().difference(last) < const Duration(hours: 2)) return;
+    _asked[key] = DateTime.now();
+    setState(() => _parkPrompt = p);
+  }
+
+  void _checkMissing(LatLng pos) {
+    const d = Distance();
+    if (_stopNear || _parkPrompt != null) return; // stojí u známého parkoviště
+    // Vykládka v cíli / u uložené firmy, kolona na trase, „tady parkoviště není“.
+    if (_dest != null && d(pos, _dest!) < 500) return;
+    if (_destAddr != null && d(pos, _destAddr!) < 500) return;
+    if (_saved.near(pos) != null) return;
+    if (_declined.any((x) => d(x, pos) < 300)) return;
+    final nav = _nav;
+    if (_navigating && nav != null && nav.distanceFromRoute < 40) return;
+    setState(() => _missingPrompt = pos);
+  }
+
+  Future<void> _declineMissing() async {
+    final at = _missingPrompt;
+    setState(() => _missingPrompt = null);
+    if (at == null) return;
+    _declined = [at, ..._declined].take(100).toList();
+    final p = await SharedPreferences.getInstance();
+    await p.setStringList('net.declined', [
+      for (final x in _declined) '${x.latitude.toStringAsFixed(5)},${x.longitude.toStringAsFixed(5)}',
+    ]);
+  }
+
+  Widget _netPromptCard() {
+    final p = _parkPrompt;
+    return Material(
+      color: Lkw.panel,
+      elevation: 6,
+      borderRadius: BorderRadius.circular(16),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 6, 6, 12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.local_parking, color: Lkw.amber),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    p != null ? 'Je tu místo? ${p.name}' : 'Stojíte na parkovišti, které v síti chybí?',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close),
+                  onPressed: () => setState(() {
+                    _parkPrompt = null;
+                    _missingPrompt = null;
+                  }),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: p != null
+                  ? Row(
+                      children: [
+                        for (final o in Occupancy.values)
+                          Expanded(
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 4),
+                              child: _occButton(o, () => _reportOccupancy(p, o)),
+                            ),
+                          ),
+                      ],
+                    )
+                  : Row(
+                      children: [
+                        Expanded(
+                          child: FilledButton(
+                            onPressed: () {
+                              final at = _missingPrompt;
+                              setState(() => _missingPrompt = null);
+                              _addParking(at: at);
+                            },
+                            child: const Text('Přidat do sítě'),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: OutlinedButton(onPressed: _declineMissing, child: const Text('Tady není')),
+                        ),
+                      ],
+                    ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -2670,7 +3189,10 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                   child: ml.MapLibreMap(
                     styleString: _styleJson!,
                     initialCameraPosition: const ml.CameraPosition(target: ml.LatLng(49.8, 15.5), zoom: 6),
-                    onMapCreated: (c) => _map = c,
+                    onMapCreated: (c) {
+                      _map = c;
+                      c.onFeatureTapped.add(_onFeatureTap);
+                    },
                     onStyleLoadedCallback: _onStyleLoaded,
                     trackCameraPosition: true,
                     compassEnabled: false,
@@ -2818,6 +3340,13 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     ),
                   ),
                 if (route != null) Positioned(left: 0, right: 0, bottom: 0, child: _bottomPanel(route)),
+                if (_parkPrompt != null || _missingPrompt != null)
+                  Positioned(
+                    left: 12,
+                    right: 84,
+                    bottom: panelH + (_navigating ? 120 : 16) + bottomPad,
+                    child: _netPromptCard(),
+                  ),
                 if (_routing) const Center(child: CircularProgressIndicator()),
               ],
             ],

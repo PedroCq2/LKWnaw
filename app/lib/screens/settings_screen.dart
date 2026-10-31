@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
 
+import '../services/parking_network.dart';
 import '../services/problem_reports.dart';
 import '../services/settings.dart';
 import '../services/sign_store.dart';
@@ -171,6 +172,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
             _head('DATA V TELEFONU'),
             OfflineRoutingSection(settings: widget.settings),
             const OfflineMapSection(),
+            _head('SÍŤ PARKOVIŠŤ'),
+            FutureBuilder<void>(
+              future: ParkingNetwork.instance.load(),
+              builder: (ctx, snap) {
+                final net = ParkingNetwork.instance;
+                return ListTile(
+                  leading: const Icon(Icons.local_parking),
+                  title: Text('Moje přidaná a opravená místa: ${net.mineCount}'),
+                  subtitle: Text(
+                    net.shared
+                        ? 'Sdílí se s řidiči LKWnav${net.pending > 0 ? ' · čeká na odeslání: ${net.pending}' : ''}'
+                        : 'Zatím jen v telefonu – server sítě není nastavený'
+                              '${net.pending > 0 ? ' (k odeslání: ${net.pending})' : ''}',
+                  ),
+                  trailing: net.shared && net.pending > 0
+                      ? IconButton(
+                          tooltip: 'Odeslat',
+                          icon: const Icon(Icons.cloud_upload_outlined),
+                          onPressed: () async {
+                            final ok = await net.flush();
+                            if (!ctx.mounted) return;
+                            setState(() {});
+                            ScaffoldMessenger.of(ctx).showSnackBar(
+                              SnackBar(content: Text(ok ? 'Odesláno.' : 'Server teď nedostupný, zkusím později.')),
+                            );
+                          },
+                        )
+                      : null,
+                );
+              },
+            ),
             _head('HLÁŠENÍ'),
             FutureBuilder<List<Map<String, dynamic>>>(
               future: ProblemReports.load(),
