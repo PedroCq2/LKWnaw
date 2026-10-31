@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -315,6 +316,23 @@ void main() {
     expect(src['maxzoom'], 14);
     expect(src['attribution'], 'OSM');
     expect(pinnedTiles, contains('{z}/{x}/{y}.pbf'));
+  });
+
+  test('mapa: silnice ve stavbě čárkovaně pod ostatními silnicemi (nově otevřená D7 u Slaného)', () {
+    final style = <String, dynamic>{
+      'layers': <dynamic>[
+        {'id': 'background', 'type': 'background'},
+        {'id': 'road_motorway', 'type': 'line'},
+        {'id': 'road_label', 'type': 'symbol'},
+      ],
+    };
+    addConstructionRoads(style);
+    addConstructionRoads(style); // podruhé nic nepřidá
+    final ids = [for (final l in style['layers'] as List) (l as Map)['id']];
+    expect(ids, ['background', 'road_construction', 'road_motorway', 'road_label']);
+    final c = (style['layers'] as List)[1] as Map;
+    expect(jsonEncode(c['filter']), contains('motorway_construction'));
+    expect((c['paint'] as Map)['line-dasharray'], isNotNull);
   });
 
   test('pevná adresa dlaždic je stejná v aplikaci i ve stylu pro stahování', () {

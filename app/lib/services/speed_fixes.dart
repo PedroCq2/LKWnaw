@@ -68,6 +68,21 @@ class SpeedFixes {
     return applySpeedFixes(route, fixes);
   }
 
+  /// Oprava pro jednu cestu (jízda bez trasy): z telefonu, jinak od řidičů ze serveru.
+  final Map<int, int?> _serverCache = {};
+  Future<int?> forWay(int wayId) async {
+    await load();
+    final mine = _mine[wayId];
+    if (mine != null) return mine;
+    if (_serverCache.containsKey(wayId)) return _serverCache[wayId];
+    try {
+      final r = await ParkingNetwork.instance.speedFixes([wayId]).timeout(const Duration(seconds: 6));
+      return _serverCache[wayId] = r[wayId];
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Jen opravy z tohoto telefonu (okamžitě po nahlášení, bez čekání na síť).
   Future<bool> applyMine(TruckRoute route) async {
     await load();

@@ -26,6 +26,7 @@ class AppSettings {
   VoiceMode voiceMode;
   bool voiceVerbose; // podrobný odpočet (1 km, 500 m, 200 m) místo jedné hlášky předem
   bool shakeReport; // zatřesením telefonu nahlásit chybu / nápad
+  bool disclaimerOk; // řidič trvale odsouhlasil upozornění před jízdou
   bool simulate; // demo: jízda po trase bez GPS
   int mapStyle; // 0 = auto, 1 = den, 2 = noc
   bool view3d;
@@ -44,6 +45,7 @@ class AppSettings {
     this.voiceMode = VoiceMode.all,
     this.voiceVerbose = false,
     this.shakeReport = true,
+    this.disclaimerOk = false,
     this.simulate = false,
     this.mapStyle = 0,
     this.view3d = true,
@@ -84,6 +86,7 @@ class AppSettings {
       voiceMode: VoiceMode.values[(p.getInt('voiceMode') ?? ((p.getBool('voice') ?? true) ? 0 : 2)).clamp(0, 2)],
       voiceVerbose: p.getBool('voiceVerbose') ?? false,
       shakeReport: p.getBool('shakeReport') ?? true,
+      disclaimerOk: p.getBool('disclaimerOk') ?? false,
       simulate: p.getBool('simulate') ?? false,
       mapStyle: p.getInt('mapStyle') ?? 0,
       view3d: p.getBool('view3d') ?? true,
@@ -105,6 +108,7 @@ class AppSettings {
     await p.setInt('voiceMode', voiceMode.index);
     await p.setBool('voiceVerbose', voiceVerbose);
     await p.setBool('shakeReport', shakeReport);
+    await p.setBool('disclaimerOk', disclaimerOk);
     await p.setBool('simulate', simulate);
     await p.setInt('mapStyle', mapStyle);
     await p.setBool('view3d', view3d);

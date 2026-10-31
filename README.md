@@ -18,7 +18,12 @@ Flutter aplikace pro navigaci nákladních vozidel nad OpenStreetMap a routing e
 - **Staničení dálnice** nahoře („D1 114,0 km“, dopočítané z čísel exitů) a výstraha
   **zákaz předjíždění nákladních vozidel** (i časový).
 - **Vlastní vzhled LKWnav** – grafit + jantar, šedá mapa, jantarová trasa.
-- **Rychlostní limit** úseku (omezený max. rychlostí kamionu) a aktuální rychlost.
+- **Rychlostní limit** úseku (omezený max. rychlostí kamionu) a aktuální rychlost – i bez cíle
+  (silnice podle posledních bodů GPS).
+- **Upozornění před jízdou** – při startu navigace: navigace je pomocník, značky a situace na silnici
+  mají přednost, za řízení odpovídá řidič (lze odsouhlasit trvale). Jinak se za jízdy nic neomezuje.
+- **Silnice ve stavbě** čárkovaně – nově otevřená dálnice, kterou OSM ještě vede jako stavbu, je vidět.
+- **Ikony v mapě** (pumpy, odpočívky, obchody) – klepnutí: co to je, navigace / zastávka.
 - **Turn-by-turn navigace** – plynulý pohyb, přichycení k trase, tabule s manévrem
   a „Pak …“, název ulice, **české hlasové pokyny**, přepočet při sjetí z trasy.
 - **POI pro kamiony** – truckparky a odpočívky (kapacita, placené, hlídané, WC, sprchy…),
@@ -44,7 +49,7 @@ Flutter aplikace pro navigaci nákladních vozidel nad OpenStreetMap a routing e
 - **Rychlost** – klepnutí na kolečko: hranice upozornění (+0 až +20 km/h) a **„na značce je jiná
   rychlost“** – platí pro tu silnici hned, ostatním po shodě dvou řidičů; kamionové limity
   z OSM (`maxspeed:hgv`).
-- **Zpráva pro vývoj** – zatřesením telefonu (když kamion stojí) nebo z nabídky: chyba / vylepšení /
+- **Zpráva pro vývoj** – zatřesením telefonu (i za jízdy – spolujezdec) nebo z nabídky: chyba / vylepšení /
   nová funkce + systémové informace (telefon, Android, verze, nastavení, poloha, trasa).
 - **Mapa offline** – stažení mapy podél trasy (MapLibre offline regiony, zoom 8–14).
 - **Klidné přepočítávání** – krátký výkyv GPS nespouští novou trasu; bez internetu vede dál

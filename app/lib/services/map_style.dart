@@ -151,6 +151,7 @@ Future<String> lkwStyle({required bool night, MapLayer layer = MapLayer.map}) as
     final style = jsonDecode(_baseJson!) as Map<String, dynamic>;
     pinTiles(style);
     applyPalette(style, night ? _night : _day);
+    addConstructionRoads(style, night: night);
     if (layer != MapLayer.map) applyAerial(style, hybrid: layer == MapLayer.hybrid);
     return _cache[key] = jsonEncode(style);
   } catch (_) {
@@ -218,6 +219,65 @@ void applyPalette(Map<String, dynamic> style, Object palette) {
       }
     }
   }
+}
+
+/// Silnice ve stavbě čárkovaně. Původní styl je nekreslí, a nově otevřená dálnice, kterou v OSM
+/// ještě nikdo nepřepsal ze stavby (D7 u Slaného), by v mapě chyběla – kamion by „jel po poli“.
+void addConstructionRoads(Map<String, dynamic> style, {bool night = false}) {
+  final p = night ? _night : _day;
+  final layers = style['layers'] as List;
+  if (layers.any((l) => (l as Map)['id'] == 'road_construction')) return;
+  final at = layers.indexWhere((l) => '${(l as Map)['id']}'.startsWith('road_'));
+  final big = ['motorway_construction', 'trunk_construction'];
+  layers.insert(at < 0 ? layers.length : at, <String, dynamic>{
+    'id': 'road_construction',
+    'type': 'line',
+    'source': 'openmaptiles',
+    'source-layer': 'transportation',
+    'minzoom': 9,
+    'filter': [
+      'in',
+      ['get', 'class'],
+      [
+        'literal',
+        [...big, 'primary_construction', 'secondary_construction', 'tertiary_construction'],
+      ],
+    ],
+    'layout': {'line-cap': 'butt', 'line-join': 'round'},
+    'paint': {
+      'line-color': [
+        'match',
+        ['get', 'class'],
+        big,
+        p.motorway,
+        p.trunk,
+      ],
+      'line-width': [
+        'interpolate',
+        ['linear'],
+        ['zoom'],
+        9,
+        1,
+        14,
+        [
+          'match',
+          ['get', 'class'],
+          big,
+          6,
+          3,
+        ],
+        18,
+        [
+          'match',
+          ['get', 'class'],
+          big,
+          18,
+          9,
+        ],
+      ],
+      'line-dasharray': [2, 1.2],
+    },
+  });
 }
 
 /// Letecký podklad pod vektorovou mapu. Letecká = jen snímky (trasu a značky kreslí aplikace),
