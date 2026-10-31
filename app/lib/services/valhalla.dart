@@ -55,6 +55,7 @@ class ValhallaClient {
     bool delivery = false,
     List<LatLng> exclude = const [],
     List<LatLng> via = const [],
+    Map<String, dynamic> extra = const {},
   }) async => (await _request(
     via: via,
     from: from,
@@ -63,7 +64,29 @@ class ValhallaClient {
     heading: heading,
     delivery: delivery,
     exclude: exclude,
+    extra: extra,
   )).first;
+
+  /// Otočení kamionu po rozumných silnicích (kruhový objezd, velká křižovatka), ne objížďkou
+  /// přes obytné ulice a obytnou zónu.
+  static const calmTurn = {'low_class_penalty': 600, 'service_penalty': 600, 'use_living_streets': 0.0};
+
+  /// Vede trasa z [from] nejdřív zpátky (otočení, nebo smyčka, která se do 4 km vrátí k místu startu)?
+  static bool turnsBack(TruckRoute r, LatLng from) {
+    final cum = r.cumulative;
+    for (final m in r.maneuvers) {
+      final i = m.beginShapeIndex.clamp(0, r.shape.length - 1);
+      if (cum[i] > 3000) break;
+      if (m.type == 12 || m.type == 13) return true;
+    }
+    const d = Distance();
+    for (var i = 0; i < r.shape.length; i++) {
+      if (cum[i] < 150) continue;
+      if (cum[i] > 4000) break;
+      if (d(r.shape[i], from) < 40) return true;
+    }
+    return false;
+  }
 
   /// Několik variant: nejrychlejší + alternativa, bez mýta, nejkratší (bez duplicit).
   Future<List<RouteOption>> routeOptions({

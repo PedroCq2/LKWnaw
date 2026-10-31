@@ -5,14 +5,19 @@ import 'nav_engine.dart';
 
 /// Hlasové pokyny pro jednu trasu: co a kdy říct (přehrávání dělá Voice).
 ///
-/// Jako u profi navigací: odpočet „Za kilometr… Za 500 metrů… Za 200 metrů…“, v místě manévru
+/// Jedna hláška předem („Za kilometr…“ na dálnici, „Za 300 metrů…“ ve městě), v místě manévru
 /// „Sjeďte vpravo a poté se držte vlevo“, po manévru „Pokračujte rovně 12 kilometrů“.
+/// Podrobný odpočet (1 km, 500 m, 200 m) jen když si ho řidič zapne ([verbose]).
 /// Nic se neříká dvakrát za sebou: manévr řečený v „… a poté …“ se znovu nehlásí,
 /// výjezd z kruhového objezdu je už v „vyjeďte druhým výjezdem“.
 class VoiceGuide {
   final TruckRoute route;
   final NavEngine engine;
-  VoiceGuide(this.route, this.engine);
+  final bool verbose;
+  VoiceGuide(this.route, this.engine, {this.verbose = false});
+
+  bool _fresh = true; // první hláška nové trasy (po přepočtu): hned, kudy dál
+  final _announced = <int>{}; // manévry, u kterých už zazněl odpočet (bez podrobného jen jeden)
 
   /// Kdy zaznělo „Cíl je vpravo“ (aby hned nezaznělo i „Jste v cíli“).
   DateTime? destSpokenAt;
@@ -76,7 +81,7 @@ class VoiceGuide {
       for (var t = 0; t < 3; t++) {
         e.stageSpoken.add(key * 10 + t);
       }
-      if (ch < math.max(150.0, mps * 8)) {
+      if (ch < math.max(verbose ? 150.0 : 180.0, mps * (verbose ? 8 : 12))) {
         e.preSpoken.add(key);
         return out;
       }
@@ -91,12 +96,34 @@ class VoiceGuide {
       return out;
     }
     if (roundaboutExit || m.synthetic && d < 300) return out;
-    // Odpočet podle rychlosti: dálnice 1000/500/200 m, město 500/200 m, pomalu 200 m.
-    final stages = speedKmh > 70
-        ? const [1000.0, 500.0, 200.0]
-        : speedKmh > 35
-        ? const [500.0, 200.0]
-        : const [200.0];
+    // Nová trasa (po přepočtu): hned, kudy dál, skutečnou vzdáleností.
+    if (_fresh) {
+      _fresh = false;
+      if (d < 1500 && d - nowDist >= 80 && ch == null && !e.alertSpoken.contains(key)) {
+        for (var t = 0; t < 3; t++) {
+          if (!verbose || d < const [1000.0, 500.0, 200.0][t]) e.stageSpoken.add(key * 10 + t);
+        }
+        _announced.add(key);
+        _stageAt[key] = d;
+        e.alertSpoken.add(key);
+        out.add('${spokenDistance(d)} ${withThen(i)}');
+        return out;
+      }
+    }
+    // Bez podrobného odpočtu: jedna hláška předem stačí (i když kamion mezitím zpomalí).
+    if (!verbose && _announced.contains(key)) return out;
+    // Odpočet podle rychlosti: dálnice 1 km, město 300 m, pomalu 200 m (podrobný: 1000/500/200 m).
+    final stages = verbose
+        ? (speedKmh > 70
+              ? const [1000.0, 500.0, 200.0]
+              : speedKmh > 35
+              ? const [500.0, 200.0]
+              : const [200.0])
+        : (speedKmh > 70
+              ? const [1000.0]
+              : speedKmh > 35
+              ? const [300.0]
+              : const [200.0]);
     // Pevné číslo stupně (1000 m = 0, 500 m = 1, 200 m = 2) – při zpomalení se seznam stupňů mění.
     int code(double st) => st >= 1000 ? 0 : (st >= 500 ? 1 : 2);
     // Nejmenší stupeň, do kterého už jsme vjeli: po „Za 500 metrů“ přijde i „Za 200“.
@@ -114,6 +141,7 @@ class VoiceGuide {
       final prev = _stageAt[key];
       if (prev != null && prev - d < 120) return out;
       _stageAt[key] = d;
+      _announced.add(key);
       // Návaznost („… a poté …“) jen v prvním odpočtu a v místě manévru – ne čtyřikrát dokola.
       final what = e.alertSpoken.contains(key) ? phrase(m) : withThen(i);
       e.alertSpoken.add(key);
@@ -127,6 +155,7 @@ class VoiceGuide {
   /// Jedna hláška na startu. Blízko první odbočka → rovnou ona (a odpočet ji pak nehlásí znovu),
   /// jinak „Jeďte … po …“ z Valhally.
   String startPhrase(double traveled, DateTime now) {
+    _fresh = false;
     final t = _startPhrase(traveled, now);
     _lastText = t;
     _lastTextAt = now;

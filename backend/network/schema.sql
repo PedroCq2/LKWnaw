@@ -160,3 +160,91 @@ revoke all on function public.net_save_place(jsonb), public.net_report(jsonb),
   public.net_status(double precision, double precision, double precision, double precision) from public;
 grant execute on function public.net_save_place(jsonb), public.net_report(jsonb),
   public.net_status(double precision, double precision, double precision, double precision) to anon, authenticated;
+
+-- ---------------------------------------------------------------- rychlosti od řidičů
+
+-- Řidič nahlásil, co je na značce (pro kamiony), když mapa ukazuje jinou rychlost. Jen pro správce.
+create table if not exists public.speed_reports (
+  id         bigint generated always as identity primary key,
+  way_id     bigint not null check (way_id > 0),
+  lat        double precision not null check (lat between 34 and 72),
+  lon        double precision not null check (lon between -25 and 45),
+  shown      int check (shown between 0 and 250),
+  kmh        int not null check (kmh between 5 and 150),
+  device     text not null check (char_length(device) between 8 and 64),
+  created_at timestamptz not null default now()
+);
+create index if not exists speed_reports_way on public.speed_reports (way_id, created_at desc);
+create index if not exists speed_reports_device on public.speed_reports (device, created_at desc);
+alter table public.speed_reports enable row level security;
+revoke all on public.speed_reports from anon, authenticated;
+
+-- r = {way_id, lat, lon, shown, kmh, device}.
+create or replace function public.speed_report(r jsonb) returns void
+language plpgsql security definer set search_path = '' as $$
+declare
+  v_device text := r ->> 'device';
+begin
+  if (select count(*) from public.speed_reports x where x.device = v_device and x.created_at > now() - interval '1 day') >= 60 then
+    raise exception 'příliš mnoho hlášení' using errcode = 'PT429';
+  end if;
+  insert into public.speed_reports (way_id, lat, lon, shown, kmh, device)
+  values ((r ->> 'way_id')::bigint, (r ->> 'lat')::double precision, (r ->> 'lon')::double precision,
+          (r ->> 'shown')::int, (r ->> 'kmh')::int, v_device);
+end $$;
+
+-- Opravy pro cesty OSM: hodnota, kterou za rok shodně nahlásili aspoň dva různí řidiči
+-- (u každého řidiče jeho poslední hlášení).
+create or replace function public.speed_fixes(ids bigint[])
+returns table (way_id bigint, kmh int)
+language sql stable security definer set search_path = '' as $$
+  with latest as (
+    select distinct on (x.way_id, x.device) x.way_id, x.device, x.kmh
+    from public.speed_reports x
+    where x.way_id = any (ids[1:5000]) and x.created_at > now() - interval '365 days'
+    order by x.way_id, x.device, x.created_at desc
+  ), votes as (
+    select l.way_id, l.kmh, count(*) as n from latest l group by l.way_id, l.kmh
+  )
+  select distinct on (v.way_id) v.way_id, v.kmh::int
+  from votes v
+  where v.n >= 2
+  order by v.way_id, v.n desc, v.kmh;
+$$;
+
+-- ---------------------------------------------------------------- zprávy z aplikace
+
+-- Chyba / vylepšení / nová funkce (zatřesení telefonem) se systémovými informacemi. Jen pro správce
+-- (Supabase → Table Editor → app_feedback; status: new / seen / done / rejected).
+create table if not exists public.app_feedback (
+  id          bigint generated always as identity primary key,
+  kind        text not null check (kind in ('bug', 'improvement', 'feature')),
+  message     text not null check (char_length(message) between 1 and 4000),
+  info        jsonb check (info is null or pg_column_size(info) <= 32768),
+  app_version text check (char_length(app_version) <= 40),
+  device      text not null check (char_length(device) between 8 and 64),
+  status      text not null default 'new' check (status in ('new', 'seen', 'done', 'rejected')),
+  created_at  timestamptz not null default now()
+);
+create index if not exists app_feedback_status on public.app_feedback (status, created_at desc);
+alter table public.app_feedback enable row level security;
+revoke all on public.app_feedback from anon, authenticated;
+
+-- f = {kind, message, info{}, app_version, device}.
+create or replace function public.send_feedback(f jsonb) returns void
+language plpgsql security definer set search_path = '' as $$
+declare
+  v_device text := f ->> 'device';
+begin
+  if (select count(*) from public.app_feedback x where x.device = v_device and x.created_at > now() - interval '1 day') >= 30 then
+    raise exception 'příliš mnoho zpráv' using errcode = 'PT429';
+  end if;
+  insert into public.app_feedback (kind, message, info, app_version, device)
+  values (f ->> 'kind', left(trim(f ->> 'message'), 4000),
+          case when jsonb_typeof(f -> 'info') = 'object' then f -> 'info' end,
+          left(f ->> 'app_version', 40), v_device);
+end $$;
+
+revoke all on function public.speed_report(jsonb), public.speed_fixes(bigint[]), public.send_feedback(jsonb) from public;
+grant execute on function public.speed_report(jsonb), public.speed_fixes(bigint[]), public.send_feedback(jsonb)
+  to anon, authenticated;

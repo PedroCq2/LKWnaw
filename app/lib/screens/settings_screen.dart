@@ -20,7 +20,9 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   late final _url = TextEditingController(text: widget.settings.valhallaUrl);
-  late bool _voice = widget.settings.voice;
+  late VoiceMode _voiceMode = widget.settings.voiceMode;
+  late bool _verbose = widget.settings.voiceVerbose;
+  late bool _shake = widget.settings.shakeReport;
   late String? _voiceName = widget.settings.voiceName;
   late double _rate = widget.settings.speechRate;
   List<Map<String, String>> _voices = [];
@@ -55,7 +57,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _save() async {
     widget.settings
       ..valhallaUrl = _url.text.trim().isEmpty ? defaultValhallaUrl : _url.text.trim()
-      ..voice = _voice
+      ..voiceMode = _voiceMode
+      ..voiceVerbose = _verbose
+      ..shakeReport = _shake
       ..voiceName = _voiceName
       ..speechRate = _rate
       ..simulate = _simulate
@@ -109,12 +113,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onChanged: (v) => setState(() => _speedSound = v),
             ),
             _head('HLAS'),
-            SwitchListTile(
+            ListTile(
               title: const Text('Hlasové pokyny'),
-              value: _voice,
-              onChanged: (v) => setState(() => _voice = v),
+              subtitle: const Text('Jen upozornění = rychlost, radary a omezení, bez navigačních pokynů'),
             ),
-            if (_voice) ...[
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: SegmentedButton<VoiceMode>(
+                segments: [for (final m in VoiceMode.values) ButtonSegment(value: m, label: Text(m.label))],
+                selected: {_voiceMode},
+                onSelectionChanged: (s) => setState(() => _voiceMode = s.first),
+              ),
+            ),
+            if (_voiceMode == VoiceMode.all)
+              SwitchListTile(
+                title: const Text('Podrobný odpočet'),
+                subtitle: const Text('Za 1 km, za 500 m, za 200 m a v místě – jinak jednou předem a v místě'),
+                value: _verbose,
+                onChanged: (v) => setState(() => _verbose = v),
+              ),
+            if (_voiceMode != VoiceMode.off) ...[
               ListTile(
                 title: const Text('Hlas'),
                 subtitle: _voices.isEmpty
@@ -204,6 +222,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
               },
             ),
             _head('HLÁŠENÍ'),
+            SwitchListTile(
+              title: const Text('Zatřesením nahlásit chybu nebo nápad'),
+              subtitle: const Text('Zatřeste telefonem (jen když kamion stojí) – otevře se okno pro zprávu'),
+              value: _shake,
+              onChanged: (v) => setState(() => _shake = v),
+            ),
             FutureBuilder<List<Map<String, dynamic>>>(
               future: ProblemReports.load(),
               builder: (ctx, snap) {
