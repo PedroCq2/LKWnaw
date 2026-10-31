@@ -9,11 +9,13 @@ import 'package:camera/camera.dart' show CameraPreview;
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:maplibre_gl/maplibre_gl.dart' as ml;
+import 'package:sensors_plus/sensors_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../models/route.dart';
+import '../models/truck_profile.dart';
 import '../navigation/nav_engine.dart';
 import '../navigation/simulator.dart';
 import '../navigation/voice_guide.dart';
@@ -27,7 +29,9 @@ import '../services/voice_commands.dart';
 import '../services/offline_search.dart';
 import '../services/ramp_finder.dart';
 import '../services/sign_camera.dart';
+import '../services/shake.dart';
 import '../services/sign_parse.dart';
+import '../services/speed_fixes.dart';
 import 'scan_screen.dart';
 import '../services/pip.dart';
 import '../services/offline_maps.dart';
@@ -39,6 +43,7 @@ import '../services/voice.dart';
 import '../services/valhalla.dart';
 import '../theme.dart';
 import '../widgets/nav_widgets.dart';
+import 'feedback_screen.dart';
 import 'net_place_screen.dart';
 import 'planner_screen.dart';
 import 'profile_screen.dart';
@@ -144,6 +149,15 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   LatLng? _missingPrompt; // stojím dlouho na místě, které v síti není
   final Map<String, DateTime> _asked = {}; // kdy jsme se u místa naposledy ptali
   List<LatLng> _declined = []; // „tady parkoviště není“ – už se neptat
+  // Sjetí z trasy a dál je omezení: řidič zvolil „Pokračovat“ → až za omezení trasa bez hmotnosti.
+  LatLng? _passRestriction;
+  double _passMin = double.infinity;
+  final List<LatLng> _askedTurnBack = []; // omezení, u kterých už se ptalo (neptat znovu)
+  bool _turnBackBusy = false;
+  // Zatřesení telefonem → zpráva o chybě / nápad.
+  StreamSubscription<UserAccelerometerEvent>? _shakeSub;
+  final _shake = ShakeCounter();
+  bool _feedbackOpen = false;
 
   AppSettings get _settings => widget.settings;
 
@@ -183,6 +197,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     });
     _initTts();
     _initLocation();
+    _updateShake();
   }
 
   @override
@@ -194,6 +209,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     _sim?.stop();
     _searchDebounce?.cancel();
     _nightTimer?.cancel();
+    _shakeSub?.cancel();
     _anim.dispose();
     WakelockPlus.disable();
     super.dispose();
@@ -203,7 +219,27 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
 
   Future<void> _initTts() => Voice.instance.init(_settings);
 
-  Future<void> _say(String text) => Voice.instance.say(text);
+  /// [alert] = upozornění (rychlost, radar, omezení) – zazní i v režimu hlasu „Jen upozornění“.
+  Future<void> _say(String text, {bool alert = false}) => Voice.instance.say(text, alert: alert);
+
+  static IconData _voiceIcon(VoiceMode m) => switch (m) {
+    VoiceMode.all => Icons.volume_up,
+    VoiceMode.alerts => Icons.campaign,
+    VoiceMode.off => Icons.volume_off,
+  };
+
+  /// Klepnutí na tlačítko hlasu: Vše → Jen upozornění → Nic → Vše.
+  void _cycleVoice() {
+    final m = _settings.voiceMode.next;
+    setState(() => _settings.voiceMode = m);
+    _settings.save();
+    if (m == VoiceMode.off) Voice.instance.stop();
+    _toast(switch (m) {
+      VoiceMode.all => 'Hlas: vše (pokyny i upozornění)',
+      VoiceMode.alerts => 'Hlas: jen upozornění (rychlost, radary, omezení)',
+      VoiceMode.off => 'Hlas vypnutý',
+    });
+  }
 
   // ------------------------------------------------------------ poloha
 
@@ -344,6 +380,13 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       }
     }
     _watchParked(pos, speed, simulated);
+    // Projel omezení, přes které chtěl pokračovat → dál zase s plnou hmotností.
+    final pass = _passRestriction;
+    if (pass != null) {
+      final dp = const Distance()(pos, pass);
+      _passMin = math.min(_passMin, dp);
+      if (_passMin < 60 && dp > 150) _passRestriction = null;
+    }
     _animateTo();
   }
 
@@ -728,8 +771,9 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   /// Volá se s každým snímkem animace šipky.
   Future<void> _updateRouteHead(LatLng pos) async {
     final m = _map, r = _route;
-    if (m == null || r == null || !_styleReady || _lineBusy) return;
-    if (!_trimming) {
+    if (m == null || !_styleReady || _lineBusy) return;
+    // Konec navigace (trasa zrušena) nebo bez zkracování: kus trasy u šipky smazat.
+    if (r == null || !_trimming) {
       if (_lineRoute != null) {
         _lineRoute = null;
         _lineBusy = true;
@@ -786,6 +830,11 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     if (m == null || !_styleReady) return;
     try {
       final r = _route;
+      // Po ukončení navigace / jiné trase nesmí zůstat kus staré trasy u šipky.
+      if (r == null || _lineRoute != r) {
+        _lineRoute = null;
+        await m.setGeoJsonSource('routehead', _line(const []));
+      }
       List<double> xy(LatLng p) => _xy(p);
       await m.setGeoJsonSource('alts', {
         'type': 'FeatureCollection',
@@ -953,7 +1002,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       _overSince ??= now;
       if (_settings.speedSound && !_overWarned && now.difference(_overSince!) > const Duration(seconds: 2)) {
         _overWarned = true;
-        _say('Pozor, rychlost. Limit $limit.');
+        _say('Pozor, rychlost. Limit $limit.', alert: true);
       }
     } else {
       _overSince = null;
@@ -974,21 +1023,26 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       if (speak && _warnSpoken.add(w)) {
         final dist = VoiceGuide.spokenDistance(d);
         if (w.type == WarningType.speedCamera) {
-          _say('$dist radar.');
+          _say('$dist radar.', alert: true);
         } else if (w.type == WarningType.noOvertakingHgv) {
           _say(
             'Zákaz předjíždění nákladních vozidel${w.note != null ? ', ${w.note!.replaceAll('–', ' až ').replaceAll(' h', ' hodin')}' : ''}.',
+            alert: true,
           );
         } else {
           final unit = w.type == WarningType.weight || w.type == WarningType.axleLoad ? 'tun' : 'metru';
           final v = w.value!.toStringAsFixed(1).replaceAll('.', ',');
-          _say('Pozor! $dist ${w.spokenName} $v $unit. Vaše vozidlo limit překračuje.');
+          _say('Pozor! $dist ${w.spokenName} $v $unit. Vaše vozidlo limit překračuje.', alert: true);
         }
       }
     }
   }
 
   // ------------------------------------------------------------ trasa
+
+  /// Profil pro výpočet: po „Pokračovat“ přes hmotnostní zákaz až za něj bez hmotnosti (rozměry platí).
+  TruckProfile get _routeProfile =>
+      _passRestriction == null ? _settings.profile : (TruckProfile.fromJson(_settings.profile.toJson())..weight = 0);
 
   Future<void> _computeRoute({bool reroute = false}) async {
     // Naplánovaná trasa může začínat jinde než stojím (dokud se nevyjede).
@@ -1012,7 +1066,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     .route(
                       from: from,
                       to: to,
-                      profile: _settings.profile,
+                      profile: _routeProfile,
                       heading: heading,
                       delivery: _settings.delivery,
                       exclude: _excluded,
@@ -1038,13 +1092,17 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       _extrasLoaded.clear();
       if (!reroute) _dlProgress = null;
       await _selectRoute(0, fit: !reroute && !_navigating);
+      // Po sjetí vede trasa zpět: otočit rozumně a říct proč (omezení vpřed) – řidič rozhodne.
+      if (reroute && _navigating && from == _pos && heading != null) {
+        unawaited(_checkTurnBack(client, opts.first.route, from, to, heading));
+      }
       final miss = opts.first.route.unreachableM;
       if (miss > 60 && !reroute) {
         final msg =
             'Cíl je pro vaše vozidlo nedostupný (omezení výšky, šířky nebo délky na příjezdu). '
             'Navedu vás co nejblíž – zbývá ${formatDistance(miss)}.';
         _toast(msg);
-        if (_navigating) _say(msg);
+        if (_navigating) _say(msg, alert: true);
       }
     } on RoutingException catch (e) {
       if (e.network) {
@@ -1073,7 +1131,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       _sel = i;
       _route = r;
       _engine = NavEngine(r);
-      _guide = VoiceGuide(r, _engine!);
+      _guide = VoiceGuide(r, _engine!, verbose: _settings.voiceVerbose);
       _nav = _pos == null ? null : _engine!.update(_pos!);
       _arrivedSpoken = false;
       _warnSpoken.clear();
@@ -1087,7 +1145,14 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   Future<void> _loadRouteExtras(ValhallaClient client, TruckRoute r) async {
     try {
       await client.loadEdgeAttributes(r, maxSpeedKmh: _settings.profile.maxSpeed);
+      // Rychlosti, které řidič opravil, hned; kamionové limity z OSM a od ostatních řidičů po chvíli.
+      await SpeedFixes.instance.applyMine(r);
       if (mounted) setState(() {});
+      unawaited(
+        SpeedFixes.instance.apply(r).then((changed) {
+          if (changed && mounted && _route == r) setState(() {});
+        }),
+      );
       _loadServices(r);
       await enrichManeuvers(r);
       if (mounted) setState(() {});
@@ -1475,6 +1540,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     _clearTrip();
     _sim?.stop();
     _sim = null;
+    _passRestriction = null;
+    _askedTurnBack.clear();
     setState(() {
       _navigating = false;
       Pip.instance.setNavigating(false);
@@ -1498,6 +1565,8 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   void _setDestination(LatLng p, String name, {SavedPlace? saved, bool compute = true, bool ramp = true}) {
     FocusScope.of(context).unfocus();
     _destRamp = null;
+    _passRestriction = null;
+    _askedTurnBack.clear();
     _excluded.clear();
     _stops.clear();
     _planStart = null;
@@ -1987,11 +2056,11 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
           'asi ${formatDuration(Duration(seconds: sec.round()))}. Příjezd v ${eta.hour}:${eta.minute.toString().padLeft(2, '0')}.',
         );
       case VoiceAction.voiceOff:
-        setState(() => _settings.voice = false);
+        setState(() => _settings.voiceMode = VoiceMode.off);
         _settings.save();
         _toast('Hlas vypnutý.');
       case VoiceAction.voiceOn:
-        setState(() => _settings.voice = true);
+        setState(() => _settings.voiceMode = VoiceMode.all);
         _settings.save();
         await _answer('Hlas zapnutý.');
       case VoiceAction.reroute:
@@ -2215,12 +2284,19 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     padding: const EdgeInsets.symmetric(horizontal: 12),
                     child: Row(
                       children: [
-                        quick(_settings.voice ? Icons.volume_up : Icons.volume_off, 'Hlas', () {
-                          setState(() => _settings.voice = !_settings.voice);
-                          if (!_settings.voice) Voice.instance.stop();
-                          _settings.save();
-                          setSheet(() {});
-                        }, on: _settings.voice),
+                        quick(
+                          _voiceIcon(_settings.voiceMode),
+                          switch (_settings.voiceMode) {
+                            VoiceMode.all => 'Hlas',
+                            VoiceMode.alerts => 'Upozornění',
+                            VoiceMode.off => 'Ticho',
+                          },
+                          () {
+                            _cycleVoice();
+                            setSheet(() {});
+                          },
+                          on: _settings.voiceMode != VoiceMode.off,
+                        ),
                         quick(
                           _settings.view3d ? Icons.view_in_ar : Icons.map_outlined,
                           _settings.view3d ? '3D' : '2D',
@@ -2283,6 +2359,12 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                       subtitle: 'Uloží místo a trasu k rozboru',
                     ),
                   head('NASTAVENÍ'),
+                  item(
+                    Icons.feedback,
+                    'Nahlásit chybu nebo nápad',
+                    _openFeedback,
+                    subtitle: 'Chyba, vylepšení, nová funkce – nebo zatřeste telefonem',
+                  ),
                   item(
                     Icons.local_shipping,
                     'Vozidlo a trasa',
@@ -2360,6 +2442,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     if (over) {
       _say(
         'Pozor, kamera vidí značku ${r.kind.label.toLowerCase()} ${r.text.replaceAll(' m', ' metru').replaceAll(' t', ' tun')}.',
+        alert: true,
       );
     }
   }
@@ -2448,6 +2531,57 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   Future<void> _openSettings() async {
     await Navigator.push(context, MaterialPageRoute(builder: (_) => SettingsScreen(settings: _settings)));
     if (mounted) setState(() {});
+    _updateShake();
+  }
+
+  // ------------------------------------------------------------ zpráva o chybě / nápad
+
+  /// Senzor zrychlení jen když je zatřesení zapnuté (šetří baterii).
+  void _updateShake() {
+    if (kIsWeb || !_settings.shakeReport) {
+      _shakeSub?.cancel();
+      _shakeSub = null;
+      return;
+    }
+    _shakeSub ??= userAccelerometerEventStream(samplingPeriod: SensorInterval.uiInterval).listen(
+      (e) {
+        if (_shake.add(e.x, e.y, e.z, DateTime.now())) _onShake();
+      },
+      onError: (_) {}, // telefon bez senzoru
+    );
+  }
+
+  /// Zatřesení: jen když kamion stojí (otřesy za jízdy) a nad mapou není jiné okno.
+  void _onShake() {
+    if (!mounted || _feedbackOpen || _speedKmh > 10 || Pip.instance.active.value) return;
+    if (ModalRoute.of(context)?.isCurrent != true) return;
+    _openFeedback();
+  }
+
+  Future<void> _openFeedback() async {
+    _feedbackOpen = true;
+    final r = _route, nav = _nav, p = _pos;
+    final state = <String, dynamic>{
+      if (p != null) 'position': [double.parse(p.latitude.toStringAsFixed(5)), double.parse(p.longitude.toStringAsFixed(5))],
+      'speedKmh': _speedKmh.round(),
+      'navigating': _navigating,
+      'destination': ?_destName,
+      if (_dest != null)
+        'destPos': [double.parse(_dest!.latitude.toStringAsFixed(5)), double.parse(_dest!.longitude.toStringAsFixed(5))],
+      if (r != null) 'routeKm': double.parse(r.lengthKm.toStringAsFixed(1)),
+      if (r != null && nav != null && nav.nextManeuverIndex >= 0)
+        'nextManeuver': r.maneuvers[nav.nextManeuverIndex].instruction,
+      if (r != null && nav != null) 'speedLimit': r.speedLimitAt(nav.segmentIndex),
+      'offline': _offline,
+    };
+    try {
+      await Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => FeedbackScreen(settings: _settings, state: state)),
+      );
+    } finally {
+      _feedbackOpen = false;
+    }
   }
 
   Future<void> _chooseLayer() async {
@@ -2692,6 +2826,206 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         },
       ),
     );
+  }
+
+  // ------------------------------------------------------------ sjetí z trasy kvůli omezení
+
+  /// Po sjetí z trasy vede nová trasa zpět? Otočení po hlavních silnicích (ne přes obytné ulice),
+  /// a když je důvodem omezení na silnici vpřed (např. 3,5 t), řekne to řidiči a nechá ho vybrat:
+  /// pokračovat (jeho rozhodnutí – povolení, dopravní obsluha), nebo se otočit.
+  /// Přes nízký most / úzký průjezd / nosnost mostu pokračovat nelze – jen upozorní.
+  Future<void> _checkTurnBack(ValhallaClient client, TruckRoute back, LatLng from, LatLng to, double heading) async {
+    if (_turnBackBusy || _passRestriction != null || !ValhallaClient.turnsBack(back, from)) return;
+    _turnBackBusy = true;
+    try {
+      final via = [for (final st in _stops) st.$1];
+      try {
+        final calm = await client
+            .route(
+              from: from,
+              to: to,
+              profile: _settings.profile,
+              heading: heading,
+              delivery: _settings.delivery,
+              exclude: _excluded,
+              via: via,
+              extra: ValhallaClient.calmTurn,
+            )
+            .timeout(const Duration(seconds: 25));
+        if (mounted && _route == back && calm.timeSec <= back.timeSec + 300) {
+          _options = [RouteOption('Trasa', calm)];
+          await _selectRoute(0);
+        }
+      } catch (_) {}
+      // Proč zpět? Trasa vpřed bez hmotnostních zákazů a omezení na ní (prvních 8 km).
+      final light = TruckProfile.fromJson(_settings.profile.toJson())..weight = 0;
+      final ahead = await client
+          .route(from: from, to: to, profile: light, heading: heading, exclude: _excluded, via: via)
+          .timeout(const Duration(seconds: 25));
+      if (ValhallaClient.turnsBack(ahead, from)) return; // vpřed nejde ani bez hmotnosti
+      await client.loadEdgeAttributes(ahead, maxSpeedKmh: _settings.profile.maxSpeed);
+      final warnings = await loadRouteWarnings(ahead, _settings.profile, maxMeters: 8000);
+      final w = warnings.where((x) => x.violates && x.atMeters < 8000).firstOrNull;
+      if (w == null || !mounted || !_navigating || _dest != to) return;
+      if (_askedTurnBack.any((p) => const Distance()(p, w.point) < 150)) return;
+      // Řidič mezitím odjel jinam → otázka už nedává smysl.
+      if (_pos != null && const Distance()(_pos!, from) > 1500) return;
+      _askedTurnBack.add(w.point);
+      // Zákaz (lze s povolením / jako dopravní obsluha) × fyzický limit (výška, šířka, nosnost mostu).
+      final legal = w.type == WarningType.weight && !w.onBridge;
+      final what = '${w.spokenName} ${w.label}${w.note != null ? ' (${w.note})' : ''}';
+      _say(
+        legal
+            ? 'Pozor, dál je $what. Proto vás vracím. Vyberte, jestli pokračovat, nebo se otočit.'
+            : 'Pozor, dál je $what. Tudy vaše vozidlo neprojede, otočte se.',
+        alert: true,
+      );
+      final go = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text(legal ? 'Dál je omezení ${w.label}' : 'Tudy neprojedete'),
+          content: Text(
+            'Za ${formatDistance(w.atMeters)}: $what. Proto vás navigace vrací.\n\n'
+            '${legal ? 'Máte povolení, nebo jedete do zóny jako dopravní obsluha? Rozhodněte sami.' : 'Vaše vozidlo tento limit překračuje.'}',
+            style: const TextStyle(fontSize: 17),
+          ),
+          actionsAlignment: MainAxisAlignment.spaceBetween,
+          actions: [
+            if (legal)
+              OutlinedButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Padding(padding: EdgeInsets.all(10), child: Text('Pokračovat')),
+              ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Padding(padding: EdgeInsets.all(10), child: Text('Otočit se')),
+            ),
+          ],
+        ),
+      );
+      if (go != true || !mounted || !_navigating || _dest != to) return;
+      _passRestriction = w.point;
+      _passMin = double.infinity;
+      _options = [RouteOption('Trasa', ahead)];
+      await _selectRoute(0);
+      _say('Pokračuji. Pozor na omezení.', alert: true);
+    } catch (_) {
+    } finally {
+      _turnBackBusy = false;
+    }
+  }
+
+  // ------------------------------------------------------------ rychlost
+
+  /// Klepnutí na rychlost: hranice pro upozornění a „na značce je jiná rychlost“ (oprava pro tuto
+  /// silnici – v telefonu hned, ostatním po ověření).
+  Future<void> _speedSheet() async {
+    final route = _route, at = _pos;
+    final seg = _nav?.segmentIndex ?? -1;
+    final shown = route?.speedLimitAt(seg);
+    final edge = route?.edges.where((e) => e.begin <= seg && seg < e.end && e.wayId != null).firstOrNull;
+    final maxV = _settings.profile.maxSpeed;
+    final pick = await showModalBottomSheet<int>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) {
+          Widget head(String t) => Padding(
+            padding: const EdgeInsets.fromLTRB(4, 16, 4, 8),
+            child: Text(t, style: const TextStyle(color: Lkw.muted, fontWeight: FontWeight.w800, letterSpacing: 1)),
+          );
+          return SafeArea(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    shown == null
+                        ? 'Limit tady mapa nezná'
+                        : 'Limit podle mapy: $shown km/h${maxV < shown ? ' (kamion nejvýš $maxV)' : ''}',
+                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
+                  ),
+                  head('UPOZORNIT PŘI PŘEKROČENÍ O'),
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      for (final t in const [0, 5, 10, 15, 20])
+                        ChoiceChip(
+                          label: Text('+$t km/h', style: const TextStyle(fontSize: 16)),
+                          selected: _settings.speedTolerance == t,
+                          selectedColor: Lkw.amber,
+                          labelStyle: TextStyle(color: _settings.speedTolerance == t ? Colors.black : Lkw.text),
+                          onSelected: (_) {
+                            setState(() => _settings.speedTolerance = t);
+                            _settings.save();
+                            setSheet(() {});
+                          },
+                        ),
+                    ],
+                  ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Hlasité varování „Pozor, rychlost“'),
+                    value: _settings.speedSound,
+                    onChanged: (v) {
+                      setState(() => _settings.speedSound = v);
+                      _settings.save();
+                      setSheet(() {});
+                    },
+                  ),
+                  if (edge != null && at != null) ...[
+                    head('NA ZNAČCE JE JINÁ RYCHLOST?'),
+                    GridView.count(
+                      crossAxisCount: 5,
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      mainAxisSpacing: 8,
+                      crossAxisSpacing: 8,
+                      children: [
+                        for (final v in const [30, 40, 50, 60, 70, 80, 90, 100, 110, 130])
+                          Material(
+                            color: Colors.white,
+                            shape: const CircleBorder(side: BorderSide(color: Color(0xFFD50000), width: 5)),
+                            child: InkWell(
+                              customBorder: const CircleBorder(),
+                              onTap: () => Navigator.pop(ctx, v),
+                              child: Center(
+                                child: Text(
+                                  '$v',
+                                  style: const TextStyle(
+                                    fontSize: 20,
+                                    fontWeight: FontWeight.w900,
+                                    color: Colors.black,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                    const Padding(
+                      padding: EdgeInsets.only(top: 8),
+                      child: Text(
+                        'Platí pro tuto silnici hned. Ostatním řidičům až po ověření (dva shodné hlasy).',
+                        style: TextStyle(color: Lkw.muted),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+    if (pick == null || route == null || edge == null || at == null) return;
+    await SpeedFixes.instance.report(wayId: edge.wayId!, at: at, shown: shown, kmh: pick);
+    await SpeedFixes.instance.applyMine(route);
+    if (!mounted) return;
+    setState(() {});
+    _toast('Díky! Tady teď platí $pick km/h${pick > maxV ? ' (kamion nejvýš $maxV)' : ''}.');
   }
 
   // ------------------------------------------------------------ síť parkovišť
@@ -3272,6 +3606,14 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     children: [
                       if (_nextService case (final svc, final ahead))
                         ServiceTile(service: svc, aheadM: ahead, onTap: () => _showService(svc)),
+                      // Hlas za jízdy jedním klepnutím: vše → jen upozornění → nic.
+                      if (_navigating)
+                        RoundButton(
+                          icon: _voiceIcon(_settings.voiceMode),
+                          tooltip: 'Hlas: ${_settings.voiceMode.label}',
+                          color: _settings.voiceMode == VoiceMode.all ? null : Lkw.amber,
+                          onPressed: _cycleVoice,
+                        ),
                       RoundButton(
                         icon: _listening ? Icons.mic : Icons.mic_none,
                         tooltip: 'Hlasový příkaz',
@@ -3315,10 +3657,14 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                   Positioned(
                     left: 12,
                     bottom: panelH + 16 + bottomPad,
-                    child: SpeedWidget(
-                      limit: limit,
-                      speedKmh: _speedKmh,
-                      tolerance: _settings.speedTolerance,
+                    // Klepnutí: hranice upozornění / nahlásit, co je na značce.
+                    child: GestureDetector(
+                      onTap: _speedSheet,
+                      child: SpeedWidget(
+                        limit: limit,
+                        speedKmh: _speedKmh,
+                        tolerance: _settings.speedTolerance,
+                      ),
                     ),
                   ),
                 if (_cam != null && !pip)

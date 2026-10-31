@@ -37,13 +37,24 @@ Flutter aplikace pro navigaci nákladních vozidel nad OpenStreetMap a routing e
   zeptá se „Je tu místo?“; po 10 min stání mimo známé parkoviště nabídne jeho přidání. Funguje
   bez internetu, se serverem sítě se sdílí mezi řidiči (viz níže).
 - **Objet toto místo** – dlouhé podržení na trase → trasa se přepočítá kolem.
+- **Sjetí z trasy kvůli omezení** – když nová trasa vrací zpět a důvodem je omezení na silnici vpřed
+  (např. 3,5 t), aplikace ho řekne a řidič zvolí **Pokračovat** (povolení, dopravní obsluha) nebo
+  **Otočit se**; otočení po hlavních silnicích, ne přes obytné ulice. Přes nízký most / úzký
+  průjezd pokračovat nelze.
+- **Rychlost** – klepnutí na kolečko: hranice upozornění (+0 až +20 km/h) a **„na značce je jiná
+  rychlost“** – platí pro tu silnici hned, ostatním po shodě dvou řidičů; kamionové limity
+  z OSM (`maxspeed:hgv`).
+- **Zpráva pro vývoj** – zatřesením telefonu (když kamion stojí) nebo z nabídky: chyba / vylepšení /
+  nová funkce + systémové informace (telefon, Android, verze, nastavení, poloha, trasa).
 - **Mapa offline** – stažení mapy podél trasy (MapLibre offline regiony, zoom 8–14).
 - **Klidné přepočítávání** – krátký výkyv GPS nespouští novou trasu; bez internetu vede dál
   po uložené trase a ukazuje stav.
 - **Plán trasy** – začátek (moje poloha / jiné místo), více zastávek (přeřazení tažením), cíl;
   uložené plány. Zastávku lze přidat i za jízdy z hledání parkovišť/pump.
 - **Obnovení navigace** po restartu aplikace.
-- **Hlas** – nejlepší český hlas v telefonu (volba + rychlost v Nastavení), navigační zvuk
+- **Hlas** – režim **Vše / Jen upozornění / Nic** (tlačítko na mapě za jízdy, nabídka, Nastavení);
+  u odbočky jedna hláška předem (dálnice 1 km, město 300 m) a pak v místě, podrobný odpočet
+  1 km / 500 m / 200 m volitelně. Nejlepší český hlas v telefonu (volba + rychlost v Nastavení), navigační zvuk
   ztlumí hudbu, hlášky se nepřekrývají; čísla silnic česky („dé čtyřicet šest“, „E čtyři sta
   dvacet dva“).
 - **Simulace jízdy** (Nastavení) – vyzkoušení navigace bez jízdy.
@@ -101,6 +112,8 @@ Jiný server:
 2. Spusťte `backend/network/schema.sql` (Supabase → SQL Editor). Vytvoří tabulky, oprávnění
    a funkce `net_save_place`, `net_report`, `net_status` – zápis jde jen přes ně (kontrola údajů,
    limity proti spamu, historie změn, místo se skryje po třech hlášeních „neexistuje“).
+   Stejně tak nahlášené rychlosti (`speed_report`, `speed_fixes`) a zprávy z aplikace
+   (`send_feedback` → tabulka `app_feedback`, čte jen správce v Supabase → Table Editor).
 3. V GitHubu nastavte proměnné repozitáře (*Settings → Secrets and variables → Actions →
    Variables*): `NET_URL` = `https://<projekt>.supabase.co/rest/v1`, `NET_KEY` = veřejný
    klíč (*publishable* / *anon*). Mají přednost před výchozím projektem.

@@ -128,7 +128,7 @@ Future<void> enrichManeuvers(TruckRoute route) async {
   final ids = <int>{
     for (final (a, b) in targets.values) ...[for (final e in a) ?e.wayId, ?b?.wayId],
   };
-  final tags = await _osmWayTags(ids.toList());
+  final tags = await osmWayTags(ids.toList());
 
   for (final entry in targets.entries) {
     final m = entry.key;
@@ -216,7 +216,7 @@ String? _activeDestinations(Map<String, String> t, LaneInfo? lanes) {
 }
 
 /// Tagy cest: z balíku dat v telefonu (okamžitě, bez internetu), jinak z oficiálního OSM API.
-Future<Map<int, Map<String, String>>> _osmWayTags(List<int> ids) async {
+Future<Map<int, Map<String, String>>> osmWayTags(List<int> ids) async {
   if (OfflineSearch.instance.hasLanes) return OfflineSearch.instance.wayTags(ids);
   final out = <int, Map<String, String>>{};
   for (var i = 0; i < ids.length; i += 100) {

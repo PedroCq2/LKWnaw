@@ -70,9 +70,12 @@ class Voice {
   /// Kdy naposledy zazněla hláška (navazující hlášky nechají předchozí doznít).
   DateTime get lastSpokenAt => _lastAt;
 
-  Future<void> say(String text, {bool force = false}) async {
-    final s = _settings;
-    if (text.isEmpty || (s != null && !s.voice && !force)) return;
+  /// [alert] = upozornění (rychlost, radar, omezení) – zazní i v režimu „Jen upozornění“.
+  /// [force] = vždy (odpověď na hlasový povel, zkouška hlasu).
+  Future<void> say(String text, {bool force = false, bool alert = false}) async {
+    final mode = _settings?.voiceMode ?? VoiceMode.all;
+    if (text.isEmpty) return;
+    if (!force && (mode == VoiceMode.off || (mode == VoiceMode.alerts && !alert))) return;
     final spoken = forSpeech(text);
     // Stejná hláška znovu do 8 s = zbytečné opakování.
     if (!force && spoken == _last && DateTime.now().difference(_lastAt) < const Duration(seconds: 8)) return;

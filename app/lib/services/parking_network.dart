@@ -431,9 +431,11 @@ class ParkingNetwork {
         final op = _queue.first;
         // Zápis jen přes funkce serveru (kontrola údajů, limity, historie) – ne přímo do tabulek.
         final place = op['t'] == 'place';
+        final rpc = op['rpc'] as String? ?? (place ? 'net_save_place' : 'net_report');
+        final arg = op['arg'] as String? ?? (place ? 'p' : 'r');
         final res = await _post(
-          Uri.parse('$url/rpc/${place ? 'net_save_place' : 'net_report'}'),
-          jsonEncode({place ? 'p' : 'r': op['row']}),
+          Uri.parse('$url/rpc/$rpc'),
+          jsonEncode({arg: op['row']}),
           _headers(),
         ).timeout(const Duration(seconds: 12));
         final c = res.statusCode;
@@ -449,6 +451,38 @@ class ParkingNetwork {
     } finally {
       _flushing = false;
     }
+  }
+
+  /// Další údaje pro server (nahlášená rychlost, zpráva o chybě…) – stejná fronta: bez signálu
+  /// počkají v telefonu. [rpc] = funkce serveru, [arg] = jméno jejího parametru.
+  Future<void> submit(String rpc, String arg, Map<String, dynamic> row) async {
+    await load();
+    _queue.add({
+      'rpc': rpc,
+      'arg': arg,
+      'row': {...row, 'device': _device},
+    });
+    await _save();
+    unawaited(flush());
+  }
+
+  /// Opravy rychlosti od řidičů (aspoň dva shodní) pro cesty OSM: way id → km/h.
+  Future<Map<int, int>> speedFixes(List<int> wayIds) async {
+    final out = <int, int>{};
+    if (!shared || wayIds.isEmpty) return out;
+    for (var i = 0; i < wayIds.length; i += 500) {
+      final chunk = wayIds.sublist(i, math.min(wayIds.length, i + 500));
+      final res = await _post(
+        Uri.parse('$url/rpc/speed_fixes'),
+        jsonEncode({'ids': chunk}),
+        _headers(),
+      ).timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) continue;
+      for (final r in jsonDecode(utf8.decode(res.bodyBytes)) as List) {
+        out[(r['way_id'] as num).toInt()] = (r['kmh'] as num).toInt();
+      }
+    }
+    return out;
   }
 
   /// Stáhne místa a obsazenost v oblasti ze serveru (nejvýš jednou za minutu pro stejnou oblast).

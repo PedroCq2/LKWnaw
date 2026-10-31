@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:truck_nav/models/route.dart';
 import 'package:truck_nav/services/valhalla.dart';
 
 /// Google polyline s přesností 1e6 (formát Valhally).
@@ -98,5 +99,41 @@ void main() {
       entryOf: (_) async => entry,
     );
     expect(r, isNull);
+  });
+
+  group('sjetí z trasy: vede nová trasa zpět?', () {
+    const start = LatLng(50.0000, 14.4000);
+    TruckRoute line(List<LatLng> pts, {int type = 1}) => TruckRoute(
+      shape: pts,
+      maneuvers: [
+        Maneuver(type: type, instruction: '', streetNames: const [], beginShapeIndex: 1, endShapeIndex: 2, lengthKm: 0),
+      ],
+      lengthKm: 1,
+      timeSec: 60,
+      hasToll: false,
+      hasHighway: false,
+    );
+
+    test('rovně dál: ne', () {
+      final r = line([start, const LatLng(50.003, 14.4), const LatLng(50.01, 14.4), const LatLng(50.02, 14.4)]);
+      expect(ValhallaClient.turnsBack(r, start), isFalse);
+    });
+
+    test('smyčka obytnými ulicemi zpět kolem místa sjetí: ano', () {
+      final r = line([
+        start,
+        const LatLng(50.003, 14.4), // 330 m vpřed
+        const LatLng(50.003, 14.404), // boční ulicí
+        const LatLng(50.0001, 14.404),
+        const LatLng(50.0002, 14.4001), // zpět kolem místa sjetí
+        const LatLng(49.99, 14.4),
+      ]);
+      expect(ValhallaClient.turnsBack(r, start), isTrue);
+    });
+
+    test('pokyn „otočte se“: ano', () {
+      final r = line([start, const LatLng(50.002, 14.4), const LatLng(49.99, 14.4)], type: 12);
+      expect(ValhallaClient.turnsBack(r, start), isTrue);
+    });
   });
 }

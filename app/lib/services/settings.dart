@@ -6,10 +6,26 @@ import 'sun.dart';
 
 const defaultValhallaUrl = 'https://valhalla1.openstreetmap.de';
 
+/// Hlas: vše (pokyny i upozornění) / jen upozornění (rychlost, radar, omezení) / nic.
+enum VoiceMode { all, alerts, off }
+
+extension VoiceModeInfo on VoiceMode {
+  String get label => switch (this) {
+    VoiceMode.all => 'Vše',
+    VoiceMode.alerts => 'Jen upozornění',
+    VoiceMode.off => 'Nic',
+  };
+
+  /// Další režim po klepnutí na tlačítko hlasu.
+  VoiceMode get next => VoiceMode.values[(index + 1) % VoiceMode.values.length];
+}
+
 class AppSettings {
   TruckProfile profile;
   String valhallaUrl;
-  bool voice;
+  VoiceMode voiceMode;
+  bool voiceVerbose; // podrobný odpočet (1 km, 500 m, 200 m) místo jedné hlášky předem
+  bool shakeReport; // zatřesením telefonu nahlásit chybu / nápad
   bool simulate; // demo: jízda po trase bez GPS
   int mapStyle; // 0 = auto, 1 = den, 2 = noc
   bool view3d;
@@ -25,7 +41,9 @@ class AppSettings {
   AppSettings({
     required this.profile,
     required this.valhallaUrl,
-    required this.voice,
+    this.voiceMode = VoiceMode.all,
+    this.voiceVerbose = false,
+    this.shakeReport = true,
     this.simulate = false,
     this.mapStyle = 0,
     this.view3d = true,
@@ -62,7 +80,10 @@ class AppSettings {
     return AppSettings(
       profile: profile,
       valhallaUrl: p.getString('valhallaUrl') ?? defaultValhallaUrl,
-      voice: p.getBool('voice') ?? true,
+      // Dřív jen zapnuto / vypnuto.
+      voiceMode: VoiceMode.values[(p.getInt('voiceMode') ?? ((p.getBool('voice') ?? true) ? 0 : 2)).clamp(0, 2)],
+      voiceVerbose: p.getBool('voiceVerbose') ?? false,
+      shakeReport: p.getBool('shakeReport') ?? true,
       simulate: p.getBool('simulate') ?? false,
       mapStyle: p.getInt('mapStyle') ?? 0,
       view3d: p.getBool('view3d') ?? true,
@@ -81,7 +102,9 @@ class AppSettings {
     final p = await SharedPreferences.getInstance();
     await p.setString('profile', profile.encode());
     await p.setString('valhallaUrl', valhallaUrl);
-    await p.setBool('voice', voice);
+    await p.setInt('voiceMode', voiceMode.index);
+    await p.setBool('voiceVerbose', voiceVerbose);
+    await p.setBool('shakeReport', shakeReport);
     await p.setBool('simulate', simulate);
     await p.setInt('mapStyle', mapStyle);
     await p.setBool('view3d', view3d);

@@ -83,6 +83,15 @@ void main() {
       }
       expect(d.said.where((s) => s.$2.contains('Opusťte kruhový objezd')), isEmpty);
       expect(d.said.last.$2, startsWith('Cíl je'));
+      // Bez podrobného odpočtu: u každé odbočky jen jedno „Za …“ předem, pak už pokyn v místě.
+      String what(String t) =>
+          t.replaceFirst(RegExp(r'^Za (kilometr|[\d,]+ (metrů|kilometry|kilometrů|kilometru)) '), '');
+      for (var i = 1; i < d.said.length; i++) {
+        final a = d.said[i - 1].$2, b = d.said[i].$2;
+        if (a.startsWith('Za ') && b.startsWith('Za ')) {
+          expect(what(b), isNot(what(a)), reason: 'dvakrát odpočet k téže odbočce: „$a“ / „$b“');
+        }
+      }
     });
   }
 
