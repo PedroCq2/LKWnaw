@@ -30,6 +30,12 @@ Flutter aplikace pro navigaci nákladních vozidel nad OpenStreetMap a routing e
   na mapě) + poznámka („Příjezd zezadu, vrátnice u rampy 12“), přečte se před cílem.
 - **POI podél trasy** – truckparky/pumpy/servisy seřazené podle dojezdu (km, min, odbočka
   od trasy) s filtry WC, sprchy, jídlo, zdarma, hlídané.
+- **Vlastní síť parkovišť** – truckparky, odpočívky a místa k přespání z OSM, které řidiči
+  doplňují: **Přidat parkoviště** (nabídka, dlouhé podržení na mapě), oprava údajů (počet míst,
+  poplatek, WC, sprchy, hlídané…), **obsazenost Volno / Omezeno / Plno** (platí 3 h, barva bodu
+  v mapě, filtr „není plno“) a „místo už neexistuje“. Když kamion stojí 3 min na parkovišti,
+  zeptá se „Je tu místo?“; po 10 min stání mimo známé parkoviště nabídne jeho přidání. Funguje
+  bez internetu, se serverem sítě se sdílí mezi řidiči (viz níže).
 - **Objet toto místo** – dlouhé podržení na trase → trasa se přepočítá kolem.
 - **Mapa offline** – stažení mapy podél trasy (MapLibre offline regiony, zoom 8–14).
 - **Klidné přepočítávání** – krátký výkyv GPS nespouští novou trasu; bez internetu vede dál
@@ -82,6 +88,20 @@ docker compose up -d      # stáhne OSM data ČR + DE a postaví dlaždice
 
 a v aplikaci (ikona kamionu → *Valhalla server*) zadejte `http://<IP-serveru>:8002`.
 
+## Server sítě parkovišť
+
+Bez serveru se přidaná místa a hlášení ukládají jen v telefonu (a čekají na odeslání).
+Sdílení mezi řidiči:
+
+1. Založte projekt v [Supabase](https://supabase.com) (stačí bezplatný) nebo vlastní PostgreSQL
+   s [PostgREST](https://postgrest.org).
+2. Spusťte `backend/network/schema.sql` (Supabase → SQL Editor). Vytvoří tabulky, oprávnění
+   a funkce `net_save_place`, `net_report`, `net_status` – zápis jde jen přes ně (kontrola údajů,
+   limity proti spamu, historie změn, místo se skryje po třech hlášeních „neexistuje“).
+3. V GitHubu nastavte proměnné repozitáře (*Settings → Secrets and variables → Actions →
+   Variables*): `NET_URL` = `https://<projekt>.supabase.co/rest/v1`, `NET_KEY` = veřejný
+   klíč (*publishable* / *anon*). Další sestavení APK už síť sdílí.
+
 ## Struktura
 
 | Soubor | Účel |
@@ -90,6 +110,9 @@ a v aplikaci (ikona kamionu → *Valhalla server*) zadejte `http://<IP-serveru>:
 | `app/lib/navigation/nav_engine.dart` | map matching, postup po trase, detekce sjetí |
 | `app/lib/services/geocoding.dart` | vyhledávání adres, POI pro kamiony |
 | `app/lib/services/restrictions.dart` | omezení (výška/hmotnost…) a radary podél trasy |
+| `app/lib/services/parking_network.dart` | síť parkovišť: místa od řidičů, obsazenost, sdílení se serverem |
+| `app/lib/screens/net_place_screen.dart` | přidání / úprava parkoviště |
+| `backend/network/schema.sql` | server sítě parkovišť (Supabase / PostgREST) |
 | `app/lib/navigation/simulator.dart` | simulace jízdy |
 | `app/lib/screens/map_screen.dart` | mapa, navigační UI, hlasové pokyny |
 | `app/lib/screens/profile_screen.dart` | profil vozidla a nastavení |

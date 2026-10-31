@@ -7,6 +7,7 @@ import 'package:latlong2/latlong.dart';
 import '../models/route.dart';
 import 'http_headers.dart';
 import 'offline_search.dart';
+import 'parking_network.dart';
 import 'restrictions.dart';
 
 class Place {
@@ -15,7 +16,15 @@ class Place {
   final String? kind;
   final String? address;
   final List<String> features; // vybavenost (WC, sprchy, …)
-  Place(this.name, this.point, {this.kind, this.address, this.features = const []});
+  final String? id; // `osm:n123` (OpenStreetMap) / `u:…` (místo přidané řidičem do sítě parkovišť)
+  Place(this.name, this.point, {this.kind, this.address, this.features = const [], this.id});
+}
+
+/// Id místa z OSM: `osm:n123`, `osm:w456`, `osm:r789`.
+String? osmPlaceId(Object? type, Object? id) {
+  final t = '${type ?? ''}'.toLowerCase();
+  if (t.isEmpty || id == null) return null;
+  return 'osm:${t[0]}$id';
 }
 
 /// Chyba hledání srozumitelná pro řidiče (bez technických detailů).
@@ -331,6 +340,45 @@ Future<List<Place>> _findPois(
   List<(double, double, double, double)> boxes, {
   double? maxM,
 }) async {
+  if (kind != PoiKind.parking) return _mapPois(kind, a, photonCenters, photonRadiusKm, p, boxes, maxM: maxM);
+  // Parkoviště: mapa + vlastní síť (místa a údaje od řidičů, obsazenost).
+  final net = ParkingNetwork.instance;
+  await net.load();
+  final all = (
+    boxes.map((b) => b.$1).reduce(math.min),
+    boxes.map((b) => b.$2).reduce(math.max),
+    boxes.map((b) => b.$3).reduce(math.min),
+    boxes.map((b) => b.$4).reduce(math.max),
+  );
+  final pulled = net.pull(all).catchError((_) {});
+  List<Place> osm;
+  try {
+    osm = await _mapPois(kind, a, photonCenters, photonRadiusKm, p, boxes, maxM: maxM);
+  } catch (_) {
+    // Bez mapových dat aspoň místa ze sítě v telefonu.
+    if (!net.places.values.any((e) => boxes.any((b) => _inBox(e.point, b)))) rethrow;
+    osm = [];
+  }
+  await pulled.timeout(const Duration(seconds: 5), onTimeout: () {});
+  const dist = Distance();
+  final out = net.merge(osm, (q) => boxes.any((b) => _inBox(q, b)) && (maxM == null || dist(p, q) <= maxM));
+  out.sort((x, y) => dist(p, x.point).compareTo(dist(p, y.point)));
+  return out;
+}
+
+bool _inBox(LatLng q, (double, double, double, double) b) =>
+    q.latitude >= b.$1 && q.latitude <= b.$2 && q.longitude >= b.$3 && q.longitude <= b.$4;
+
+/// POI z OpenStreetMap: z dat v telefonu, jinak Overpass + Photon.
+Future<List<Place>> _mapPois(
+  PoiKind kind,
+  String a,
+  List<LatLng> photonCenters,
+  int photonRadiusKm,
+  LatLng p,
+  List<(double, double, double, double)> boxes, {
+  double? maxM,
+}) async {
   final off = OfflineSearch.instance;
   if (off.hasOsm) return _localPois(kind, boxes, p, maxM);
   final filters = switch (kind) {
@@ -421,7 +469,15 @@ List<Place> _placesOf(List<dynamic> els) {
     final t = Map<String, dynamic>.from((e['tags'] as Map?) ?? const {});
     final type = _poiType(t);
     final name = (t['name'] ?? t['operator'] ?? t['brand']) as String? ?? type;
-    places.add(Place(name, LatLng(lat.toDouble(), lon.toDouble()), kind: type, features: _features(t)));
+    places.add(
+      Place(
+        name,
+        LatLng(lat.toDouble(), lon.toDouble()),
+        kind: type,
+        features: _features(t),
+        id: osmPlaceId(e['type'], e['id']),
+      ),
+    );
   }
   return places;
 }
@@ -473,6 +529,7 @@ Future<List<Place>> _photonNearby(LatLng p, PoiKind kind, int radiusKm) async {
         LatLng(c[1].toDouble(), c[0].toDouble()),
         kind: type,
         address: pr['city'] as String?,
+        id: osmPlaceId(pr['osm_type'], pr['osm_id']),
       ),
     );
   }
