@@ -154,6 +154,12 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   double _passMin = double.infinity;
   final List<LatLng> _askedTurnBack = []; // omezení, u kterých už se ptalo (neptat znovu)
   bool _turnBackBusy = false;
+  // Jízda bez trasy: limit silnice, po které jede (přichycení posledních bodů GPS k mapě).
+  final List<LatLng> _trail = [];
+  ({int? wayId, int? limit, String? road})? _freeRoad;
+  LatLng? _freeRoadFrom;
+  DateTime _freeRoadAt = DateTime(2000);
+  bool _freeRoadBusy = false;
   // Zatřesení telefonem → zpráva o chybě / nápad.
   StreamSubscription<UserAccelerometerEvent>? _shakeSub;
   final _shake = ShakeCounter();
@@ -335,7 +341,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       if (_navigating) {
         _voiceGuidance(nav);
         _warningVoice(nav);
-        _speedWarning(nav, speed);
+        _speedWarning(_route?.speedLimitAt(nav.segmentIndex), speed);
         // Projetá zastávka: odebrat (při přepočtu se už nepoužije).
         for (final st in [..._stops]) {
           if (const Distance()(pos, st.$1) < 80) {
@@ -380,6 +386,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       }
     }
     _watchParked(pos, speed, simulated);
+    if (!_navigating) _watchFreeRoad(pos, speed);
     // Projel omezení, přes které chtěl pokračovat → dál zase s plnou hmotností.
     final pass = _passRestriction;
     if (pass != null) {
@@ -992,8 +999,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
   /// Při každém překročení hranice (limit + tolerance z Nastavení, výchozí +10 → 90 při 80) déle než 2 s
   /// zazní „Pozor, rychlost“. Znovu po zpomalení pod hranici (o 2 km/h, ať to při kolísání neblbne)
   /// a dalším překročení.
-  void _speedWarning(NavState nav, double speedKmh) {
-    final raw = _route?.speedLimitAt(nav.segmentIndex);
+  void _speedWarning(int? raw, double speedKmh) {
     if (raw == null) return;
     final limit = math.min(raw, _settings.profile.maxSpeed);
     final threshold = limit + _settings.speedTolerance;
@@ -1469,10 +1475,59 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
       await Future.delayed(const Duration(milliseconds: 500));
     }
     if (_stops.isNotEmpty) await _computeRoute();
-    if (_route != null && mounted) await _startNavigation();
+    if (_route != null && mounted) await _startNavigation(resumed: true);
   }
 
-  Future<void> _startNavigation() async {
+  /// Před jízdou: navigace je pomocník, za řízení odpovídá řidič. Jinak se za jízdy nic neomezuje
+  /// (telefon může ovládat spolujezdec).
+  Future<bool> _acceptDisclaimer() async {
+    if (_settings.disclaimerOk || kIsWeb) return true;
+    var never = false;
+    final ok = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: const Text('Před jízdou'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'LKWnav se snaží být co nejlepší pomocník k dojezdu do cíle. I tak:\n\n'
+                  '• Řiďte se vždy dopravními značkami a situací na silnici – mají přednost před navigací.\n'
+                  '• Mapa nemusí znát všechna omezení, uzavírky, rychlosti a nové silnice.\n'
+                  '• Telefon za jízdy neovládejte – nechte to spolujezdci, nebo zastavte.\n\n'
+                  'Za řízení a vozidlo odpovídá řidič.',
+                  style: TextStyle(fontSize: 16),
+                ),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: never,
+                  onChanged: (v) => setD(() => never = v ?? false),
+                  title: const Text('Rozumím – příště už nezobrazovat'),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Zpět')),
+            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Souhlasím, jedeme')),
+          ],
+        ),
+      ),
+    );
+    if (ok == true && never) {
+      _settings.disclaimerOk = true;
+      await _settings.save();
+    }
+    return ok == true;
+  }
+
+  Future<void> _startNavigation({bool resumed = false}) async {
+    if (!resumed && !await _acceptDisclaimer()) return;
+    if (!mounted) return;
     _approach = false;
     // Plán začínal jinde: jedeme odsud → přepočítat z aktuální polohy (zastávky zůstanou).
     if (_planStart != null) {
@@ -2551,9 +2606,9 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     );
   }
 
-  /// Zatřesení: jen když kamion stojí (otřesy za jízdy) a nad mapou není jiné okno.
+  /// Zatřesení (i za jízdy – telefon může mít v ruce spolujezdec), jen když nad mapou není jiné okno.
   void _onShake() {
-    if (!mounted || _feedbackOpen || _speedKmh > 10 || Pip.instance.active.value) return;
+    if (!mounted || _feedbackOpen || Pip.instance.active.value) return;
     if (ModalRoute.of(context)?.isCurrent != true) return;
     _openFeedback();
   }
@@ -2917,13 +2972,46 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
 
   // ------------------------------------------------------------ rychlost
 
+  /// Bez trasy: posledních pár bodů GPS → silnice a její limit. Nejvýš jednou za 10 s a po 150 m.
+  void _watchFreeRoad(LatLng pos, double speedKmh) {
+    const d = Distance();
+    if (_trail.isEmpty || d(_trail.last, pos) > 15) {
+      _trail.add(pos);
+      if (_trail.length > 8) _trail.removeAt(0);
+    }
+    _speedWarning(_freeRoad?.limit, speedKmh);
+    if (speedKmh < 5 || _freeRoadBusy || _trail.length < 3) return;
+    if (DateTime.now().difference(_freeRoadAt) < const Duration(seconds: 10)) return;
+    if (_freeRoadFrom != null && d(_freeRoadFrom!, pos) < 150) return;
+    _lookupFreeRoad(pos);
+  }
+
+  Future<void> _lookupFreeRoad(LatLng pos) async {
+    _freeRoadBusy = true;
+    _freeRoadAt = DateTime.now();
+    _freeRoadFrom = pos;
+    try {
+      final r = await ValhallaClient(
+        _settings.valhallaUrl,
+      ).currentRoad(List.of(_trail)).timeout(const Duration(seconds: 8));
+      final fix = r?.wayId == null ? null : await SpeedFixes.instance.forWay(r!.wayId!);
+      if (!mounted || _navigating) return;
+      setState(() => _freeRoad = r == null ? null : (wayId: r.wayId, limit: fix ?? r.limit, road: r.road));
+    } catch (_) {
+    } finally {
+      _freeRoadBusy = false;
+    }
+  }
+
   /// Klepnutí na rychlost: hranice pro upozornění a „na značce je jiná rychlost“ (oprava pro tuto
   /// silnici – v telefonu hned, ostatním po ověření).
   Future<void> _speedSheet() async {
-    final route = _route, at = _pos;
+    final route = _navigating ? _route : null, at = _pos;
     final seg = _nav?.segmentIndex ?? -1;
-    final shown = route?.speedLimitAt(seg);
+    final shown = route != null ? route.speedLimitAt(seg) : _freeRoad?.limit;
     final edge = route?.edges.where((e) => e.begin <= seg && seg < e.end && e.wayId != null).firstOrNull;
+    // Bez trasy: silnice zjištěná z GPS.
+    final wayId = edge?.wayId ?? (route == null ? _freeRoad?.wayId : null);
     final maxV = _settings.profile.maxSpeed;
     final pick = await showModalBottomSheet<int>(
       context: context,
@@ -2975,7 +3063,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                       setSheet(() {});
                     },
                   ),
-                  if (edge != null && at != null) ...[
+                  if (wayId != null && at != null) ...[
                     head('NA ZNAČCE JE JINÁ RYCHLOST?'),
                     GridView.count(
                       crossAxisCount: 5,
@@ -3020,11 +3108,14 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
         },
       ),
     );
-    if (pick == null || route == null || edge == null || at == null) return;
-    await SpeedFixes.instance.report(wayId: edge.wayId!, at: at, shown: shown, kmh: pick);
-    await SpeedFixes.instance.applyMine(route);
+    if (pick == null || wayId == null || at == null) return;
+    await SpeedFixes.instance.report(wayId: wayId, at: at, shown: shown, kmh: pick);
+    if (route != null) await SpeedFixes.instance.applyMine(route);
     if (!mounted) return;
-    setState(() {});
+    setState(() {
+      final f = _freeRoad;
+      if (route == null && f != null) _freeRoad = (wayId: f.wayId, limit: pick, road: f.road);
+    });
     _toast('Díky! Tady teď platí $pick km/h${pick > maxV ? ' (kamion nejvýš $maxV)' : ''}.');
   }
 
@@ -3051,6 +3142,79 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     onPressed: onTap,
     child: Text(o.label),
   );
+
+  /// Klepnutí na ikonu podkladové mapy (pumpa u dálnice, odpočívka, obchod…): co to je a navigace.
+  Future<void> _onMapClick(math.Point<double> pt, LatLng at) async {
+    final m = _map;
+    if (m == null || !_styleReady) return;
+    List features;
+    try {
+      features = await m.queryRenderedFeaturesInRect(
+        Rect.fromCenter(center: Offset(pt.x, pt.y), width: 48, height: 48),
+        const ['poi_r1', 'poi_r7', 'poi_r20', 'poi_transit'],
+        null,
+      );
+    } catch (_) {
+      return;
+    }
+    if (features.isEmpty || !mounted) return;
+    final f = Map<String, dynamic>.from(features.first as Map);
+    final props = Map<String, dynamic>.from((f['properties'] as Map?) ?? const {});
+    var p = at;
+    final g = f['geometry'] as Map?;
+    if (g?['type'] == 'Point') {
+      final c = (g!['coordinates'] as List).cast<num>();
+      p = LatLng(c[1].toDouble(), c[0].toDouble());
+    }
+    final cls = '${props['class'] ?? ''}';
+    final kind = switch (cls) {
+      'fuel' => 'Čerpací stanice',
+      'parking' => 'Parkoviště',
+      'restaurant' || 'fast_food' || 'cafe' => 'Občerstvení',
+      'shop' || 'grocery' || 'convenience' => 'Obchod',
+      'toilets' => 'WC',
+      'lodging' => 'Ubytování',
+      'bus' || 'rail' => 'Zastávka',
+      _ => 'Místo',
+    };
+    final name = '${props['name:cs'] ?? props['name'] ?? kind}';
+    if (cls == 'parking') {
+      await _showParkingCard(Place(name, p, kind: kind));
+      return;
+    }
+    final go = await showModalBottomSheet<bool>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                name,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                [kind, if (_pos != null) formatDistance(const Distance()(_pos!, p))].join(' · '),
+                style: const TextStyle(color: Lkw.muted),
+              ),
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                onPressed: () => Navigator.pop(ctx, true),
+                icon: const Icon(Icons.navigation),
+                label: Text(_dest == null ? 'Navigovat sem' : 'Zastávka nebo nový cíl'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (go == true && mounted) await _pickTarget(p, name);
+  }
 
   /// Klepnutí na bod v mapě: nejbližší místo z ukázaného seznamu.
   void _onFeatureTap(math.Point<double> _, ml.LatLng c, String id, String layer, ml.Annotation? ann) {
@@ -3491,7 +3655,10 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
     final route = _route;
     final nav = _nav;
     if (_styleNight != _night || _styleLayer != (_layerOverride ?? _settings.mapLayer)) _loadStyle();
-    final limitRaw = nav != null ? route?.speedLimitAt(nav.segmentIndex) : null;
+    // Limit i bez cíle: silnice zjištěná z GPS.
+    final limitRaw = _navigating
+        ? (nav != null ? route?.speedLimitAt(nav.segmentIndex) : null)
+        : (_freeDrive ? _freeRoad?.limit : null);
     final limit = limitRaw == null ? null : math.min(limitRaw, _settings.profile.maxSpeed);
     final bottomPad = MediaQuery.of(context).padding.bottom;
     final pip = Pip.instance.active.value;
@@ -3539,6 +3706,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                     logoEnabled: false,
                     webPreserveDrawingBuffer: true,
                     onMapLongClick: (_, p) => _onLongPress(LatLng(p.latitude, p.longitude)),
+                    onMapClick: (pt, p) => _onMapClick(pt, LatLng(p.latitude, p.longitude)),
                   ),
                 ),
               if (_fixedArrow)
@@ -3653,7 +3821,7 @@ class _MapScreenState extends State<MapScreen> with SingleTickerProviderStateMix
                       ),
                     ),
                   ),
-                if (_navigating && (limit != null || _speedKmh > 0))
+                if ((_navigating || _freeDrive) && (limit != null || _speedKmh > 0))
                   Positioned(
                     left: 12,
                     bottom: panelH + 16 + bottomPad,

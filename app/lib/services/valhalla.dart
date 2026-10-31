@@ -1026,6 +1026,33 @@ class ValhallaClient {
     return data;
   }
 
+  /// Silnice, po které právě jede (bez trasy): posledních pár bodů GPS přichycených k mapě.
+  /// Vrací cestu OSM a rychlostní limit poslední hrany (null = nejde přichytit / bez dat).
+  Future<({int? wayId, int? limit, String? road})?> currentRoad(List<LatLng> trace) async {
+    if (trace.length < 2) return null;
+    final data = await _call('trace_attributes', {
+      'shape': [
+        for (final p in trace) {'lat': p.latitude, 'lon': p.longitude},
+      ],
+      'costing': 'truck',
+      'shape_match': 'map_snap',
+      'filters': {
+        'attributes': ['edge.way_id', 'edge.speed_limit', 'edge.names'],
+        'action': 'include',
+      },
+    });
+    final edges = (data['edges'] as List?) ?? const [];
+    if (edges.isEmpty) return null;
+    final e = edges.last as Map;
+    final sl = e['speed_limit'];
+    final names = (e['names'] as List?) ?? const [];
+    return (
+      wayId: (e['way_id'] as num?)?.toInt(),
+      limit: sl is num && sl > 0 && sl < 200 ? sl.toInt() : null,
+      road: names.isEmpty ? null : '${names.first}',
+    );
+  }
+
   /// Doby jízdy kamionem mezi všemi body (s) – pro seřazení zastávek.
   Future<List<List<double>>> matrix(List<LatLng> pts, TruckProfile profile, {bool delivery = false}) async {
     final locs = [

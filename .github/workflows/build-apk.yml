@@ -1,11 +1,18 @@
 name: Build APK
 
+# APK jen jednou za změnu: po sloučení do hlavní větve, z tagu verze nebo ručně (Run workflow –
+# i pro jinou větev). Pull request jen rychlá kontrola (analyze + testy), bez APK.
 on:
   push:
-    branches: [main, "claude/**"]
+    branches: [main, claude/friendly-curie-fceifd]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+
+# Nový push na stejnou větev zruší starší rozběhnuté sestavení.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -27,7 +34,9 @@ jobs:
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test
+      # Dál už jen sestavení APK – u pull requestu stačí kontrola výše.
       - name: Podpisový klíč z tajných proměnných
+        if: github.event_name != 'pull_request'
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -42,11 +51,13 @@ jobs:
       # Server sítě parkovišť: projekt Supabase „LKWnav“ (backend/network/schema.sql). Veřejný klíč patří
       # do aplikace (data chrání pravidla serveru); jiný server = proměnné repozitáře NET_URL / NET_KEY.
       # Jedno APK jen pro 64bitové ARM telefony (Samsung S24 Ultra a všechny novější Androidy).
-      - run: >-
+      - if: github.event_name != 'pull_request'
+        run: >-
           flutter build apk --release --target-platform android-arm64
           --dart-define=NET_URL=${{ vars.NET_URL || 'https://mpaiwlcjupqnipgrxetw.supabase.co/rest/v1' }}
           --dart-define=NET_KEY=${{ vars.NET_KEY || 'sb_publishable_NfwvhvQeN2wh-LQe-OzEiQ_UgWxBRlc' }}
-      - uses: actions/upload-artifact@v4
+      - if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
         with:
           name: lkwnav-apk
           path: app/build/app/outputs/flutter-apk/app-release.apk

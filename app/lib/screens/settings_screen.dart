@@ -224,7 +224,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             _head('HLÁŠENÍ'),
             SwitchListTile(
               title: const Text('Zatřesením nahlásit chybu nebo nápad'),
-              subtitle: const Text('Zatřeste telefonem (jen když kamion stojí) – otevře se okno pro zprávu'),
+              subtitle: const Text('Zatřeste telefonem – otevře se okno pro zprávu'),
               value: _shake,
               onChanged: (v) => setState(() => _shake = v),
             ),
