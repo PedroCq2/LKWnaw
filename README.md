@@ -90,8 +90,11 @@ a v aplikaci (ikona kamionu → *Valhalla server*) zadejte `http://<IP-serveru>:
 
 ## Server sítě parkovišť
 
-Bez serveru se přidaná místa a hlášení ukládají jen v telefonu (a čekají na odeslání).
-Sdílení mezi řidiči:
+APK z GitHub Actions se připojuje k projektu Supabase **LKWnav** (Frankfurt), adresa a veřejný
+klíč jsou ve `.github/workflows/build-apk.yml`. Při vlastním sestavení bez `--dart-define` se
+přidaná místa a hlášení ukládají jen v telefonu (a čekají na odeslání).
+
+Jiný server:
 
 1. Založte projekt v [Supabase](https://supabase.com) (stačí bezplatný) nebo vlastní PostgreSQL
    s [PostgREST](https://postgrest.org).
@@ -100,7 +103,7 @@ Sdílení mezi řidiči:
    limity proti spamu, historie změn, místo se skryje po třech hlášeních „neexistuje“).
 3. V GitHubu nastavte proměnné repozitáře (*Settings → Secrets and variables → Actions →
    Variables*): `NET_URL` = `https://<projekt>.supabase.co/rest/v1`, `NET_KEY` = veřejný
-   klíč (*publishable* / *anon*). Další sestavení APK už síť sdílí.
+   klíč (*publishable* / *anon*). Mají přednost před výchozím projektem.
 
 ## Struktura
 

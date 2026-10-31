@@ -39,12 +39,12 @@ jobs:
           else
             echo "::warning::Chybí KEYSTORE_BASE64 – APK bude podepsané zkušebním klíčem"
           fi
-      # Server sítě parkovišť (Settings → Variables): NET_URL = https://<projekt>.supabase.co/rest/v1,
-      # NET_KEY = veřejný (publishable / anon) klíč. Bez nich síť funguje jen v telefonu.
+      # Server sítě parkovišť: projekt Supabase „LKWnav“ (backend/network/schema.sql). Veřejný klíč patří
+      # do aplikace (data chrání pravidla serveru); jiný server = proměnné repozitáře NET_URL / NET_KEY.
       - run: >-
           flutter build apk --release --split-per-abi
-          --dart-define=NET_URL=${{ vars.NET_URL }}
-          --dart-define=NET_KEY=${{ vars.NET_KEY }}
+          --dart-define=NET_URL=${{ vars.NET_URL || 'https://mpaiwlcjupqnipgrxetw.supabase.co/rest/v1' }}
+          --dart-define=NET_KEY=${{ vars.NET_KEY || 'sb_publishable_NfwvhvQeN2wh-LQe-OzEiQ_UgWxBRlc' }}
       - uses: actions/upload-artifact@v4
         with:
           name: lkwnav-apk
